@@ -412,6 +412,15 @@ make pgindent              # core code style
 make bench-smoke           # tiny run of the benchmark harness
 ```
 
+Against an assert-enabled server (PostgreSQL 18 built from source with
+`--enable-cassert`; also a CI job), failing on any `TRAP:` or crashed backend
+in the server log:
+
+```bash
+docker build -f docker/cassert.Dockerfile -t leapfrog-cassert .
+docker run --rm leapfrog-cassert
+```
+
 The regression tests need a superuser (as `pg_regress` normally runs):
 `leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` changes the
 page cost of `pg_default` for one check and resets it.

@@ -64,6 +64,10 @@ versions: [SemVer](https://semver.org/).
   `INSERT`, `VACUUM` with an open cursor) and `leapfrog_overflow_epq`
   (EvalPlanQual through the overflow fallback).
 
+- `docker/cassert.Dockerfile` and a CI job: PostgreSQL 18 built from source
+  with `--enable-cassert`, both suites run against it; the job fails on an
+  assertion failure or a crashed backend in the server log.
+
 ### Fixed
 
 - `VACUUM` waited for an open cursor whose node had finished its merge: the

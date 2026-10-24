@@ -113,6 +113,16 @@ jobs:
           cat results/*.diff 2>/dev/null || true
           cat tests/isolation/results/*.diff 2>/dev/null || true
 
+  cassert:
+    name: PostgreSQL 18 with --enable-cassert
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build PostgreSQL from source with assertions and the extension
+        run: docker build -f docker/cassert.Dockerfile -t leapfrog-cassert .
+      - name: Regression and isolation tests, assertion failures in the log
+        run: docker run --rm leapfrog-cassert
+
   bench:
     name: Benchmark (manual, 1M rows)
     if: github.event_name == 'workflow_dispatch' && inputs.bench
