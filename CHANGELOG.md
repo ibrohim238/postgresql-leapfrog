@@ -93,6 +93,17 @@ versions: [SemVer](https://semver.org/).
 
 ### Fixed
 
+- Cost model: the size of a TID group was estimated from
+  `estimate_num_groups`, which clamps the number of distinct sort values to
+  the query's row estimate. With a unique sort column and a query returning
+  81 rows, groups came out 200 entries instead of one: the group cost was
+  7.6× too high, and the plan-time `work_mem` check could drop the path
+  altogether. The number of distinct values now comes from the column
+  statistics (`get_variable_numdistinct`). Test in `leapfrog_overflow`; the
+  README example now picks the node at the default `random_page_cost = 4`
+  too (798 against 933 for the stock plan; 1.9 ms against 4.3–8.1 ms).
+- `leapfrog_overflow` printed counters that depended on autovacuum; its table
+  no longer has autovacuum.
 - `VACUUM` waited for an open cursor whose node had finished its merge: the
   stream that had not run out kept its leaf page pinned until the scan was
   closed. Both scans now release their pages when the merge ends.

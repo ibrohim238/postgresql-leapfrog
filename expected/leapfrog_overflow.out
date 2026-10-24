@@ -16,7 +16,7 @@ CREATE TABLE lf_overflow (
 	group_id bigint NOT NULL,
 	deleted_at timestamptz,
 	payload text
-);
+) WITH (autovacuum_enabled = false);	-- the counters below include dead entries
 -- 40000 rows in 2 groups of 20000; work_mem = 64kB holds about 10900 TIDs
 -- and each group has 13333 live entries, so both groups overflow.  Owner 1
 -- has 20000 rows, two thirds live.
@@ -195,3 +195,44 @@ SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at I
 
 RESET work_mem;
 DROP TABLE lf_overflow;
+-- The plan-time group estimate uses the number of distinct sort values in
+-- the whole table.  With a unique sort column every group holds one entry,
+-- however selective the query: the path must be offered at work_mem = 64kB
+-- (with the row estimate of the query, 10, as the number of distinct values
+-- the groups would come out 20,000 entries, 120 kB).  The stock scans are
+-- disabled so that the node is chosen by its own cost, without force.
+CREATE TABLE lf_overflow_unique (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	flag boolean NOT NULL
+);
+INSERT INTO lf_overflow_unique SELECT g, g % 20000, true FROM generate_series(1, 200000) g;
+CREATE INDEX lf_overflow_unique_owner_id ON lf_overflow_unique (owner_id, id);
+CREATE INDEX lf_overflow_unique_flag_id ON lf_overflow_unique (id) WHERE flag;
+ANALYZE lf_overflow_unique;
+SET work_mem = '64kB';
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_overflow_unique WHERE owner_id = 7 AND flag ORDER BY id;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Custom Scan (Index Merge Intersect) on lf_overflow_unique
+   Outer Index: lf_overflow_unique_owner_id
+   Inner Index: lf_overflow_unique_flag_id
+(3 rows)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+RESET enable_bitmapscan;
+SELECT lf_check($$ SELECT * FROM lf_overflow_unique WHERE owner_id = 7 AND flag ORDER BY id $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+RESET work_mem;
+DROP TABLE lf_overflow_unique;

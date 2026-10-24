@@ -206,9 +206,10 @@ customers lie between two of this customer's, too few to skip: the short
 skips raised the inner side's threshold and it reads them through. Exactly
 the 100 returned rows are fetched from the heap.
 
-With the default `random_page_cost = 4` the planner keeps the stock plan, an
-`Index Scan` on the partial index that filters the customer on every deleted
-row. The same query with `BitmapAnd` (`SET leapfrog.enabled = off; SET
+The planner picks the node at the default `random_page_cost = 4` as well
+(estimated 798 against 933). Without the extension it runs an `Index Scan` on
+the partial index that filters the customer on every deleted row. The same
+query with `BitmapAnd` (`SET leapfrog.enabled = off; SET
 enable_indexscan = off;`):
 
 ```text
@@ -235,8 +236,8 @@ are from a laptop and vary up to 2× between runs):
 
 | Plan | Time | Buffers | Heap rows fetched | Sort |
 |---|---|---|---|---|
-| **Index Merge Intersect** (planner's choice at `random_page_cost = 1.1`) | **1.9 ms** | **166** | **100** | no |
-| Index Scan on `(id) WHERE deleted_at IS NOT NULL` + filter (choice at the default `4`) | 4.3–8.1 ms | 1,957 | 20,304 | no |
+| **Index Merge Intersect** (planner's choice at both page costs) | **1.9 ms** | **166** | **100** | no |
+| Index Scan on `(id) WHERE deleted_at IS NOT NULL` + filter (the stock choice) | 4.3–8.1 ms | 1,957 | 20,304 | no |
 | Index Scan on `(customer_id, id)` + filter | 2.5 ms | 3,133 | 3,554 | no |
 | BitmapAnd + Bitmap Heap Scan | 10.8 ms | 621 | 393 | top-N |
 

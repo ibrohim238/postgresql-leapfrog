@@ -1032,17 +1032,27 @@ merge_read_cost(PlannerInfo *root, IndexOptInfo *outer, IndexOptInfo *inner,
 
 /*
  * sortcol_ndistinct
- *		Number of distinct sortcol values in the relation, which divides the
- *		inner entries into TID groups.
+ *		Number of distinct sortcol values in the whole relation, which
+ *		divides the inner entries into TID groups.  Taken from the column
+ *		statistics: estimate_num_groups would clamp it to the relation's row
+ *		estimate after the query's restrictions, and with a unique sort
+ *		column and a selective query the groups would come out hundreds of
+ *		entries large instead of one.
  */
 static double
 sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				  AttrNumber sort_attno)
 {
 	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
+	VariableStatData vardata;
+	bool		isdefault;
+	double		ndistinct;
 
-	return Max(estimate_num_groups(root, list_make1(var), rel->tuples,
-								   NULL, NULL), 1.0);
+	examine_variable(root, (Node *) var, 0, &vardata);
+	ndistinct = get_variable_numdistinct(&vardata, &isdefault);
+	ReleaseVariableStats(vardata);
+
+	return Max(ndistinct, 1.0);
 }
 
 /*

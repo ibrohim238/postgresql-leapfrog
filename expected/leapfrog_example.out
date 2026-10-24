@@ -63,8 +63,22 @@ ORDER BY id DESC LIMIT 100 $$);
 (11 rows)
 
 RESET random_page_cost;
--- With the default random_page_cost = 4 it keeps the stock plan: an Index
--- Scan on the partial index that filters the customer on every deleted row.
+-- With the default random_page_cost = 4 as well (estimated 798 against 933
+-- for the stock plan).
+SELECT * FROM lf_plan_costs($$
+SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
+ORDER BY id DESC LIMIT 100 $$);
+                                  lf_plan_costs                                  
+---------------------------------------------------------------------------------
+ Limit  (cost=N..N rows=N width=N)
+   ->  Custom Scan (Index Merge Intersect) on orders  (cost=N..N rows=N width=N)
+         Outer Index: idx_orders_customer_id
+         Inner Index: idx_orders_deleted_id
+(4 rows)
+
+-- The stock plan: an Index Scan on the partial index that filters the
+-- customer on every deleted row.
+SET leapfrog.enabled = off;
 SELECT * FROM lf_explain_analyze($$
 SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100 $$);
@@ -77,6 +91,7 @@ ORDER BY id DESC LIMIT 100 $$);
          Index Searches: 1
 (5 rows)
 
+RESET leapfrog.enabled;
 -- BitmapAnd: both indexes read completely, every match fetched, then sorted.
 SET leapfrog.enabled = off;
 SET enable_indexscan = off;

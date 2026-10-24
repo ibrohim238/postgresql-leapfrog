@@ -54,11 +54,19 @@ SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100 $$);
 RESET random_page_cost;
 
--- With the default random_page_cost = 4 it keeps the stock plan: an Index
--- Scan on the partial index that filters the customer on every deleted row.
+-- With the default random_page_cost = 4 as well (estimated 798 against 933
+-- for the stock plan).
+SELECT * FROM lf_plan_costs($$
+SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
+ORDER BY id DESC LIMIT 100 $$);
+
+-- The stock plan: an Index Scan on the partial index that filters the
+-- customer on every deleted row.
+SET leapfrog.enabled = off;
 SELECT * FROM lf_explain_analyze($$
 SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100 $$);
+RESET leapfrog.enabled;
 
 -- BitmapAnd: both indexes read completely, every match fetched, then sorted.
 SET leapfrog.enabled = off;
