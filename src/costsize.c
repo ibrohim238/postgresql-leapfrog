@@ -6,12 +6,12 @@
  * Costing follows ROR_intersect_plan::add, with every component expressed
  * through the planner's own cost functions:
  *
- *	  run = index_read_cost(outer, entries matching its equalities)
- *		   + index_read_cost(inner, entries matching its equalities)
- *		   + cost of grouping the entries of one value
- *		   + cost of fetching the result rows from the heap
- *		   + cost of the node's qual and target list per result row
- *	  startup = descent into both btrees (CPU, as btcostestimate charges it)
+ *	  run = index_read_cost(each stream, entries read through the merge)
+ *		   + cost of grouping the entries of one value, per inner stream
+ *		   + cost of fetching the matched rows from the heap
+ *		   + cost of the node's qual per fetched row and of the target list
+ *			 per result row
+ *	  startup = descent into every btree (CPU, as btcostestimate charges it)
  *			  + the share of run spent before the first match
  *	  total = startup + run
  *
@@ -22,11 +22,12 @@
  * an Index Scan on the outer index, which visits the same heap rows in the
  * same order.  Tablespace page costs are honoured.
  *
- * Documented assumptions, not derived from statistics: the matches are
- * spread evenly along both indexes (so a LIMIT is served by a proportional
- * fraction of the total, as the planner assumes for every path), and the
- * TID group of one value has the average size.  Skewed data can make either
- * side much more expensive than predicted.
+ * Documented assumptions, not derived from statistics: inside the overlap
+ * of the streams' sort ranges the matches are spread evenly along every
+ * index (so a LIMIT is served by a proportional fraction of the total, as
+ * the planner assumes for every path), and the TID group of one value has
+ * the average size.  Skew inside the overlap can make a stream more
+ * expensive than predicted.
  *
  * IDENTIFICATION
  *	  src/costsize.c
@@ -208,15 +209,16 @@ heap_fetch_cost(PlannerInfo *root, RelOptInfo *rel, double rows,
 
 /*
  * group_cost
- *		Cost of sorting the inner entries of each value and looking the
- *		outer entries up in them: log2 of the group size comparisons per
- *		entry.  The comparisons are inline ItemPointerCompare calls, not
- *		operator calls through the function manager, and are charged as
- *		cost_bitmap_tree_node charges the per-TID work of a bitmap: 0.1 *
- *		cpu_operator_cost each.  Measured (cost_bench.sh, two ordinary
- *		indexes, 15,000 entries, the same 118 buffers as BitmapAnd): the
- *		node runs 3 times faster than BitmapAnd, while a full
- *		cpu_operator_cost per comparison made it the dearer plan.
+ *		Cost of sorting the entries of each value of one inner stream and
+ *		looking the outer entries up in them: log2 of the group size
+ *		comparisons per entry.  The comparisons are inline
+ *		ItemPointerCompare calls, not operator calls through the function
+ *		manager, and are charged as cost_bitmap_tree_node charges the per-TID
+ *		work of a bitmap: 0.1 * cpu_operator_cost each.  Measured
+ *		(cost_bench.sh, two ordinary indexes, 15,000 entries, the same 118
+ *		buffers as BitmapAnd): the node runs 3 times faster than BitmapAnd,
+ *		while a full cpu_operator_cost per comparison made it the dearer
+ *		plan.
  */
 static Cost
 group_cost(double outer_entries, double inner_entries, double group_size)
@@ -297,47 +299,81 @@ descent_cost(IndexOptInfo *index)
 
 /*
  * merge_read_cost
- *		Cost of reading both index streams through the merge, with the
- *		skip-ahead of intersect_next.
+ *		Cost of reading the index streams through the merge, with the
+ *		skip-ahead of intersect_next.  reads[] holds the entries of each
+ *		stream inside the overlap and is updated to what the merge reads.
  *
- * With the matches spread evenly, the denser stream has dense/sparse
- * entries between two entries of the sparser one.  Up to
- * leapfrog.skip_after of them are read one by one; a gap longer by more
- * than two leaf pages is crossed by one more descent of the B-tree, charged
- * as btcostestimate charges a descent plus the leaf page it lands on.  A
- * shorter gap is read through: the executor backs off from skips that land
- * on the next leaf page (check_landing).
+ * The two sparsest streams set the pace.  With the matches spread evenly,
+ * the denser of the two has dense/sparse entries between two entries of the
+ * sparser one.  Up to leapfrog.skip_after of them are read one by one; a gap
+ * longer by more than two leaf pages is crossed by one more descent of the
+ * B-tree, charged as btcostestimate charges a descent plus the leaf page it
+ * lands on.  A shorter gap is read through: the executor backs off from
+ * skips that land on the next leaf page (check_landing).
+ *
+ * Every further stream is pulled along: the merge advances a lagging stream
+ * by one entry per iteration, and the entries read so far count the
+ * iterations.  A stream clearly denser than that (more than twice) reads
+ * about one entry per iteration and descends again every
+ * leapfrog.skip_after of them (measured: 40,000 entries behind a pair of
+ * 2,000 each read 5,200 with 46 skips, 460,000 behind 5,000 each read
+ * 12,100 with 166); one near the pace keeps up and reads all its entries
+ * (20,000 behind 5,000 and 10,000: all of them, 2 skips).
  */
 static Cost
-merge_read_cost(PlannerInfo *root, IndexOptInfo *outer, IndexOptInfo *inner,
-				double outer_entries, double inner_entries, double loop_count)
+merge_read_cost(PlannerInfo *root, IndexCandidate **streams, int nstreams,
+				double *reads, double loop_count)
 {
-	bool		outer_dense = outer_entries > inner_entries;
-	IndexOptInfo *dense = outer_dense ? outer : inner;
-	double		sparse_entries = Max(Min(outer_entries, inner_entries), 1.0);
-	double		dense_entries = Max(outer_entries, inner_entries);
-	double		dense_read = dense_entries;
-	double		descents = 0;
-	double		leaf_entries;
-	double		spc_random_page_cost;
-	Cost		cost;
+	int			order[INTERSECT_MAX_STREAMS];
+	double		sparse_entries;
+	double		iterations;
+	Cost		cost = 0;
 
-	leaf_entries = dense->tuples / Max(dense->pages, 1);
-	if (intersect_skip_after > 0 &&
-		dense_entries / sparse_entries >
-		intersect_skip_after + 2 * leaf_entries)
+	/* streams by entries, sparsest first */
+	for (int i = 0; i < nstreams; i++)
 	{
-		dense_read = sparse_entries * intersect_skip_after;
-		descents = sparse_entries;
+		int			j = i;
+
+		while (j > 0 && reads[order[j - 1]] > reads[i])
+		{
+			order[j] = order[j - 1];
+			j--;
+		}
+		order[j] = i;
 	}
 
-	get_tablespace_page_costs(dense->reltablespace, &spc_random_page_cost,
-							  NULL);
+	sparse_entries = Max(reads[order[0]], 1.0);
+	iterations = sparse_entries;
 
-	cost = index_read_cost(root, outer_dense ? inner : outer, sparse_entries,
-						   loop_count) +
-		index_read_cost(root, dense, dense_read, loop_count) +
-		descents * (descent_cost(dense) + spc_random_page_cost);
+	for (int n = 0; n < nstreams; n++)
+	{
+		int			i = order[n];
+		IndexOptInfo *index = streams[i]->index;
+		double		leaf_entries = index->tuples / Max(index->pages, 1);
+		double		descents = 0;
+		double		spc_random_page_cost;
+
+		if (n == 1 && intersect_skip_after > 0 &&
+			reads[i] / sparse_entries >
+			intersect_skip_after + 2 * leaf_entries)
+		{
+			reads[i] = sparse_entries * intersect_skip_after;
+			descents = sparse_entries;
+		}
+		else if (n >= 2 && reads[i] > 2 * iterations)
+		{
+			reads[i] = iterations;
+			if (intersect_skip_after > 0)
+				descents = iterations / intersect_skip_after;
+		}
+		if (n >= 1)
+			iterations += reads[i];
+
+		get_tablespace_page_costs(index->reltablespace, &spc_random_page_cost,
+								  NULL);
+		cost += index_read_cost(root, index, reads[i], loop_count) +
+			descents * (descent_cost(index) + spc_random_page_cost);
+	}
 
 	return cost;
 }
@@ -428,6 +464,7 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 	table_close(heap, NoLock);
 
 	candidate->range_known = 1;
+	candidate->range_sel = -1.0;
 	return true;
 }
 
@@ -467,60 +504,87 @@ sortcol_range_selectivity(PlannerInfo *root, Index rti, AttrNumber sort_attno,
 
 /*
  * stream_overlap
- *		Where the two streams can meet: the merge reads only the entries
- *		inside the overlap of their sortcol ranges, skipping ahead into it,
- *		and matches can only lie there.  Sets the share of each stream's
- *		entries inside the overlap, and the factor that turns the planner's
- *		row estimate (both conditions independent over the whole table) into
- *		one where they are independent inside the overlap:
+ *		Where the streams can meet: the merge reads only the entries inside
+ *		the overlap of their sortcol ranges, skipping ahead into it, and
+ *		matches can only lie there.  Sets the share of each stream's entries
+ *		inside the overlap, and the factor that turns a row estimate made
+ *		with the conditions independent over the whole table into one where
+ *		they are independent inside the overlap:
  *
- *			rows' = rows * outer_share * inner_share / table_share
+ *			rows' = rows * prod(share_i) / table_share^(nstreams - 1)
  *
  *		A stream is assumed to follow the table's distribution of sortcol
- *		within its own range.  All three are 1 when a range cannot be probed;
- *		an empty overlap gives 0.
+ *		within its own range.  All are 1 when a range cannot be probed; an
+ *		empty overlap gives 0.
  */
 static void
 stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
-			   AttrNumber sort_attno, IndexCandidate *outer,
-			   IndexCandidate *inner, double *outer_share,
-			   double *inner_share, double *rows_factor)
+			   AttrNumber sort_attno, IndexCandidate **streams, int nstreams,
+			   double *shares, double *rows_factor)
 {
 	int64		lo;
 	int64		hi;
 	Selectivity table_share;
-	Selectivity outer_sel;
-	Selectivity inner_sel;
 
-	*outer_share = 1.0;
-	*inner_share = 1.0;
+	for (int i = 0; i < nstreams; i++)
+		shares[i] = 1.0;
 	*rows_factor = 1.0;
 
-	if (!probe_range(rte, outer) || !probe_range(rte, inner))
-		return;
-
-	lo = Max(outer->range_lo, inner->range_lo);
-	hi = Min(outer->range_hi, inner->range_hi);
-	if (outer->range_empty || inner->range_empty || lo > hi)
+	for (int i = 0; i < nstreams; i++)
 	{
-		*outer_share = 0.0;
-		*inner_share = 0.0;
+		if (!probe_range(rte, streams[i]))
+			return;
+	}
+
+	lo = PG_INT64_MIN;
+	hi = PG_INT64_MAX;
+	for (int i = 0; i < nstreams; i++)
+	{
+		if (streams[i]->range_empty)
+		{
+			lo = 1;
+			hi = 0;
+			break;
+		}
+		lo = Max(lo, streams[i]->range_lo);
+		hi = Min(hi, streams[i]->range_hi);
+	}
+	if (lo > hi)
+	{
+		for (int i = 0; i < nstreams; i++)
+			shares[i] = 0.0;
 		*rows_factor = 0.0;
 		return;
 	}
 
-	table_share = sortcol_range_selectivity(root, rti, sort_attno, lo, hi);
-	outer_sel = sortcol_range_selectivity(root, rti, sort_attno,
-										  outer->range_lo, outer->range_hi);
-	inner_sel = sortcol_range_selectivity(root, rti, sort_attno,
-										  inner->range_lo, inner->range_hi);
+	/*
+	 * The share of each stream's own range is computed once per candidate;
+	 * the overlap is usually the range of the narrowest stream.
+	 */
+	table_share = -1.0;
+	for (int i = 0; i < nstreams; i++)
+	{
+		IndexCandidate *stream = streams[i];
 
-	if (outer_sel > 0)
-		*outer_share = Min(table_share / outer_sel, 1.0);
-	if (inner_sel > 0)
-		*inner_share = Min(table_share / inner_sel, 1.0);
-	if (table_share > 0)
-		*rows_factor = *outer_share * *inner_share / table_share;
+		if (stream->range_sel < 0)
+			stream->range_sel = sortcol_range_selectivity(root, rti, sort_attno,
+														  stream->range_lo,
+														  stream->range_hi);
+		if (stream->range_lo == lo && stream->range_hi == hi)
+			table_share = stream->range_sel;
+	}
+	if (table_share < 0)
+		table_share = sortcol_range_selectivity(root, rti, sort_attno, lo, hi);
+
+	for (int i = 0; i < nstreams; i++)
+	{
+		Selectivity sel = streams[i]->range_sel;
+
+		if (sel > 0)
+			shares[i] = Min(table_share / sel, 1.0);
+		if (table_share > 0)
+			*rows_factor *= shares[i] / (i > 0 ? table_share : 1.0);
+	}
 }
 
 /*
@@ -529,10 +593,9 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
  *		A partial index holds index->tuples entries to begin with.
  */
 double
-lf_index_entries(PlannerInfo *root, Index rti, IndexOptInfo *index,
-				 IndexCandidate *candidate)
+lf_index_entries(PlannerInfo *root, Index rti, IndexCandidate *candidate)
 {
-	double		entries = index->tuples;
+	double		entries = candidate->index->tuples;
 
 	if (candidate->clauses != NIL)
 		entries *= clauselist_selectivity(root, candidate->clauses, rti,
@@ -542,76 +605,119 @@ lf_index_entries(PlannerInfo *root, Index rti, IndexOptInfo *index,
 }
 
 /*
+ * stream_rows
+ *		Rows of the relation that satisfy the conditions the streams
+ *		enforce: the equalities of every stream and the predicates of the
+ *		partial indexes, estimated the way the planner estimates the
+ *		relation's rows from its restrictions.  The node fetches these rows
+ *		from the heap; the remaining restrictions filter them afterwards.
+ */
+static double
+stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
+			IndexCandidate **streams, int nstreams)
+{
+	List	   *clauses = NIL;
+
+	/* two streams on the same column share the clause: count it once */
+	for (int i = 0; i < nstreams; i++)
+	{
+		clauses = list_concat_unique_ptr(clauses, streams[i]->clauses);
+		clauses = list_concat_unique(clauses, streams[i]->index->indpred);
+	}
+
+	return clamp_row_est(rel->tuples *
+						 clauselist_selectivity(root, clauses, rti,
+												JOIN_INNER, NULL));
+}
+
+/*
  * lf_cost_intersect_path
  *		Set the rows, startup and total cost of an Index Merge Intersect path
  *		whose parameterization is set and whose rows hold the planner's
  *		estimate for the relation, as cost_index does for an index path.
- *		outer_entries and inner_entries are lf_index_entries of both sides,
- *		group_size the expected TID group, correlation
- *		lf_outer_index_correlation of the outer index.  Returns the entries
- *		each side is expected to read, for EXPLAIN VERBOSE.
+ *		streams[0] is the outer index; every candidate has its entries set.
+ *		ndistinct is lf_sortcol_ndistinct, correlation
+ *		lf_outer_index_correlation of the outer index.  Returns in reads[]
+ *		the entries each stream is expected to read, for EXPLAIN VERBOSE.
  */
 void
 lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 					   RangeTblEntry *rte, AttrNumber sort_attno,
-					   IndexCandidate *outer_candidate,
-					   IndexCandidate *inner_candidate,
-					   double outer_entries, double inner_entries,
-					   double group_size, double correlation,
-					   double *outer_read_p, double *inner_read_p)
+					   IndexCandidate **streams, int nstreams,
+					   double ndistinct, double correlation, double *reads)
 {
 	RelOptInfo *rel = cpath->path.parent;
 	ParamPathInfo *param_info = cpath->path.param_info;
-	IndexOptInfo *outer = outer_candidate->index;
-	IndexOptInfo *inner = inner_candidate->index;
 	double		rows = cpath->path.rows;
-	double		loop_count;
-	double		outer_share;
-	double		inner_share;
+	double		shares[INTERSECT_MAX_STREAMS];
 	double		rows_factor;
-	double		outer_read;
-	double		inner_read;
+	double		loop_count;
+	double		fetched;
 	double		matches;
+	double		pages_scanned = 0;
 	QualCost	qpqual_cost;
 	Cost		run_cost;
+	Cost		first_match;
 	Cost		startup_cost;
 
 	loop_count = loop_count_for(root, PATH_REQ_OUTER(&cpath->path));
 	restriction_qual_cost(root, rel, param_info, &qpqual_cost);
 
 	/*
-	 * Only the entries inside the overlap of the two streams' sortcol ranges
-	 * are read, and the matches lie there (stream_overlap); a stream that
-	 * starts outside it skips in with one more descent.
+	 * Only the entries inside the overlap of the streams' sortcol ranges are
+	 * read, and the matches lie there (stream_overlap); a stream that starts
+	 * outside it skips in with one more descent.
 	 */
-	stream_overlap(root, rte, rel->relid, sort_attno, outer_candidate,
-				   inner_candidate, &outer_share, &inner_share, &rows_factor);
-	outer_read = outer_entries * outer_share;
-	inner_read = inner_entries * inner_share;
-	matches = Min(rows * rows_factor, Min(outer_read, inner_read));
+	stream_overlap(root, rte, rel->relid, sort_attno, streams, nstreams,
+				   shares, &rows_factor);
+	for (int i = 0; i < nstreams; i++)
+	{
+		reads[i] = streams[i]->entries * shares[i];
+		pages_scanned += streams[i]->index->pages;
+	}
 
 	/*
-	 * Reading both indexes, grouping the entries of each value, fetching the
-	 * matched rows and running the qual and the target list on them.  The
-	 * heap fetches are charged as for an Index Scan on the outer index (see
-	 * lf_outer_index_correlation).
+	 * The rows the streams agree on are fetched from the heap and the node's
+	 * qual filters them; the result rows are the planner's estimate inside
+	 * the overlap.  Neither exceeds the entries of the sparsest stream.
 	 */
-	run_cost = merge_read_cost(root, outer, inner, outer_read, inner_read,
-							   loop_count) +
-		group_cost(outer_read, inner_read, group_size) +
-		heap_fetch_cost(root, rel, matches, loop_count, correlation,
-						(double) outer->pages + inner->pages) +
-		matches * (cpu_tuple_cost + qpqual_cost.per_tuple +
-				   rel->reltarget->cost.per_tuple);
-	if (outer_share < 1.0)
-		run_cost += descent_cost(outer);
-	if (inner_share < 1.0)
-		run_cost += descent_cost(inner);
+	fetched = stream_rows(root, rel, rel->relid, streams, nstreams) *
+		rows_factor;
+	matches = rows * rows_factor;
+	for (int i = 0; i < nstreams; i++)
+		fetched = Min(fetched, reads[i]);
+	matches = Min(matches, fetched);
 
-	/* both streams advance through run/(matches+1) before the first match */
-	startup_cost = descent_cost(outer) + descent_cost(inner) +
-		qpqual_cost.startup + rel->reltarget->cost.startup +
-		run_cost / (matches + 1);
+	/*
+	 * Reading the indexes, grouping the entries of each value of every inner
+	 * stream, fetching the agreed rows and running the qual on them, the
+	 * target list on the result rows.  The heap fetches are charged as for an
+	 * Index Scan on the outer index (see lf_outer_index_correlation).
+	 */
+	run_cost = merge_read_cost(root, streams, nstreams, reads, loop_count);
+	for (int i = 1; i < nstreams; i++)
+		run_cost += group_cost(reads[0], reads[i],
+							   Max(1.0, streams[i]->entries / ndistinct));
+	run_cost += heap_fetch_cost(root, rel, fetched, loop_count, correlation,
+								pages_scanned) +
+		fetched * (cpu_tuple_cost + qpqual_cost.per_tuple) +
+		matches * rel->reltarget->cost.per_tuple;
+	for (int i = 0; i < nstreams; i++)
+	{
+		if (shares[i] < 1.0)
+			run_cost += descent_cost(streams[i]->index);
+	}
+
+	/*
+	 * Every stream advances through run/(matches+1) of the merge before the
+	 * first match: that share is startup, the rest is the run after it, and
+	 * the total is the descents plus the whole merge.
+	 */
+	first_match = run_cost / (matches + 1);
+	startup_cost = qpqual_cost.startup + rel->reltarget->cost.startup +
+		first_match;
+	for (int i = 0; i < nstreams; i++)
+		startup_cost += descent_cost(streams[i]->index);
 
 	/*
 	 * The row estimate of the path is the matches: a Limit above takes the
@@ -620,7 +726,5 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	 */
 	cpath->path.rows = clamp_row_est(matches);
 	cpath->path.startup_cost = startup_cost;
-	cpath->path.total_cost = startup_cost + run_cost;
-	*outer_read_p = outer_read;
-	*inner_read_p = inner_read;
+	cpath->path.total_cost = startup_cost + run_cost - first_match;
 }

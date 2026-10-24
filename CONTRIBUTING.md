@@ -94,7 +94,11 @@ visibility).
 ## What to check when changing the planner part
 
 - `planner.c`: `find_index_candidate`, `is_outer_candidate`,
-  `is_inner_candidate` — conditions for choosing a pair;
+  `is_inner_candidate` — conditions for a stream to join a set;
+  `search_pairs_from_outer` / `expand_best_pair` — every pair is offered,
+  then the cheapest pair grows one stream at a time while the cost falls
+  (`leapfrog.max_indexes`); planning time is measured with
+  `tests/performance/planning_bench.sh`;
 - `planner.c`: `intersect_scan_qual` — which conditions stay in `Filter`; for
   the target relation of `UPDATE/DELETE/FOR UPDATE` conditions implied by the
   predicate must stay (EvalPlanQual);
@@ -108,9 +112,10 @@ visibility).
 
 ## What to check when changing the executor part
 
-- `executor.c`: `intersect_next` — the merge loop, `fetching_match` /
-  `xs_heap_continue`, `CHECK_FOR_INTERRUPTS`, skip-ahead (`skip_ahead`,
-  `check_landing`);
+- `executor.c`: `intersect_next` — the merge loop over `IndexStream`s (the
+  frontmost value, lagging streams, groups of every inner stream),
+  `fetching_match` / `xs_heap_continue`, `CHECK_FOR_INTERRUPTS`, skip-ahead
+  (`skip_ahead`, `check_landing`);
 - `collect_group` / `group_contains` — the `work_mem` limit, overflow;
 - `intersect_recheck` — EvalPlanQual: equalities and predicate on the new
   version;

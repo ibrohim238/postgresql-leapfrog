@@ -108,6 +108,8 @@ PG_MODULE_MAGIC_EXT(
 bool		intersect_enabled = true;
 bool		intersect_force = false;
 int			intersect_skip_after = INTERSECT_SKIP_AFTER;
+int			intersect_max_streams = 4;
+int			intersect_min_streams = 2;
 
 /* Set once the hook is installed */
 static bool intersect_hook_installed = false;
@@ -152,6 +154,33 @@ _PG_init(void)
 							INTERSECT_SKIP_AFTER,
 							0,
 							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("leapfrog.max_indexes",
+							"The most indexes one Index Merge Intersect node combines.",
+							"Streams are added one at a time while each one lowers the estimated cost.",
+							&intersect_max_streams,
+							4,
+							2,
+							INTERSECT_MAX_STREAMS,
+							PGC_USERSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("leapfrog.min_indexes",
+							"The fewest indexes an Index Merge Intersect node combines.",
+							"Developer option: smaller sets are not offered, so that a larger "
+							"set can be run against the stock plans.",
+							&intersect_min_streams,
+							2,
+							2,
+							INTERSECT_MAX_STREAMS,
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL,

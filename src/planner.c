@@ -2,8 +2,9 @@
  *
  * planner.c
  *	  Planner side of the Index Merge Intersect custom scan: the
- *	  set_rel_pathlist hook that finds index pairs and offers their paths,
- *	  and the conversion of the chosen path into a CustomScan plan.
+ *	  set_rel_pathlist hook that finds sets of indexes to intersect and
+ *	  offers their paths, and the conversion of the chosen path into a
+ *	  CustomScan plan.
  *
  * IDENTIFICATION
  *	  src/planner.c
@@ -32,6 +33,13 @@
 #include "leapfrog.h"
 
 /*
+ * Under leapfrog.force the paths keep their relative costs, scaled down so
+ * far that no other path can be cheaper: add_path compares costs by ratio,
+ * so the cheapest set of indexes still wins among the sets.
+ */
+#define INTERSECT_FORCE_SCALE 1e-12
+
+/*
  * Argument of ec_member_is_column, the callback of
  * generate_implied_equalities_for_column.
  */
@@ -42,11 +50,21 @@ typedef struct ColumnMatchArg
 } ColumnMatchArg;
 
 /*
- * Under leapfrog.force the paths keep their relative costs, scaled down so
- * far that no other path can be cheaper: add_path compares costs by ratio,
- * so the cheapest index pair still wins among the pairs.
+ * What the hook looks at for one relation: the sort column and the index
+ * candidates, with the lookups shared by every set of streams.
  */
-#define INTERSECT_FORCE_SCALE 1e-12
+typedef struct IntersectSearch
+{
+	PlannerInfo *root;
+	RelOptInfo *rel;
+	Index		rti;
+	RangeTblEntry *rte;
+	AttrNumber	sort_attno;
+	PathKey    *pathkey;
+	IndexCandidate *candidates;
+	int			ncandidates;
+	double		ndistinct;		/* -1 until looked up */
+} IntersectSearch;
 
 /* Saved hook value */
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
@@ -67,6 +85,13 @@ make_oid_const(Oid value)
 {
 	return makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
 					 ObjectIdGetDatum(value), false, true);
+}
+
+static Const *
+make_int4_const(int32 value)
+{
+	return makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+					 Int32GetDatum(value), false, true);
 }
 
 static Const *
@@ -328,11 +353,11 @@ is_heapkeyspace(IndexCandidate *candidate)
 /*
  * is_usable_btree
  *		A btree whose column at position pos is sorted ascending in the
- *		operator family of the query's sort key, so that both sides of the
- *		merge produce values in the order the query asks for.  NULLs
+ *		operator family of the query's sort key, so that every stream of the
+ *		merge produces values in the order the query asks for.  NULLs
  *		ordering is not checked: the sort column is NOT NULL.  Whether the
  *		duplicates are ordered by TID is checked last, by is_heapkeyspace,
- *		for the pairs that pass everything else: it opens the index.
+ *		for the sets that pass everything else: it opens the index.
  */
 static bool
 is_usable_btree(IndexOptInfo *index, int pos, PathKey *pathkey)
@@ -356,9 +381,7 @@ is_usable_btree(IndexOptInfo *index, int pos, PathKey *pathkey)
  * key column or a column before it has no usable equality.
  */
 static bool
-find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
-					 RangeTblEntry *rte, IndexOptInfo *index,
-					 AttrNumber sort_attno, PathKey *pathkey,
+find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 					 IndexCandidate *candidate)
 {
 	int			sortpos = -1;
@@ -372,7 +395,7 @@ find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{
-		if (index->indexkeys[i] == sort_attno)
+		if (index->indexkeys[i] == search->sort_attno)
 		{
 			sortpos = i;
 			break;
@@ -380,7 +403,7 @@ find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	}
 	candidate->sortpos = sortpos;
 
-	if (sortpos < 0 || !is_usable_btree(index, sortpos, pathkey))
+	if (sortpos < 0 || !is_usable_btree(index, sortpos, search->pathkey))
 		return false;
 
 	for (int i = 0; i < sortpos; i++)
@@ -391,12 +414,12 @@ find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		Relids		outer_relids;
 
 		/* the scan keys use int8 operators of the integer family */
-		if (!is_int8_column(rte, attno) ||
+		if (!is_int8_column(search->rte, attno) ||
 			index->opfamily[i] != INTEGER_BTREE_FAM_OID)
 			return false;
 
-		clause = find_equality_clause(root, rel, rti, attno, &expr,
-									  &outer_relids);
+		clause = find_equality_clause(search->root, search->rel, search->rti,
+									  attno, &expr, &outer_relids);
 		if (clause == NULL)
 			return false;
 
@@ -406,12 +429,14 @@ find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 													outer_relids);
 	}
 
+	candidate->entries = lf_index_entries(search->root, search->rti, candidate);
+
 	return true;
 }
 
 /*
  * is_outer_candidate
- *		Can the index be the outer side of the intersection: at least one
+ *		Can the index be the outer stream of the intersection: at least one
  *		equality column, then sortcol as the last key column?
  */
 static bool
@@ -423,27 +448,58 @@ is_outer_candidate(IndexCandidate *candidate)
 }
 
 /*
- * adds_restriction
- *		Does the inner index narrow the outer stream down?  A partial index
- *		does through its predicate; an ordinary one only through an equality
- *		column the outer index does not have.
+ * equality_column_in_set
+ *		Is attno an equality column of some stream of the set?
  */
 static bool
-adds_restriction(IndexOptInfo *outer, IndexOptInfo *inner, int inner_sortpos)
+equality_column_in_set(IndexCandidate **streams, int nstreams,
+					   AttrNumber attno)
 {
-	if (inner->indpred != NIL)
-		return true;
-
-	for (int i = 0; i < inner_sortpos; i++)
+	for (int i = 0; i < nstreams; i++)
 	{
-		bool		in_outer = false;
+		IndexOptInfo *index = streams[i]->index;
 
-		for (int j = 0; j < outer->nkeycolumns - 1; j++)
+		for (int j = 0; j < streams[i]->sortpos; j++)
 		{
-			if (outer->indexkeys[j] == inner->indexkeys[i])
-				in_outer = true;
+			if (index->indexkeys[j] == attno)
+				return true;
 		}
-		if (!in_outer)
+	}
+
+	return false;
+}
+
+/*
+ * adds_restriction
+ *		Does the index narrow the set's rows down?  A partial index does
+ *		through its predicate, unless a stream of the set already enforces
+ *		one that implies it; an ordinary one only through an equality column
+ *		no stream of the set has.
+ */
+static bool
+adds_restriction(IndexCandidate **streams, int nstreams,
+				 IndexCandidate *candidate)
+{
+	IndexOptInfo *index = candidate->index;
+
+	if (index->indpred != NIL)
+	{
+		bool		implied = false;
+
+		for (int i = 1; i < nstreams && !implied; i++)
+		{
+			List	   *pred = streams[i]->index->indpred;
+
+			if (pred != NIL && predicate_implied_by(index->indpred, pred, false))
+				implied = true;
+		}
+		if (!implied)
+			return true;
+	}
+
+	for (int i = 0; i < candidate->sortpos; i++)
+	{
+		if (!equality_column_in_set(streams, nstreams, index->indexkeys[i]))
 			return true;
 	}
 
@@ -452,62 +508,69 @@ adds_restriction(IndexOptInfo *outer, IndexOptInfo *inner, int inner_sortpos)
 
 /*
  * is_inner_candidate
- *		Can the index be the inner side of the intersection for the given
- *		outer index: (j1, ..., jM, sortcol, ...) with equalities on every jI,
- *		partial or adding an equality column of its own?
+ *		Can the index join the set as an inner stream: (j1, ..., jM, sortcol,
+ *		...) with equalities on every jI, not in the set yet, and adding a
+ *		restriction of its own?
  */
 static bool
-is_inner_candidate(IndexCandidate *outer, IndexCandidate *inner)
+is_inner_candidate(IndexCandidate **streams, int nstreams,
+				   IndexCandidate *candidate)
 {
-	return inner->usable && inner != outer &&
-		adds_restriction(outer->index, inner->index, inner->sortpos);
+	if (!candidate->usable)
+		return false;
+	for (int i = 0; i < nstreams; i++)
+	{
+		if (streams[i] == candidate)
+			return false;
+	}
+
+	return adds_restriction(streams, nstreams, candidate);
 }
 
 /*
- * add_intersect_path
- *		Build and cost the Index Merge Intersect path for one index pair and
- *		offer it to add_path.  ndistinct is lf_sortcol_ndistinct and
- *		correlation lf_outer_index_correlation of the outer index, both
- *		computed once by the caller.
+ * build_intersect_path
+ *		Build and cost the Index Merge Intersect path for one set of streams;
+ *		NULL when the set cannot be used.  correlation is
+ *		lf_outer_index_correlation of the outer index.
  */
-static void
-add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
-				   RangeTblEntry *rte, AttrNumber sort_attno,
-				   PathKey *pathkey, IndexCandidate *outer_candidate,
-				   IndexCandidate *inner_candidate, double ndistinct,
-				   double correlation)
+static CustomPath *
+build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
+					 int nstreams, double correlation)
 {
-	IndexOptInfo *outer = outer_candidate->index;
-	IndexOptInfo *inner = inner_candidate->index;
+	PlannerInfo *root = search->root;
+	RelOptInfo *rel = search->rel;
 	CustomPath *cpath;
 	ParamPathInfo *param_info = NULL;
-	Relids		required_outer;
-	double		outer_entries;
-	double		inner_entries;
-	double		outer_read;
-	double		inner_read;
-	double		group_size;
+	Relids		required_outer = NULL;
+	double		group_bytes = 0;
+	double		reads[INTERSECT_MAX_STREAMS];
 
-	outer_entries = lf_index_entries(root, rti, outer, outer_candidate);
-	inner_entries = lf_index_entries(root, rti, inner, inner_candidate);
+	if (search->ndistinct < 0)
+		search->ndistinct = lf_sortcol_ndistinct(root, rel, search->rti,
+												 search->sort_attno);
 
 	/*
-	 * The TID group of one value is expected to fit into work_mem.  This is
-	 * an estimate over the average value; the executor enforces the limit
-	 * itself, so under leapfrog.force the estimate is ignored.
+	 * The TID groups of one value are expected to fit into work_mem together.
+	 * This is an estimate over the average value; the executor enforces the
+	 * limit itself, so under leapfrog.force the estimate is ignored.
 	 */
-	group_size = Max(1.0, inner_entries / ndistinct);
-	if (!intersect_force &&
-		group_size * sizeof(ItemPointerData) > work_mem * 1024.0)
-		return;
+	for (int i = 1; i < nstreams; i++)
+		group_bytes += Max(1.0, streams[i]->entries / search->ndistinct) *
+			sizeof(ItemPointerData);
+	if (!intersect_force && group_bytes > work_mem * 1024.0)
+		return NULL;
 
-	/* duplicates must be ordered by TID on both sides */
-	if (!is_heapkeyspace(outer_candidate) || !is_heapkeyspace(inner_candidate))
-		return;
+	/* duplicates must be ordered by TID in every stream */
+	for (int i = 0; i < nstreams; i++)
+	{
+		if (!is_heapkeyspace(streams[i]))
+			return NULL;
+	}
 
 	/* a LATERAL reference makes the path parameterized by those rels */
-	required_outer = bms_union(outer_candidate->required_outer,
-							   inner_candidate->required_outer);
+	for (int i = 0; i < nstreams; i++)
+		required_outer = bms_add_members(required_outer,
+										 streams[i]->required_outer);
 	required_outer = bms_add_members(required_outer, rel->lateral_relids);
 	if (!bms_is_empty(required_outer))
 		param_info = get_baserel_parampathinfo(root, rel, required_outer);
@@ -522,46 +585,57 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	cpath->path.parallel_safe = false;
 	cpath->path.parallel_workers = 0;
 	cpath->path.rows = param_info ? param_info->ppi_rows : rel->rows;
-	cpath->path.pathkeys = list_make1(pathkey);
+	cpath->path.pathkeys = list_make1(search->pathkey);
 	cpath->flags = 0;
 	cpath->methods = &intersect_path_methods;
 
-	lf_cost_intersect_path(cpath, root, rte, sort_attno, outer_candidate,
-						   inner_candidate, outer_entries, inner_entries,
-						   group_size, correlation, &outer_read, &inner_read);
+	lf_cost_intersect_path(cpath, root, search->rte, search->sort_attno,
+						   streams, nstreams, search->ndistinct, correlation,
+						   reads);
 
 	/*
-	 * A CustomPath has no custom_exprs; the value expressions and the inner
-	 * index predicate travel in custom_private and become the plan's
-	 * custom_exprs in intersect_plan_path, where createplan.c turns
-	 * outer-relation Vars into nestloop params and setrefs.c fixes up the
-	 * rest.  The layout is the PRIVATE_* and EXPRS_* positions.
+	 * A CustomPath has no custom_exprs; the value expressions and the index
+	 * predicates travel in custom_private and become the plan's custom_exprs
+	 * in intersect_plan_path, where createplan.c turns outer-relation Vars
+	 * into nestloop params and setrefs.c fixes up the rest.  The layout is
+	 * the PRIVATE_* and STREAM_* positions.
 	 */
 	cpath->custom_private =
-		list_make4(make_oid_const(outer->indexoid),
-				   make_oid_const(inner->indexoid),
-				   makeBoolConst(pathkey->pk_cmptype == COMPARE_GT, false),
-				   makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
-							 Int32GetDatum(inner_candidate->sortpos),
-							 false, true));
-	cpath->custom_private = lappend(cpath->custom_private,
-									make_float8_const(outer_read));
-	cpath->custom_private = lappend(cpath->custom_private,
-									make_float8_const(inner_read));
-	cpath->custom_private = lappend(cpath->custom_private,
-									copyObject(outer_candidate->exprs));
-	cpath->custom_private = lappend(cpath->custom_private,
-									copyObject(inner->indpred));
-	cpath->custom_private = lappend(cpath->custom_private,
-									copyObject(inner_candidate->exprs));
+		list_make2(makeBoolConst(search->pathkey->pk_cmptype == COMPARE_GT,
+								 false),
+				   make_int4_const(nstreams));
+	for (int i = 0; i < nstreams; i++)
+	{
+		cpath->custom_private = lappend(cpath->custom_private,
+										make_oid_const(streams[i]->index->indexoid));
+		cpath->custom_private = lappend(cpath->custom_private,
+										make_int4_const(streams[i]->sortpos));
+		cpath->custom_private = lappend(cpath->custom_private,
+										make_float8_const(reads[i]));
+	}
+	for (int i = 0; i < nstreams; i++)
+	{
+		cpath->custom_private = lappend(cpath->custom_private,
+										copyObject(streams[i]->exprs));
+		cpath->custom_private = lappend(cpath->custom_private,
+										i > 0 ? copyObject(streams[i]->index->indpred) : NIL);
+	}
 
-	/*
-	 * With leapfrog.force the competition with the other plans is skipped,
-	 * like MySQL does for the INDEX_MERGE hint, but the pairs still compete
-	 * among themselves.  The path can still be passed over for reasons other
-	 * than cost, such as disabled_nodes or a parameterization the join order
-	 * cannot provide.
-	 */
+	return cpath;
+}
+
+/*
+ * add_intersect_path
+ *		Offer a built path to add_path, under leapfrog.force with its costs
+ *		scaled down: the competition with the other plans is skipped, like
+ *		MySQL does for the INDEX_MERGE hint, but the sets still compete among
+ *		themselves.  The path can still be passed over for reasons other than
+ *		cost, such as disabled_nodes or a parameterization the join order
+ *		cannot provide.
+ */
+static void
+add_intersect_path(RelOptInfo *rel, CustomPath *cpath)
+{
 	if (intersect_force)
 	{
 		cpath->path.startup_cost *= INTERSECT_FORCE_SCALE;
@@ -572,19 +646,130 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 }
 
 /*
+ * The cheapest pair found so far, the start of the greedy expansion.
+ */
+typedef struct BestPair
+{
+	CustomPath *path;
+	IndexCandidate *outer;
+	IndexCandidate *inner;
+	double		correlation;
+} BestPair;
+
+/*
+ * search_pairs_from_outer
+ *		Offer every pair of one outer index with an inner candidate, as the
+ *		planner compares them with the stock plans and with each other, and
+ *		remember the cheapest pair of all in *best.  Pairs are not offered
+ *		under leapfrog.min_indexes > 2.
+ */
+static void
+search_pairs_from_outer(IntersectSearch *search, IndexCandidate *outer,
+						BestPair *best)
+{
+	IndexCandidate *streams[2];
+	double		correlation;
+
+	correlation = lf_outer_index_correlation(search->root, search->rti,
+											 outer->index);
+	streams[0] = outer;
+
+	for (int j = 0; j < search->ncandidates; j++)
+	{
+		IndexCandidate *inner = &search->candidates[j];
+		CustomPath *cpath;
+
+		if (!is_inner_candidate(streams, 1, inner))
+			continue;
+		streams[1] = inner;
+		cpath = build_intersect_path(search, streams, 2, correlation);
+		if (cpath == NULL)
+			continue;
+		if (best->path == NULL ||
+			cpath->path.total_cost < best->path->path.total_cost)
+		{
+			best->path = cpath;
+			best->outer = outer;
+			best->inner = inner;
+			best->correlation = correlation;
+		}
+		if (intersect_min_streams <= 2)
+			add_intersect_path(search->rel, cpath);
+	}
+}
+
+/*
+ * expand_best_pair
+ *		From the cheapest pair, add one stream at a time, the one that lowers
+ *		the estimated cost the most, as long as one does and
+ *		leapfrog.max_indexes allows.  A stream that costs more than it saves
+ *		is left out and the planner stays with the smaller set.  Only the
+ *		cheapest pair is expanded: a larger set built on a dearer pair reads
+ *		the dearer pair's streams and more.  Sets smaller than
+ *		leapfrog.min_indexes are built but not offered, and the set that
+ *		reaches it is offered whatever its cost: that lets a test run a
+ *		larger set against the stock plans.
+ */
+static void
+expand_best_pair(IntersectSearch *search, BestPair *best)
+{
+	IndexCandidate *streams[INTERSECT_MAX_STREAMS];
+	int			nstreams = 2;
+	CustomPath *best_path = best->path;
+
+	streams[0] = best->outer;
+	streams[1] = best->inner;
+
+	while (nstreams < intersect_max_streams)
+	{
+		CustomPath *next_best = NULL;
+		IndexCandidate *next_stream = NULL;
+		bool		required = nstreams + 1 <= intersect_min_streams;
+
+		for (int j = 0; j < search->ncandidates; j++)
+		{
+			IndexCandidate *inner = &search->candidates[j];
+			CustomPath *cpath;
+
+			if (!is_inner_candidate(streams, nstreams, inner))
+				continue;
+			streams[nstreams] = inner;
+			cpath = build_intersect_path(search, streams, nstreams + 1,
+										 best->correlation);
+			if (cpath == NULL)
+				continue;
+			if (next_best == NULL ||
+				cpath->path.total_cost < next_best->path.total_cost)
+			{
+				next_best = cpath;
+				next_stream = inner;
+			}
+		}
+
+		if (next_best == NULL)
+			break;
+		if (!required &&
+			next_best->path.total_cost >= best_path->path.total_cost)
+			break;
+
+		streams[nstreams++] = next_stream;
+		best_path = next_best;
+		if (nstreams >= intersect_min_streams)
+			add_intersect_path(search->rel, next_best);
+	}
+}
+
+/*
  * intersect_set_rel_pathlist
  *		set_rel_pathlist_hook: offer Index Merge Intersect paths for every
- *		suitable pair of indexes of the relation.
+ *		suitable set of indexes of the relation.
  */
 static void
 intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 						   RangeTblEntry *rte)
 {
-	PathKey    *pathkey;
-	AttrNumber	sort_attno = InvalidAttrNumber;
-	IndexCandidate *candidates;
-	int			ncandidates = 0;
-	double		ndistinct = -1.0;
+	IntersectSearch search;
+	BestPair	best;
 	ListCell   *lc;
 
 	if (prev_set_rel_pathlist_hook)
@@ -596,9 +781,16 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		IS_DUMMY_REL(rel) || rel->indexlist == NIL)
 		return;
 
+	search.root = root;
+	search.rel = rel;
+	search.rti = rti;
+	search.rte = rte;
+	search.sort_attno = InvalidAttrNumber;
+	search.ndistinct = -1.0;
+
 	/* the sort column: a bigint NOT NULL column of this relation */
-	pathkey = linitial_node(PathKey, root->query_pathkeys);
-	foreach(lc, pathkey->pk_eclass->ec_members)
+	search.pathkey = linitial_node(PathKey, root->query_pathkeys);
+	foreach(lc, search.pathkey->pk_eclass->ec_members)
 	{
 		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
 		AttrNumber	attno;
@@ -606,71 +798,51 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		if (!IsA(em->em_expr, Var))
 			continue;
 		attno = ((Var *) em->em_expr)->varattno;
-		if (attno > 0 && pathkey_is_column(pathkey, rti, attno) &&
+		if (attno > 0 && pathkey_is_column(search.pathkey, rti, attno) &&
 			is_int8_column(rte, attno) && is_notnull_column(rel, attno))
 		{
-			sort_attno = attno;
+			search.sort_attno = attno;
 			break;
 		}
 	}
 
-	if (sort_attno == InvalidAttrNumber)
+	if (search.sort_attno == InvalidAttrNumber)
 		return;
 
 	/*
-	 * Each index is checked once; the pairs are then formed from the indexes
+	 * Each index is checked once; the sets are then formed from the indexes
 	 * that can produce sortcol in order, usually a few of the relation's.
 	 */
-	candidates = palloc(list_length(rel->indexlist) * sizeof(IndexCandidate));
+	search.candidates = palloc(list_length(rel->indexlist) *
+							   sizeof(IndexCandidate));
+	search.ncandidates = 0;
 	foreach(lc, rel->indexlist)
 	{
-		IndexCandidate *candidate = &candidates[ncandidates];
+		IndexCandidate *candidate = &search.candidates[search.ncandidates];
 
-		candidate->usable = find_index_candidate(root, rel, rti, rte,
+		candidate->usable = find_index_candidate(&search,
 												 lfirst_node(IndexOptInfo, lc),
-												 sort_attno, pathkey,
 												 candidate);
 		if (candidate->usable)
-			ncandidates++;
+			search.ncandidates++;
 	}
 
-	for (int i = 0; i < ncandidates; i++)
+	best.path = NULL;
+	for (int i = 0; i < search.ncandidates; i++)
 	{
-		IndexCandidate *outer = &candidates[i];
-		double		correlation = 0.0;
-		bool		has_correlation = false;
-
-		if (!is_outer_candidate(outer))
-			continue;
-
-		for (int j = 0; j < ncandidates; j++)
-		{
-			IndexCandidate *inner = &candidates[j];
-
-			if (!is_inner_candidate(outer, inner))
-				continue;
-
-			if (ndistinct < 0)
-				ndistinct = lf_sortcol_ndistinct(root, rel, rti, sort_attno);
-			if (!has_correlation)
-			{
-				correlation = lf_outer_index_correlation(root, rti,
-														 outer->index);
-				has_correlation = true;
-			}
-			add_intersect_path(root, rel, rti, rte, sort_attno, pathkey,
-							   outer, inner,
-							   ndistinct, correlation);
-		}
+		if (is_outer_candidate(&search.candidates[i]))
+			search_pairs_from_outer(&search, &search.candidates[i], &best);
 	}
+	if (best.path != NULL)
+		expand_best_pair(&search, &best);
 
-	pfree(candidates);
+	pfree(search.candidates);
 }
 
 /*
  * is_candidate_equality
- *		Is the clause one of the equalities the outer index enforces: column
- *		i of the index compared with the i-th value expression?
+ *		Is the clause one of the equalities a stream enforces: column i of
+ *		its index compared with the i-th value expression?
  */
 static bool
 is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
@@ -713,26 +885,41 @@ find_index_info(RelOptInfo *rel, Oid indexoid)
 	return NULL;				/* keep compiler quiet */
 }
 
-/*
- * path_private_oid
- *		An index OID stored in the path's custom_private.
- */
+static int
+path_nstreams(CustomPath *best_path)
+{
+	return DatumGetInt32(list_nth_node(Const, best_path->custom_private,
+									   PRIVATE_NSTREAMS)->constvalue);
+}
+
 static Oid
-path_private_oid(CustomPath *best_path, int pos)
+path_stream_oid(CustomPath *best_path, int stream)
 {
 	return DatumGetObjectId(list_nth_node(Const, best_path->custom_private,
-										  pos)->constvalue);
+										  PRIVATE_COUNT +
+										  stream * STREAM_PRIVATE_COUNT +
+										  STREAM_PRIVATE_INDEX)->constvalue);
+}
+
+static List *
+path_stream_exprs(CustomPath *best_path, int stream, int which)
+{
+	int			nstreams = path_nstreams(best_path);
+
+	return list_nth(best_path->custom_private,
+					PRIVATE_COUNT + nstreams * STREAM_PRIVATE_COUNT +
+					stream * STREAM_EXPRS_COUNT + which);
 }
 
 /*
  * intersect_scan_qual
  *		The quals the node still has to evaluate, as create_indexscan_plan
- *		computes qpqual: the equalities on the columns of both indexes are
+ *		computes qpqual: the equalities on the columns of every stream are
  *		enforced by the scan keys and rechecked under EvalPlanQual by
- *		intersect_recheck, so they are dropped.  Clauses implied by the inner
- *		index predicate are dropped as well, except for a target relation of
- *		UPDATE/DELETE/SELECT FOR UPDATE, where check_index_predicates keeps
- *		them in the plan for EvalPlanQual.
+ *		intersect_recheck, so they are dropped.  Clauses implied by the
+ *		predicate of an inner index are dropped as well, except for a target
+ *		relation of UPDATE/DELETE/SELECT FOR UPDATE, where
+ *		check_index_predicates keeps them in the plan for EvalPlanQual.
  *
  * Clauses implied by the predicate of a partial outer index are never
  * dropped: the node does not keep that predicate, so under EvalPlanQual
@@ -742,22 +929,14 @@ static List *
 intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 					List *clauses)
 {
-	List	   *outer_exprs = list_nth(best_path->custom_private,
-									   PRIVATE_COUNT + EXPRS_OUTER_KEYS);
-	List	   *indpred = list_nth(best_path->custom_private,
-								   PRIVATE_COUNT + EXPRS_INNER_PRED);
-	List	   *inner_exprs = list_nth(best_path->custom_private,
-									   PRIVATE_COUNT + EXPRS_INNER_KEYS);
-	IndexOptInfo *outer;
-	IndexOptInfo *inner;
+	int			nstreams = path_nstreams(best_path);
+	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
 	bool		is_target_rel;
 	List	   *qpqual = NIL;
 	ListCell   *lc;
 
-	outer = find_index_info(rel, path_private_oid(best_path,
-												  PRIVATE_OUTER_INDEX));
-	inner = find_index_info(rel, path_private_oid(best_path,
-												  PRIVATE_INNER_INDEX));
+	for (int i = 0; i < nstreams; i++)
+		indexes[i] = find_index_info(rel, path_stream_oid(best_path, i));
 
 	is_target_rel = (bms_is_member(rel->relid, root->all_result_relids) ||
 					 get_plan_rowmark(root->rowMarks, rel->relid) != NULL);
@@ -765,17 +944,26 @@ intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	foreach(lc, clauses)
 	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		bool		enforced = false;
 
 		if (rinfo->pseudoconstant)
 			continue;
-		if (is_candidate_equality(rinfo, rel->relid, outer, outer_exprs) ||
-			is_candidate_equality(rinfo, rel->relid, inner, inner_exprs))
-			continue;
-		if (!is_target_rel && indpred != NIL &&
-			!contain_mutable_functions((Node *) rinfo->clause) &&
-			predicate_implied_by(list_make1(rinfo->clause), indpred, false))
-			continue;
-		qpqual = lappend(qpqual, rinfo);
+		for (int i = 0; i < nstreams && !enforced; i++)
+		{
+			List	   *indpred = i > 0 ? indexes[i]->indpred : NIL;
+
+			if (is_candidate_equality(rinfo, rel->relid, indexes[i],
+									  path_stream_exprs(best_path, i,
+														STREAM_EXPRS_KEYS)))
+				enforced = true;
+			else if (!is_target_rel && indpred != NIL &&
+					 !contain_mutable_functions((Node *) rinfo->clause) &&
+					 predicate_implied_by(list_make1(rinfo->clause), indpred,
+										  false))
+				enforced = true;
+		}
+		if (!enforced)
+			qpqual = lappend(qpqual, rinfo);
 	}
 
 	return extract_actual_clauses(qpqual, false);
@@ -795,16 +983,15 @@ intersect_plan_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 {
 	CustomScan *cscan = makeNode(CustomScan);
 	List	   *private = best_path->custom_private;
+	int			nconsts = PRIVATE_COUNT +
+		path_nstreams(best_path) * STREAM_PRIVATE_COUNT;
 
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = intersect_scan_qual(root, rel, best_path, clauses);
 	cscan->scan.scanrelid = rel->relid;
 	cscan->flags = best_path->flags;
-	cscan->custom_private = list_truncate(list_copy(private), PRIVATE_COUNT);
-	cscan->custom_exprs =
-		list_make3(list_nth(private, PRIVATE_COUNT + EXPRS_OUTER_KEYS),
-				   list_nth(private, PRIVATE_COUNT + EXPRS_INNER_PRED),
-				   list_nth(private, PRIVATE_COUNT + EXPRS_INNER_KEYS));
+	cscan->custom_private = list_truncate(list_copy(private), nconsts);
+	cscan->custom_exprs = list_copy_tail(private, nconsts);
 	cscan->custom_scan_tlist = NIL;
 	cscan->methods = &lf_scan_methods;
 

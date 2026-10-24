@@ -1,5 +1,8 @@
+BestPair
 ColumnMatchArg
 EqualityKeys
 IndexCandidate
+IndexStream
 IntersectScanState
+IntersectSearch
 SkipAhead

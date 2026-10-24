@@ -156,8 +156,9 @@ BEGIN
 	LOOP
 		RETURN QUERY
 			SELECT key, node->key FROM unnest(ARRAY[
-				'Outer Index', 'Inner Index',
-				'Outer Entries Read', 'Inner Entries Read', 'Matched TIDs',
+				'Outer Index', 'Inner Index', 'Inner Index 2', 'Inner Index 3',
+				'Outer Entries Read', 'Inner Entries Read',
+				'Inner Entries Read 2', 'Inner Entries Read 3', 'Matched TIDs',
 				'Heap Fetches', 'Skips', 'Short Skips',
 				'Rows Checked by Predicate', 'Group Overflows',
 				'Peak Group Memory', 'Actual Rows', 'Actual Loops',

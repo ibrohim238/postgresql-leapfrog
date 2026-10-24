@@ -7,6 +7,34 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- N-way intersection: a node combines up to `leapfrog.max_indexes` (default
+  4, at most 16) indexes instead of two. Every stream after the outer index
+  is an inner one with its own TID group; the merge advances every stream
+  lagging behind the frontmost value, with skip-ahead per stream, and matches
+  an outer entry only when every group holds its TID. The overflow fallback,
+  the EvalPlanQual recheck and the `Filter` cover every stream. The planner
+  offers every pair as before and then, from the cheapest pair, adds one
+  stream at a time while it lowers the estimated cost, so a third index is
+  used only where fetching the rows the pair leaves costs more than reading
+  it. `EXPLAIN` names the further streams `Inner Index 2`, `Inner Index 3`
+  … with their counters suffixed alike; a two-index node prints what it did.
+  `leapfrog.min_indexes` (developer setting) requires a set size for tests.
+  Tests `leapfrog_nway` (regression: 3–5 streams, planner choice, generic
+  plans, `LATERAL`, non-unique sort column, two overflowing groups, rows
+  moving between streams, `FOR UPDATE`; isolation: EvalPlanQual on the
+  second and third stream).
+- Cost model: the heap fetches are the rows the streams agree on, estimated
+  from the stream conditions alone, and the node's qual is charged per
+  fetched row; the result rows stay the planner's estimate. Before, a
+  two-index node with a third condition in its `Filter` was costed as if it
+  fetched only the result rows.
+- Cost model: the share of the merge spent before the first match is part of
+  the startup cost and no longer also of the run, where it was counted
+  twice (total costs of two-index plans fall by up to 8 %).
+- Planner: the range share of each candidate's probed sort range is computed
+  once; with 6 matching equalities planning took 5.2 ms (10 indexes) and
+  2.7 ms (50) after the range probe, now 0.9 and 1.5 ms with up to four
+  streams.
 - `EXPLAIN (VERBOSE)` shows `Outer Entries Estimated` and `Inner Entries
   Estimated`: the entries the cost model expected each side to read, next to
   the `ANALYZE` counters of what it read. `cost_bench.sh` records both, the
