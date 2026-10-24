@@ -190,6 +190,52 @@ C remain the fastest read.
 An earlier smoke run at 100,000 rows showed the same picture at a smaller
 scale, with every timing below 2 ms.
 
+## Equality types, 1M rows (baseline for `bc83b54`)
+
+`types_bench.sh`: 1,000,000 rows; one key with 200 values stored as
+`bigint`, `integer`, `smallint`, `uuid`, `text` and `varchar`, each with an
+index `(key, id)`, and a filter `f` with 20 values and `(f, id)`; `WHERE key =
+17 AND f = 3 ORDER BY id DESC LIMIT n` matches about 250 rows. The same data
+and physical layout for every build; warm cache (`shared_buffers` 128 MB,
+the rest in the OS cache); 2 warm-up and 15 measured runs per cell through
+`EXPLAIN (ANALYZE, BUFFERS, MEMORY)`; builds run in the order 86d2f42,
+bc83b54, bc83b54, 86d2f42 (ABBA) to tell drift from difference; compared with
+`types_compare.sh`. Median execution time in milliseconds; both ABBA pairs
+agree within the noise below.
+
+| Case | LIMIT | 86d2f42 (node where supported, else stock) | bc83b54 node | Stock plan |
+|---|---:|---:|---:|---:|
+| `bigint = bigint` | 1 | node 0.021–0.022 | 0.022–0.023 | 0.013 (Index Scan) |
+| `bigint = bigint` | 10 | node 0.094–0.101 | 0.094–0.102 | 0.051–0.055 (Index Scan) |
+| `bigint = bigint` | 100 | node 0.80–0.89 | 0.75–0.88 | 3.7–4.1 (Bitmap) |
+| `bigint = bigint` | 1000 | node 2.08–2.24 | 2.01–2.18 | 3.96–4.01 (Bitmap) |
+| `integer = bigint` | 100 | stock 3.68–3.82 | 0.81–0.84 | 3.98–4.07 |
+| `smallint = bigint` | 100 | stock 3.76–3.81 | 0.84–0.91 | 3.87–3.91 |
+| `uuid = uuid` | 100 | stock 3.76–3.78 | 0.82–0.84 | 3.86–3.92 |
+| `text = text` | 100 | stock 3.97–3.98 | 0.90–0.94 | 3.97–4.76 |
+| `varchar = text` | 100 | stock 4.00–4.06 | 0.81–0.84 | 3.97–4.12 |
+| `uuid = uuid` | 1000 | stock 3.81–3.88 | 2.07–2.19 | 3.85–4.20 |
+| `text = text` | 1000 | stock 3.87–3.93 | 2.56–2.62 | 3.97–4.02 |
+
+- **No regression on `bigint = bigint`.** The node reads the same entries
+  (185 / 2,280 / 21,866 / 54,656) and buffers in both builds; medians differ
+  by −10 % to +8 % in either direction between the pairs, i.e. noise.
+- **New types:** where the old build fell back to `Bitmap Heap Scan`, the
+  node is 4.2–4.7× faster at `LIMIT 100` and 1.5–1.9× at `LIMIT 1000`, with
+  the same work as for `bigint`. `text` costs 0.1–0.5 ms more at `LIMIT 1000`
+  than `bigint` (collation-aware comparisons in the B-tree descents).
+- **By-reference values** (`uuid`, `text`, `varchar`) add about 0.02 ms per
+  execution under `EXPLAIN ANALYZE` at `LIMIT 1`/`10`. End to end with
+  `pgbench` (20,000 runs, `leapfrog.force`) `uuid` and `integer` take the same
+  0.16 ms, `text` 0.18 ms.
+- **Planning:** 0.09–0.13 ms with the node against 0.03–0.06 ms stock, the
+  same in both builds; planner memory 36 kB against 34 kB.
+- **A wrong choice, in both builds:** at `LIMIT 1` and `10` the planner picks
+  the node although the stock `Index Scan` on `(key, id)` is faster (0.022
+  against 0.013 ms, 0.10 against 0.05 ms) and planning adds 0.06 ms more.
+  Absolute differences are small, but the cost model overrates the node for
+  very small limits.
+
 ## Not done
 
 - 10M and 100M rows (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).

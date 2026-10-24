@@ -525,6 +525,8 @@ BENCH_SIZES="10000000" bash tests/performance/run.sh
 bash tests/performance/cost_bench.sh             # cost model: estimate against time, skewed and correlated data
 bash tests/performance/skip_bench.sh             # skip-ahead thresholds: buffers and entries read
 bash tests/performance/planning_bench.sh         # planning time: 10/20/50 indexes on the table, 1/2/6 used by the query
+BENCH_LABEL=old BENCH_OUT=results/types-old bash tests/performance/types_bench.sh   # equality types, one build
+bash tests/performance/types_compare.sh tests/performance/results/types-old tests/performance/results/types-new
 ```
 
 Both scripts record `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` after a warm-up,
