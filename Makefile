@@ -11,7 +11,11 @@
 MODULE_big = leapfrog
 OBJS = \
 	$(WIN32RES) \
-	src/leapfrog.o
+	src/costsize.o \
+	src/executor.o \
+	src/indexstream.o \
+	src/leapfrog.o \
+	src/planner.o
 
 EXTENSION = leapfrog
 EXTVERSION = 0.0.1

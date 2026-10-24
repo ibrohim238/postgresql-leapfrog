@@ -89,6 +89,10 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- `src/leapfrog.c` is split by subsystem: `planner.c`, `costsize.c`,
+  `indexstream.c`, `executor.c` and `leapfrog.c` (module entry), with shared
+  declarations in `leapfrog.h`. No behaviour change: the regression and
+  isolation outputs and the estimated costs of the plans are identical.
 - Skip-ahead is adaptive per side: it starts at 64 entries (was a fixed
   1,024); a skip that lands on the leaf page it left or the next one doubles
   the threshold (up to 64×), a longer one halves it back. On 1M rows with

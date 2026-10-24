@@ -552,7 +552,7 @@ limitations.
 
 ### Current limitations
 
-Verified against `src/leapfrog.c` and the tests.
+Verified against `src/` and the tests.
 
 **Index pairs**
 

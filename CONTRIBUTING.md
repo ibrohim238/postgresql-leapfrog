@@ -75,23 +75,42 @@ make test-isolation; cp tests/isolation/results/<name>.out tests/isolation/expec
 
 Read the diffs in full: `regression.diffs`, `tests/isolation/regression.diffs`.
 
+## Source layout
+
+| File | Contents |
+|---|---|
+| `src/leapfrog.h` | structures shared between the files, `custom_private` layout, settings, prototypes |
+| `src/leapfrog.c` | `_PG_init`, settings, SQL-callable functions |
+| `src/planner.c` | planner hook: index candidates and pairs, the path, the plan and its `Filter` |
+| `src/costsize.c` | cost model, including the range probe |
+| `src/indexstream.c` | one index as a sorted stream: scan keys, reading entries |
+| `src/executor.c` | the merge, TID groups, skip-ahead, EvalPlanQual recheck, `EXPLAIN` |
+
+Functions shared between files are prefixed `lf_` and declared in
+`leapfrog.h`; everything else is `static`. The library exports only
+`_PG_init` and the SQL-callable functions (PGXS builds with hidden
+visibility).
+
 ## What to check when changing the planner part
 
-- `find_outer_candidate` / `is_inner_index` — conditions for choosing a pair;
-- `intersect_scan_qual` — which conditions stay in `Filter`; for the target
-  relation of `UPDATE/DELETE/FOR UPDATE` conditions implied by the predicate
-  must stay (EvalPlanQual);
-- `add_intersect_path` — cost; accompany cost model changes with a benchmark
-  run (`tests/performance/run.sh`) and update the "Cost model" section of the
+- `planner.c`: `find_index_candidate`, `is_outer_candidate`,
+  `is_inner_candidate` — conditions for choosing a pair;
+- `planner.c`: `intersect_scan_qual` — which conditions stay in `Filter`; for
+  the target relation of `UPDATE/DELETE/FOR UPDATE` conditions implied by the
+  predicate must stay (EvalPlanQual);
+- `costsize.c`: `lf_cost_intersect_path` — cost; accompany cost model changes
+  with `tests/performance/cost_bench.sh` and a benchmark run
+  (`tests/performance/run.sh`), and update the "Cost model" section of the
   README;
-- `intersect_plan_path` — plan dependencies (`relationOids`) and
+- `planner.c`: `intersect_plan_path` — plan dependencies (`relationOids`) and
   `custom_exprs` (outer `Var`s become nestloop parameters in
   `create_customscan_plan`).
 
 ## What to check when changing the executor part
 
-- `intersect_next` — the merge loop, `fetching_match` / `xs_heap_continue`,
-  `CHECK_FOR_INTERRUPTS`;
+- `executor.c`: `intersect_next` — the merge loop, `fetching_match` /
+  `xs_heap_continue`, `CHECK_FOR_INTERRUPTS`, skip-ahead (`skip_ahead`,
+  `check_landing`);
 - `collect_group` / `group_contains` — the `work_mem` limit, overflow;
 - `intersect_recheck` — EvalPlanQual: equalities and predicate on the new
   version;

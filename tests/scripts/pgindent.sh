@@ -56,4 +56,4 @@ cat "$work/postgres/src/tools/pgindent/typedefs.list" "$root/src/typedefs.list" 
 perl "$work/postgres/src/tools/pgindent/pgindent" $mode \
 	--indent="$work/pg_bsd_indent" \
 	--typedefs="$work/typedefs.list" \
-	src/*.c
+	src/*.c src/*.h
