@@ -15,6 +15,11 @@ versions: [SemVer](https://semver.org/).
   equalities are scan keys, are rechecked under EvalPlanQual, and are checked
   on the row in the overflow fallback. Tests `leapfrog_btree_pair` (regression
   and isolation); both fail without the inner checks.
+- Adaptive skip-ahead: a scan that has read 32 entries in a row without
+  catching up with the other side descends its B-tree again straight to the
+  other side's value (`index_rescan` with `sortcol >= value`, `<=` backward).
+  Shown as `Skips` in `EXPLAIN ANALYZE`; costed per gap in the cost model.
+  Test `leapfrog_skip`; a strict bound (`>` instead of `>=`) fails six tests.
 - The sort column no longer has to lead some index of the table.
 - Under `leapfrog.force` the index pairs compete among themselves by their
   real cost instead of all costing zero.
@@ -41,6 +46,15 @@ versions: [SemVer](https://semver.org/).
   adaptive skip-ahead, N-way intersection, planner search, memory,
   concurrency tests, write and storage benchmarks, more types). It replaces
   the separate "Limitations" and "Roadmap" sections.
+
+### Fixed
+
+- Cost model: heap fetches were charged with the correlation of the sort
+  column, while a stock Index Scan on the outer index, which reads the same
+  rows in the same order, is charged with the correlation of its leading
+  column. The node got a discount on the same heap pages and was chosen for
+  `f = $1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100` at 0.9 ms where
+  the stock plan takes 0.13 ms. Now both use btcostestimate's estimate.
 
 ### Removed
 

@@ -29,7 +29,8 @@ REGRESS = \
 	leapfrog_memory \
 	leapfrog_explain \
 	leapfrog_example \
-	leapfrog_btree_pair
+	leapfrog_btree_pair \
+	leapfrog_skip
 
 ISOLATION = \
 	leapfrog_concurrent_update \

@@ -23,8 +23,9 @@ BEGIN
 END
 $$;
 
--- 1,000,000 orders of 200 customers (5,000 each).  Recent orders are
--- live; deleted orders are old ones: every fifth among the first 400,000.
+-- 1,000,000 orders of 200 customers.  Recent orders are live; one in five
+-- of the oldest 400,000 is deleted.  A deterministic hash spreads customers
+-- and deletions independently of each other.
 CREATE TABLE orders (
     id          bigint PRIMARY KEY,
     customer_id bigint NOT NULL,
@@ -32,10 +33,11 @@ CREATE TABLE orders (
     payload     text
 );
 INSERT INTO orders
-SELECT g, g % 200,
-       CASE WHEN g <= 400000 AND g % 5 = 0 THEN '2026-01-01'::timestamptz END,
+SELECT g, abs(hashint8(g)) % 200,
+       CASE WHEN g <= 400000 AND abs(hashint8(g * 7 + 3)) % 5 = 0
+            THEN '2026-01-01'::timestamptz END,
        repeat('x', 100)
-FROM generate_series(1, 1000000) g;
+FROM generate_series(1, 1000000::bigint) g;
 
 CREATE INDEX idx_orders_customer_id ON orders (customer_id, id);
 CREATE INDEX idx_orders_active_id   ON orders (id) WHERE deleted_at IS NULL;
@@ -44,19 +46,22 @@ VACUUM ANALYZE orders;
 
 -- The latest 100 deleted orders of one customer.
 
--- The planner picks the node by cost, without leapfrog.force.
+-- With page costs for data in memory or on SSD (the usual
+-- random_page_cost = 1.1), the planner picks the node by cost.
+SET random_page_cost = 1.1;
 SELECT * FROM lf_explain_analyze($$
 SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100 $$);
+RESET random_page_cost;
 
--- Without the extension: an Index Scan on the partial index that filters
--- the customer on every deleted row.
-SET leapfrog.enabled = off;
+-- With the default random_page_cost = 4 it keeps the stock plan: an Index
+-- Scan on the partial index that filters the customer on every deleted row.
 SELECT * FROM lf_explain_analyze($$
 SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100 $$);
 
 -- BitmapAnd: both indexes read completely, every match fetched, then sorted.
+SET leapfrog.enabled = off;
 SET enable_indexscan = off;
 SELECT * FROM lf_explain_analyze($$
 SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
@@ -75,8 +80,8 @@ ROLLBACK;
 RESET leapfrog.enabled;
 
 -- Without LIMIT the whole result is needed.  The node and BitmapAnd + Sort
--- are estimated within about 10 % of each other, so which one the planner
--- picks depends on the ANALYZE sample and is not checked; the node's work is.
+-- are estimated close to each other, so which one the planner picks depends
+-- on the ANALYZE sample and is not checked; the node's work is.
 SELECT * FROM lf_counters($$
 SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC $$);

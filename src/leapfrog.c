@@ -60,8 +60,9 @@
  * Index pages are charged like genericcostestimate does (random_page_cost
  * per page, Mackert-Lohman for repeated scans inside a nestloop), the heap
  * pages like cost_index does: between the perfectly correlated and the
- * uncorrelated case by the squared correlation of the sort column, which is
- * the order the heap is visited in.  Tablespace page costs are honoured.
+ * uncorrelated case by the squared correlation btcostestimate would use for
+ * an Index Scan on the outer index, which visits the same heap rows in the
+ * same order.  Tablespace page costs are honoured.
  *
  * Documented assumptions, not derived from statistics: the matches are
  * spread evenly along both indexes (so a LIMIT is served by a proportional
@@ -142,6 +143,16 @@ PG_MODULE_MAGIC_EXT(
  * so the cheapest index pair still wins among the pairs.
  */
 #define INTERSECT_FORCE_SCALE 1e-12
+
+/*
+ * A lagging scan is re-positioned once it has read this many entries in a
+ * row without catching up with the other side.  One more descent of the
+ * B-tree visits tree_height pages (the upper levels usually cached) with a
+ * binary search on each, about the work of reading a few dozen entries of a
+ * leaf page one by one; past that point descending is cheaper than reading
+ * on.
+ */
+#define INTERSECT_SKIP_AFTER 32
 
 /*
  * Layout of CustomPath.custom_private.  The plan keeps the first
@@ -228,6 +239,11 @@ typedef struct IntersectScanState
 	int64		heap_fetches;
 	int64		group_overflows;
 	int			peak_capacity;	/* largest group array allocated */
+	int64		skips;			/* re-descents of a lagging scan */
+
+	/* entries the lagging side has read in a row without catching up */
+	int64		outer_behind;
+	int64		inner_behind;
 } IntersectScanState;
 
 /*
@@ -740,16 +756,42 @@ index_read_cost(PlannerInfo *root, IndexOptInfo *index, double entries,
 }
 
 /*
- * sort_column_correlation
- *		Correlation of the sort column with the heap order, from the same
- *		pg_statistic slot btcostestimate reads for the leading index column,
- *		for the "<" operator of the integer family the sort column belongs
- *		to.  Zero (no correlation) when there are no statistics.
+ * outer_index_correlation
+ *		Correlation of the heap with the outer index, estimated the way
+ *		btcostestimate estimates it for an Index Scan on that index: the
+ *		correlation of its leading column, times 0.75 for a multicolumn
+ *		index.  Zero (no correlation) when there are no statistics.
+ *
+ * The node visits the heap rows in sort column order, which with the
+ * leading columns fixed may well be more correlated than that.  But an
+ * Index Scan on the outer index visits the same rows in the same order and
+ * is costed with this estimate; giving the node a better one would let it
+ * win on heap pages both plans read alike.
+ */
+static double column_correlation(PlannerInfo *root, Index rti,
+								 AttrNumber attno);
+
+static double
+outer_index_correlation(PlannerInfo *root, Index rti, IndexOptInfo *outer)
+{
+	double		correlation;
+
+	correlation = column_correlation(root, rti, outer->indexkeys[0]);
+	if (outer->nkeycolumns > 1)
+		correlation *= 0.75;
+
+	return correlation;
+}
+
+/*
+ * column_correlation
+ *		Correlation of a bigint column with the heap order, from the
+ *		pg_statistic slot of the "<" operator of the integer family.
  */
 static double
-sort_column_correlation(PlannerInfo *root, Index rti, AttrNumber sort_attno)
+column_correlation(PlannerInfo *root, Index rti, AttrNumber attno)
 {
-	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
+	Var		   *var = makeVar(rti, attno, INT8OID, -1, InvalidOid, 0);
 	VariableStatData vardata;
 	AttStatsSlot sslot;
 	Oid			sortop;
@@ -915,6 +957,47 @@ descent_cost(IndexOptInfo *index)
 }
 
 /*
+ * merge_read_cost
+ *		Cost of reading both index streams through the merge, with the
+ *		skip-ahead of intersect_next.
+ *
+ * With the matches spread evenly, the denser stream has dense/sparse
+ * entries between two entries of the sparser one.  Up to
+ * INTERSECT_SKIP_AFTER of them are read one by one; a longer gap is crossed
+ * by one more descent of the B-tree, charged as btcostestimate charges a
+ * descent plus the leaf page it lands on.
+ */
+static Cost
+merge_read_cost(PlannerInfo *root, IndexOptInfo *outer, IndexOptInfo *inner,
+				double outer_entries, double inner_entries, double loop_count)
+{
+	bool		outer_dense = outer_entries > inner_entries;
+	IndexOptInfo *dense = outer_dense ? outer : inner;
+	double		sparse_entries = Max(Min(outer_entries, inner_entries), 1.0);
+	double		dense_entries = Max(outer_entries, inner_entries);
+	double		dense_read = dense_entries;
+	double		descents = 0;
+	double		spc_random_page_cost;
+	Cost		cost;
+
+	if (dense_entries / sparse_entries > INTERSECT_SKIP_AFTER)
+	{
+		dense_read = sparse_entries * INTERSECT_SKIP_AFTER;
+		descents = sparse_entries;
+	}
+
+	get_tablespace_page_costs(dense->reltablespace, &spc_random_page_cost,
+							  NULL);
+
+	cost = index_read_cost(root, outer_dense ? inner : outer, sparse_entries,
+						   loop_count) +
+		index_read_cost(root, dense, dense_read, loop_count) +
+		descents * (descent_cost(dense) + spc_random_page_cost);
+
+	return cost;
+}
+
+/*
  * estimate_group_size
  *		Expected number of inner entries per sortcol value, given the number
  *		of inner entries the scan reads.
@@ -1002,7 +1085,7 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	rows = param_info ? param_info->ppi_rows : rel->rows;
 	loop_count = loop_count_for(root, required_outer);
-	correlation = sort_column_correlation(root, rti, sort_attno);
+	correlation = outer_index_correlation(root, rti, outer);
 	restriction_qual_cost(root, rel, param_info, &qpqual_cost);
 
 	cpath = makeNode(CustomPath);
@@ -1043,11 +1126,11 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	/*
 	 * Reading both indexes, grouping the entries of each value, fetching the
 	 * result rows and running the qual and the target list on them.  The heap
-	 * is read in sort column order, so its correlation decides how scattered
-	 * the fetches are.
+	 * fetches are charged as for an Index Scan on the outer index (see
+	 * outer_index_correlation).
 	 */
-	run_cost = index_read_cost(root, outer, outer_entries, loop_count) +
-		index_read_cost(root, inner, inner_entries, loop_count) +
+	run_cost = merge_read_cost(root, outer, inner, outer_entries,
+							   inner_entries, loop_count) +
 		group_cost(outer_entries, inner_entries, group_size) +
 		heap_fetch_cost(root, rel, rows, loop_count, correlation,
 						(double) outer->pages + inner->pages) +
@@ -1360,12 +1443,13 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
+	/* the equality keys plus the bound on sortcol used for skipping ahead */
 	state->outer_scan = index_beginscan(heap, state->outer_index,
 										estate->es_snapshot, NULL,
-										state->outer_keys.nequal, 0);
+										state->outer_keys.nequal + 1, 0);
 	state->inner_scan = index_beginscan(heap, state->inner_index,
 										estate->es_snapshot, NULL,
-										state->inner_keys.nequal, 0);
+										state->inner_keys.nequal + 1, 0);
 	state->outer_scan->xs_want_itup = true;
 	state->inner_scan->xs_want_itup = true;
 
@@ -1380,6 +1464,7 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 	state->pred_checked = 0;
 	state->heap_fetches = 0;
 	state->group_overflows = 0;
+	state->skips = 0;
 	state->peak_capacity = state->group_capacity;
 
 	intersect_rescan(node);
@@ -1431,18 +1516,40 @@ evaluate_equal_values(IntersectScanState *state)
 
 /*
  * rescan_with_keys
- *		Position an index scan on the current equality values of one side.
+ *		Position an index scan on the current equality values of one side
+ *		and on a bound for sortcol (the key column right after them): values
+ *		>= bound for a forward scan, <= bound for a backward one.  The scan
+ *		was opened with nequal + 1 keys, and index_rescan must get that many.
  */
 static void
-rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys)
+rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, bool descending,
+				 int64 bound)
 {
-	ScanKeyData scankeys[INDEX_MAX_KEYS];
+	ScanKeyData scankeys[INDEX_MAX_KEYS + 1];
 
 	for (int i = 0; i < keys->nequal; i++)
 		ScanKeyInit(&scankeys[i], i + 1, BTEqualStrategyNumber, F_INT8EQ,
 					Int64GetDatum(keys->values[i]));
 
-	index_rescan(scan, scankeys, keys->nequal, NULL, 0);
+	if (descending)
+		ScanKeyInit(&scankeys[keys->nequal], keys->nequal + 1,
+					BTLessEqualStrategyNumber, F_INT8LE, Int64GetDatum(bound));
+	else
+		ScanKeyInit(&scankeys[keys->nequal], keys->nequal + 1,
+					BTGreaterEqualStrategyNumber, F_INT8GE,
+					Int64GetDatum(bound));
+
+	index_rescan(scan, scankeys, keys->nequal + 1, NULL, 0);
+}
+
+/*
+ * no_bound
+ *		The sortcol bound that lets every value through.
+ */
+static int64
+no_bound(bool descending)
+{
+	return descending ? PG_INT64_MAX : PG_INT64_MIN;
 }
 
 /*
@@ -1456,8 +1563,10 @@ intersect_start(IntersectScanState *state)
 	if (!evaluate_equal_values(state))
 		return false;
 
-	rescan_with_keys(state->outer_scan, &state->outer_keys);
-	rescan_with_keys(state->inner_scan, &state->inner_keys);
+	rescan_with_keys(state->outer_scan, &state->outer_keys,
+					 state->descending, no_bound(state->descending));
+	rescan_with_keys(state->inner_scan, &state->inner_keys,
+					 state->descending, no_bound(state->descending));
 
 	return true;
 }
@@ -1732,6 +1841,8 @@ intersect_next(ScanState *ss)
 
 		if (state->outer_value == state->inner_value)
 		{
+			state->outer_behind = 0;
+			state->inner_behind = 0;
 			collect_group(state, dir);
 			continue;
 		}
@@ -1742,10 +1853,37 @@ intersect_next(ScanState *ss)
 		else
 			outer_lags = state->outer_value < state->inner_value;
 
+		/*
+		 * Advance the lagging side by one entry, or, once it has read
+		 * INTERSECT_SKIP_AFTER entries in a row without catching up, descend
+		 * its B-tree again straight to the other side's value.  The entries
+		 * in between cannot match: the other side has consumed every value
+		 * before its current one.
+		 */
 		if (outer_lags)
+		{
 			state->have_outer = false;
+			state->inner_behind = 0;
+			if (++state->outer_behind >= INTERSECT_SKIP_AFTER)
+			{
+				rescan_with_keys(state->outer_scan, &state->outer_keys,
+								 state->descending, state->inner_value);
+				state->outer_behind = 0;
+				state->skips++;
+			}
+		}
 		else
+		{
 			state->have_inner = false;
+			state->outer_behind = 0;
+			if (++state->inner_behind >= INTERSECT_SKIP_AFTER)
+			{
+				rescan_with_keys(state->inner_scan, &state->inner_keys,
+								 state->descending, state->outer_value);
+				state->inner_behind = 0;
+				state->skips++;
+			}
+		}
 	}
 
 	state->done = true;
@@ -1816,6 +1954,8 @@ intersect_rescan(CustomScanState *node)
 	state->in_group = false;
 	state->group_overflow = false;
 	state->group_count = 0;
+	state->outer_behind = 0;
+	state->inner_behind = 0;
 }
 
 static void
@@ -1839,6 +1979,8 @@ intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyInteger("Peak Group Memory", "B",
 							   (int64) state->peak_capacity *
 							   sizeof(ItemPointerData), es);
+		if (state->skips > 0)
+			ExplainPropertyInteger("Skips", NULL, state->skips, es);
 		if (state->group_overflows > 0)
 		{
 			ExplainPropertyInteger("Group Overflows", NULL,

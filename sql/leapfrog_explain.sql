@@ -34,11 +34,11 @@ SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id 
 SELECT * FROM lf_plan_costs($$
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
 
--- The case the node is built for: the owner holds 2% of the rows and 2%
--- of the rows are deleted, independently, and the rows are wide enough
--- that every fetched row costs a heap page.  Either standard index scan
--- discards 49 of 50 fetched rows, BitmapAnd has to read both indexes
--- completely and sort; the intersection wins on cost without force.
+-- The owner holds 2% of the rows and 2% of the rows are deleted, and the
+-- rows are wide enough that every fetched row costs a heap page.  Here the
+-- node and the stock Index Scan on the partial index are estimated within
+-- about 1 % of each other, so which one the planner picks is not checked;
+-- the choice by cost is checked on stable data in leapfrog_example.
 CREATE TABLE lf_explain_cost (
 	id bigint PRIMARY KEY,
 	owner_id bigint NOT NULL,
@@ -52,10 +52,6 @@ CREATE INDEX lf_explain_cost_owner_id ON lf_explain_cost (owner_id, id);
 CREATE INDEX lf_explain_cost_deleted_id ON lf_explain_cost (id) WHERE deleted_at IS NOT NULL;
 VACUUM ANALYZE lf_explain_cost;
 SET leapfrog.force = off;
-EXPLAIN (COSTS OFF)
-SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10;
-SELECT * FROM lf_plan_costs($$
-SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10 $$);
 SELECT lf_check($$ SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10 $$);
 -- Without LIMIT the whole result is needed and BitmapAnd is competitive;
 -- whichever wins, the result is the same.
@@ -110,16 +106,17 @@ INSERT INTO lf_cost_shuffled SELECT * FROM lf_cost_sorted ORDER BY (id * 7919) %
 VACUUM ANALYZE lf_cost_sorted;
 VACUUM ANALYZE lf_cost_shuffled;
 
--- Heap fetches follow the sort column: a heap in that order is cheaper.
--- Only the correlation statistic changes between the two estimates, on the
--- same table (pg_restore_attribute_stats), so that the index sizes and row
--- estimates are identical.
+-- Heap fetches are charged as for an Index Scan on the outer index, by the
+-- correlation of its leading column (owner_id): a heap in that order is
+-- cheaper.  Only the correlation statistic changes between the two
+-- estimates, on the same table (pg_restore_attribute_stats), so that the
+-- index sizes and row estimates are identical.
 SELECT pg_restore_attribute_stats('schemaname', 'public', 'relname', 'lf_cost_sorted',
-	'attname', 'id', 'inherited', false, 'correlation', 1.0::real);
+	'attname', 'owner_id', 'inherited', false, 'correlation', 1.0::real);
 SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	AS correlated_cost \gset
 SELECT pg_restore_attribute_stats('schemaname', 'public', 'relname', 'lf_cost_sorted',
-	'attname', 'id', 'inherited', false, 'correlation', 0.0::real);
+	'attname', 'owner_id', 'inherited', false, 'correlation', 0.0::real);
 SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	> :correlated_cost AS correlated_heap_is_cheaper;
 ANALYZE lf_cost_sorted;
