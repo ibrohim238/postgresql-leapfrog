@@ -1096,21 +1096,14 @@ intersect_plan_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 {
 	CustomScan *cscan = makeNode(CustomScan);
 	Oid			outer_indexoid;
-	Oid			inner_indexoid;
 
 	/*
-	 * The plan depends on both indexes: a cached plan must be invalidated
-	 * when one of them is dropped, as it is for the indexes of an IndexScan
-	 * (which setrefs.c records from the plan's indexid).
+	 * The index OIDs need no entry in the plan's relationOids: as for an
+	 * IndexScan, creating or dropping an index sends a relcache invalidation
+	 * for its table, which the plan already depends on.
 	 */
 	outer_indexoid = DatumGetObjectId(linitial_node(Const,
 													best_path->custom_private)->constvalue);
-	inner_indexoid = DatumGetObjectId(lsecond_node(Const,
-												   best_path->custom_private)->constvalue);
-	root->glob->relationOids = lappend_oid(root->glob->relationOids,
-										   outer_indexoid);
-	root->glob->relationOids = lappend_oid(root->glob->relationOids,
-										   inner_indexoid);
 
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = intersect_scan_qual(root, rel, best_path,
