@@ -89,6 +89,10 @@ jobs:
       - name: Regression and isolation tests (make installcheck)
         run: make installcheck
 
+      - name: Benchmark harness smoke test
+        if: matrix.cc == 'gcc'
+        run: make bench-smoke
+
       - name: Show diffs on failure
         if: failure()
         run: |

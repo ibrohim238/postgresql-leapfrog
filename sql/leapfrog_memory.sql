@@ -1,0 +1,79 @@
+--
+-- leapfrog_memory
+--
+-- Memory of the predicate fallback.  When a TID group overflows work_mem,
+-- every outer entry of the value is fetched and the inner index predicate is
+-- evaluated on the row inside one call of the access method; rows that fail
+-- it never return to ExecScan, which is where the per-tuple context is
+-- normally reset.  The node must reset it itself after every evaluation, or
+-- whatever the predicate allocates piles up for the whole run of rejected
+-- rows.
+--
+-- The predicate here allocates about 4 kB per evaluation and 50,000
+-- consecutive rows fail it: without the reset that is about 200 MB.  The
+-- check is the growth of the backend's peak resident set (VmHWM), so the
+-- test runs in its own file, i.e. in a fresh backend.  Linux only: it reads
+-- /proc/self/status, which needs superuser (pg_regress runs as one).
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+
+CREATE FUNCTION lf_peak_rss_kb() RETURNS bigint
+LANGUAGE sql AS $$
+	SELECT (regexp_match(pg_read_file('/proc/self/status'),
+						 'VmHWM:\s+(\d+) kB'))[1]::bigint
+$$;
+
+CREATE TABLE lf_memory (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	group_id bigint NOT NULL,
+	deleted_at timestamptz,
+	tag text NOT NULL
+);
+-- One value of group_id: 50,000 deleted rows first (in TID order), then
+-- 11,000 live rows, more than the 10,922 TIDs that fit into 64kB.
+INSERT INTO lf_memory
+SELECT g, 1, 1, '2026-01-01', 't' FROM generate_series(1, 50000) g;
+INSERT INTO lf_memory
+SELECT g, 1, 1, NULL, 't' FROM generate_series(50001, 61000) g;
+CREATE INDEX lf_memory_owner_group ON lf_memory (owner_id, group_id);
+CREATE INDEX lf_memory_live_group ON lf_memory (group_id)
+	WHERE length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL;
+VACUUM ANALYZE lf_memory;
+
+SET work_mem = '64kB';
+SET leapfrog.force = on;
+
+-- Peak memory before and after the query.  This must be the first run of
+-- the query in the backend: a leak raises the peak once, and every later
+-- run would start from the raised peak and show no growth.
+SELECT lf_peak_rss_kb() AS before_kb \gset
+SELECT count(*) FROM (
+	SELECT id FROM lf_memory
+	WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+	ORDER BY group_id) s;
+SELECT lf_peak_rss_kb() - :before_kb < 32 * 1024 AS peak_growth_below_32mb;
+
+-- The plan under test, and the fallback really ran.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM (
+	SELECT id FROM lf_memory
+	WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+	ORDER BY group_id) s;
+SELECT * FROM lf_counters($$
+SELECT id FROM lf_memory
+WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+ORDER BY group_id $$)
+WHERE counter IN ('Group Overflows', 'Rows Checked by Predicate', 'Actual Rows');
+
+-- The result is still the one of the standard plan.
+SELECT lf_check($$
+SELECT id FROM lf_memory
+WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+ORDER BY group_id, id $$);
+
+RESET leapfrog.force;
+RESET work_mem;
+DROP TABLE lf_memory;
+DROP FUNCTION lf_peak_rss_kb();

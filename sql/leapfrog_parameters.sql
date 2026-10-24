@@ -170,6 +170,32 @@ ORDER BY s.id $$);
 RESET enable_hashjoin;
 RESET enable_mergejoin;
 
+-- ORDER BY a column of the nullable side of an outer join sorts the
+-- null-extended column, a different expression from the scan's own column
+-- (it carries varnullingrels).  The node must not claim that order, as
+-- index paths do not; the inner join of the same shape still gets it.
+SELECT * FROM lf_plan($$
+SELECT o.owner_id, s.id
+FROM lf_owners o LEFT JOIN lf_param s ON s.owner_id = 3 AND s.deleted_at IS NULL
+ORDER BY s.id, o.owner_id LIMIT 5 $$);
+SELECT lf_check($$
+SELECT o.owner_id, s.id
+FROM lf_owners o LEFT JOIN lf_param s ON s.owner_id = 3 AND s.deleted_at IS NULL
+ORDER BY s.id, o.owner_id LIMIT 5 $$);
+SELECT lf_check($$
+SELECT o.owner_id, s.id
+FROM lf_owners o LEFT JOIN lf_param s ON s.owner_id = o.owner_id AND s.deleted_at IS NULL
+ORDER BY s.id DESC NULLS LAST, o.owner_id LIMIT 20 $$);
+SELECT lf_check($$
+SELECT o.owner_id, s.id
+FROM lf_owners o FULL JOIN lf_param s ON s.owner_id = o.owner_id AND s.deleted_at IS NULL
+WHERE s.owner_id = 3 OR s.owner_id IS NULL
+ORDER BY s.id, o.owner_id $$);
+SELECT * FROM lf_plan($$
+SELECT o.owner_id, s.id
+FROM lf_owners o JOIN lf_param s ON s.owner_id = 3 AND s.deleted_at IS NULL
+ORDER BY s.id LIMIT 5 $$);
+
 -- Rescan with the same parameter twice in a row (duplicate outer values)
 SELECT lf_check($$
 SELECT v.owner_id, s.id

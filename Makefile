@@ -26,6 +26,7 @@ REGRESS = \
 	leapfrog_overflow \
 	leapfrog_parameters \
 	leapfrog_mvcc \
+	leapfrog_memory \
 	leapfrog_explain
 
 ISOLATION = \
@@ -68,7 +69,7 @@ endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation bench docker-test pgindent pgindent-fix
+.PHONY: test test-regress test-isolation bench bench-smoke docker-test pgindent pgindent-fix
 
 test: installcheck
 
@@ -80,6 +81,9 @@ test-isolation:
 
 bench:
 	bash tests/performance/run.sh
+
+bench-smoke:
+	bash tests/scripts/bench-smoke.sh
 
 docker-test:
 	bash tests/run-in-docker.sh

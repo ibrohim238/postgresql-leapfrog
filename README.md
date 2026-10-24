@@ -307,7 +307,13 @@ Standard PostgreSQL infrastructure: `pg_regress` for SQL tests and
 make installcheck          # everything
 make test-regress          # sql/*.sql against expected/*.out only
 make test-isolation        # tests/isolation/specs/*.spec only
+make pgindent              # core code style
+make bench-smoke           # tiny run of the benchmark harness
 ```
+
+The regression tests need a superuser (as `pg_regress` normally runs):
+`leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` changes
+the page cost of `pg_default` for one check and resets it.
 
 Regression tests (`sql/`):
 
@@ -317,9 +323,10 @@ Regression tests (`sql/`):
 | `leapfrog_basic` | ASC/DESC, `LIMIT 1/100`, no `LIMIT`, empty and full intersection, several equality columns, a predicate with several conditions, cases where the node **must not** be offered (DESC index, nullable and `int4` columns, `IN`, range, no pair, partitioned table, `NOT NULL … NOT VALID`) |
 | `leapfrog_duplicates` | non-unique sort column, matching by TID, key monotonicity, dead entries after `UPDATE/DELETE` without `VACUUM` |
 | `leapfrog_overflow` | `work_mem = 64kB`: the path is not offered by estimate; under `force` — `Group Overflows`, predicate fallback without losing or duplicating rows |
-| `leapfrog_parameters` | generic prepared statement (`$1`), `LATERAL` with one and two nestloop parameters, join through an equivalence class, `NULL` parameter, repeated ReScan, InitPlan, plan cache invalidation on `DROP INDEX` |
-| `leapfrog_mvcc` | HOT chains, rows moving between partial indexes, changes of the merge column and of an equality column, `REPEATABLE READ`, `FOR UPDATE/SHARE`, `UPDATE/DELETE` driven by the node, scrollable cursor |
-| `leapfrog_explain` | every `EXPLAIN` format, `ANALYZE` counters, the node chosen **by cost** without `force`, back to the stock plan with `enabled = off` |
+| `leapfrog_parameters` | generic prepared statement (`$1`), `LATERAL` with one and two nestloop parameters, join through an equivalence class, `NULL` parameter, repeated ReScan, InitPlan, plan cache invalidation on `DROP INDEX`, no node on the nullable side of an outer join |
+| `leapfrog_mvcc` | HOT chains, rows moving between partial indexes, changes of the merge column and of an equality column, `REPEATABLE READ`, `FOR UPDATE/SHARE`, `UPDATE/DELETE` driven by the node, scrollable cursor, dead index entries with a NULL merge column |
+| `leapfrog_memory` | peak backend memory of the predicate fallback (Linux, reads `/proc/self/status`) |
+| `leapfrog_explain` | every `EXPLAIN` format, `ANALYZE` counters, the node chosen **by cost** without `force`, back to the stock plan with `enabled = off`, each cost model input (heap correlation, filter cost, tablespace page cost, loop count) moving the estimate in the right direction |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -456,9 +463,8 @@ postponed (see [Roadmap](#roadmap)).
   never beyond; it is reused on `ReScan` and freed on `EndCustomScan`. Long
   merges without matches call `CHECK_FOR_INTERRUPTS()` every 1024
   iterations — `statement_timeout` and query cancellation work.
-- Plan cache: the OIDs of both indexes are added to the plan's
-  `relationOids`, so `DROP INDEX` invalidates cached plans (test
-  `leapfrog_parameters`).
+- Plan cache: as for an `Index Scan`, creating or dropping either index
+  invalidates cached plans through its table (test `leapfrog_parameters`).
 - The extension creates no tables, writes nothing to the catalog and needs no
   superuser rights to be used (`CREATE EXTENSION` needs the right to create C
   functions, as for any C extension).

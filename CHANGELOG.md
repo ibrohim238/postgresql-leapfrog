@@ -5,6 +5,26 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `leapfrog_memory` regression test: peak backend memory of the predicate
+  fallback; fails by about 200 MB of growth without the per-row context reset.
+- Cost model checks in `leapfrog_explain`: heap correlation (set through
+  `pg_restore_attribute_stats`), filter cost, tablespace page cost and the
+  per-loop cost of a parameterized path; each fails on the cost model of the
+  original code.
+- Outer join tests in `leapfrog_parameters`: no node on the nullable side of
+  a `LEFT`/`FULL JOIN` when ordering by its column.
+- `make bench-smoke` (and a CI step): a tiny benchmark run in a database that
+  holds a stale `bench_owners()`.
+
+### Removed
+
+- The index OIDs are no longer added to the plan's `relationOids`. That was
+  listed as a fix in 0.0.1, but there was no bug: creating or dropping an
+  index already invalidates cached plans through its table, as for an
+  `Index Scan`. Verified by running the plan cache test without it.
+
 ## [0.0.1] — 2026-10-24
 
 First public pre-release: the `Index Merge Intersect` node for PostgreSQL 18

@@ -57,6 +57,9 @@ Every behaviour change comes with a test.
   Numeric costs are not stored in expected files: `lf_plan_costs` masks the
   numbers.
 - `EXPLAIN ANALYZE` counters — `lf_counters(query)`.
+- A fix is not done until a test fails without it: build the code with the
+  fix reverted and check that the new test catches it.
+- Benchmark harness changes — `make bench-smoke`.
 - Concurrent scenarios — `tests/isolation/specs/<name>.spec` +
   `tests/isolation/expected/<name>.out`, and the name goes into `ISOLATION`.
   Every permutation must check the **result**, not just the absence of a
