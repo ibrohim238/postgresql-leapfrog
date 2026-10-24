@@ -76,4 +76,40 @@ ORDER BY group_id, id $$);
 RESET leapfrog.force;
 RESET work_mem;
 DROP TABLE lf_memory;
+
+-- Memory of the equality values.  Values of by-reference types are copied
+-- out of the per-tuple memory for the whole scan and freed on the next
+-- rescan.  40,000 rescans of a nested loop with two text values of about
+-- 3 kB each would keep about 240 MB without that.  The "C" collation keeps
+-- the comparisons of the long values cheap.
+CREATE TABLE lf_memory_values (
+	id bigint PRIMARY KEY,
+	path text COLLATE "C" NOT NULL,
+	tag text COLLATE "C" NOT NULL
+);
+INSERT INTO lf_memory_values
+SELECT g, 'p' || g % 2, 't' || g % 3 FROM generate_series(1, 3000) g;
+CREATE INDEX lf_memory_values_path ON lf_memory_values (path, id);
+CREATE INDEX lf_memory_values_tag ON lf_memory_values (tag, id);
+ANALYZE lf_memory_values;
+SET leapfrog.force = on;
+SET enable_material = off;
+SET enable_memoize = off;
+SELECT lf_peak_rss_kb() AS before_kb \gset
+SELECT count(*) FROM generate_series(1, 40000) d(g)
+CROSS JOIN LATERAL (SELECT id FROM lf_memory_values v
+	WHERE v.path = 'p' || d.g % 2 || repeat('x', 3000 + d.g % 7)
+		AND v.tag = 't' || d.g % 3 || repeat('x', 3000 + d.g % 5)
+	ORDER BY id LIMIT 1) v;
+SELECT lf_peak_rss_kb() - :before_kb < 32 * 1024 AS peak_growth_below_32mb;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM generate_series(1, 40000) d(g)
+CROSS JOIN LATERAL (SELECT id FROM lf_memory_values v
+	WHERE v.path = 'p' || d.g % 2 || repeat('x', 3000 + d.g % 7)
+		AND v.tag = 't' || d.g % 3 || repeat('x', 3000 + d.g % 5)
+	ORDER BY id LIMIT 1) v;
+RESET enable_memoize;
+RESET enable_material;
+RESET leapfrog.force;
+DROP TABLE lf_memory_values;
 DROP FUNCTION lf_peak_rss_kb();

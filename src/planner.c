@@ -234,33 +234,34 @@ ec_member_is_column(PlannerInfo *root, RelOptInfo *rel, EquivalenceClass *ec,
 
 /*
  * find_join_equality
- *		Pick "col = othercolumn" from a list of join clauses: the value is
- *		a column of a single other relation, which becomes a nestloop
- *		parameter.  Returns false when there is no such clause.
+ *		Pick "col = value" from a list of join clauses: the value is an
+ *		expression of other relations only, not volatile, as
+ *		match_clause_to_indexcol accepts for an Index Cond; its columns
+ *		become nestloop parameters.  Returns false when there is no such
+ *		clause.
  */
 static bool
-find_join_equality(List *clauses, RelOptInfo *rel, Index rti,
-				   IndexOptInfo *index, int col, IndexEquality *equality)
+find_join_equality(PlannerInfo *root, List *clauses, RelOptInfo *rel,
+				   Index rti, IndexOptInfo *index, int col,
+				   IndexEquality *equality)
 {
 	ListCell   *lc;
 
 	foreach(lc, clauses)
 	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-		Node	   *other;
+		Relids		outer_relids;
 
 		if (!match_index_equality(rinfo, rti, index, col, equality))
 			continue;
 
-		other = equality->expr;
-		while (IsA(other, RelabelType))
-			other = (Node *) ((RelabelType *) other)->arg;
-		if (IsA(other, Var) && ((Var *) other)->varlevelsup == 0 &&
-			((Var *) other)->varno != rti &&
+		outer_relids = pull_varnos(root, equality->expr);
+		if (!bms_is_empty(outer_relids) &&
+			!bms_overlap(outer_relids, rel->relids) &&
+			!contain_volatile_functions(equality->expr) &&
 			join_clause_is_movable_to(rinfo, rel))
 		{
-			equality->outer_relids =
-				bms_make_singleton(((Var *) other)->varno);
+			equality->outer_relids = outer_relids;
 			return true;
 		}
 	}
@@ -291,14 +292,23 @@ find_equality_clause(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		if (!match_index_equality(rinfo, rti, index, col, equality))
 			continue;
 
-		/* constants and query parameters, both known at execution time */
-		if ((IsA(equality->expr, Const) &&
-			 !((Const *) equality->expr)->constisnull) ||
-			IsA(equality->expr, Param))
+		/*
+		 * A value known at execution time: a constant, or an expression of
+		 * constants and parameters without volatile functions, evaluated once
+		 * per (re)scan as for an Index Cond.  A NULL constant matches no row.
+		 */
+		if (IsA(equality->expr, Const))
+		{
+			if (!((Const *) equality->expr)->constisnull)
+				return true;
+		}
+		else if (!contain_var_clause(equality->expr) &&
+				 !contain_volatile_functions(equality->expr))
 			return true;
 	}
 
-	if (find_join_equality(rel->joininfo, rel, rti, index, col, equality))
+	if (find_join_equality(root, rel->joininfo, rel, rti, index, col,
+						   equality))
 		return true;
 
 	if (!rel->has_eclass_joins)
@@ -308,7 +318,8 @@ find_equality_clause(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	arg.attno = index->indexkeys[col];
 	arg.opfamily = index->opfamily[col];
 
-	return find_join_equality(generate_implied_equalities_for_column(root, rel,
+	return find_join_equality(root,
+							  generate_implied_equalities_for_column(root, rel,
 																	 ec_member_is_column,
 																	 &arg,
 																	 rel->lateral_referencers),

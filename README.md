@@ -124,8 +124,10 @@ For every base relation of the query the planner looks for a set of two or
 more indexes to intersect, called streams:
 
 - the **outer** B-tree `(k1, …, kN, sortcol)`: every `kI` is compared for
-  equality with a constant, a parameter or a column of an outer relation, and
-  the last column is the first sort key of the query;
+  equality with a value known when the scan starts, as for an `Index Cond`:
+  a constant, a parameter, a column of an outer relation, or a
+  non-volatile expression of those (`$1 || $2`, `lower(o.email)`), and the
+  last column is the first sort key of the query;
 - one or more **inner** B-trees `(j1, …, jM, sortcol, …)` with an equality on
   every `jI`. With `M = 0` it must be a partial index whose predicate is
   implied by the query (`(id) WHERE deleted_at IS NULL`).
@@ -476,14 +478,14 @@ Regression tests (`sql/`):
 | `leapfrog_overflow` | `work_mem = 64kB`: no path by estimate; under `force`, the fallback without losing or duplicating rows |
 | `leapfrog_parameters` | prepared statements, `LATERAL` with one and two nestloop parameters, joins through an equivalence class, `NULL` parameter, ReScan, InitPlan, plan cache invalidation, no node on the nullable side of an outer join |
 | `leapfrog_mvcc` | HOT chains, rows moving between partial indexes, changes of the merge and equality columns, `REPEATABLE READ`, `FOR UPDATE/SHARE`, cursors, dead index entries with a NULL merge column |
-| `leapfrog_memory` | peak backend memory of the overflow fallback (Linux) |
+| `leapfrog_memory` | peak backend memory of the overflow fallback and of 40,000 rescans with 3 kB `text` values (Linux) |
 | `leapfrog_explain` | every `EXPLAIN` format, `ANALYZE` counters, each cost model input moving the estimate in the right direction |
 | `leapfrog_example` | the example above verbatim, with the planner's choice at both page costs |
 | `leapfrog_btree_pair` | two ordinary indexes `(customer_id, id)` and `(product_id, id)`: both directions, parameters on either side, partial index with an equality prefix, pairs that must not be formed, the overflow fallback checking the inner equality |
 | `leapfrog_skip` | skip-ahead on both sides, both directions, non-unique sort column, rescans, dead entries; `leapfrog.skip_after` 0 and 1; the adaptive threshold backing off on evenly spread matches and staying low on long gaps |
 | `leapfrog_outer_partial` | partial index on the outer side: its predicate's conditions stay in the `Filter`, plain and `FOR UPDATE`, rows that left the index |
 | `leapfrog_nway` | three, four and five streams against the stock plans, both directions, `LIMIT`; the planner adding a third stream only where it is estimated cheaper and never beyond `leapfrog.max_indexes`; generic plans and `LATERAL` rescans; a non-unique sort column across three groups; two groups overflowing `work_mem`; rows moving between the streams; `FOR UPDATE` |
-| `leapfrog_types` | `uuid`, `text`, `varchar` (with a `text` constant), `smallint` (with a `bigint` constant) and `timestamptz` equality columns, three streams of three types; generic plans with `text` and `uuid` parameters and `NULL`; `LATERAL` rescans with changing `text` and `uuid` values; an inner `text` group overflowing `work_mem`; `smallint` and `integer` sort columns in both directions; an index in another collation than the condition's |
+| `leapfrog_types` | `uuid`, `text`, `varchar` (with a `text` constant), `smallint` (with a `bigint` constant) and `timestamptz` equality columns, three streams of three types; generic plans with `text` and `uuid` parameters and `NULL`; `LATERAL` rescans with changing `text` and `uuid` values; an inner `text` group overflowing `work_mem`; `smallint` and `integer` sort columns in both directions; values computed from parameters, from a join's other side and from `LATERAL` columns, a volatile value left to the stock plan; long `text` values compressed in the index, HOT updates of matched rows; sort columns of domains over `bigint` and `integer`; an index in another collation than the condition's |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions

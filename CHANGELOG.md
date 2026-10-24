@@ -32,6 +32,16 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Equality values computed from parameters, from the other side of a join
+  or from `LATERAL` columns (`status = $1 || $2`,
+  `t.status = lower(p.status)`): any non-volatile expression without the
+  scanned relation's columns, as `match_clause_to_indexcol` accepts for an
+  `Index Cond`, where only a bare constant, parameter or column was taken.
+  It is evaluated once per rescan. Tests in `leapfrog_types`; with the old
+  check those queries get no node. Validation tests for the equality types:
+  long `text` values compressed in the index, HOT updates, and in
+  `leapfrog_memory` 40,000 rescans with 3 kB values, whose copies are freed
+  per rescan (without that the peak grows past 32 MB).
 - Equality columns of any type with a B-tree operator family: `uuid`,
   `text`, `varchar`, `smallint`, `integer`, `timestamptz` and so on, where
   only `bigint` was accepted. The equality operator is looked up in the

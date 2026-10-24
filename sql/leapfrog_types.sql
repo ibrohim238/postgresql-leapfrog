@@ -87,6 +87,37 @@ SELECT lf_check($$
 SELECT p.status, t.id FROM lf_types_pick p
 CROSS JOIN LATERAL (SELECT id FROM lf_types t
 	WHERE t.status = p.status AND t.owner_id = p.owner_id ORDER BY id LIMIT 10) t $$, false);
+-- Values computed from parameters and outer columns, evaluated once per
+-- rescan as for an Index Cond: a parameter expression in a generic plan,
+-- a join on an expression of the other side, a LATERAL expression.
+SET plan_cache_mode = force_generic_plan;
+SET leapfrog.force = on;
+PREPARE lf_types_by_prefix(text, text) AS
+SELECT id FROM lf_types WHERE status = $1 || $2 AND model_type = 'App\Models\' || $2
+ORDER BY id LIMIT 5;
+EXPLAIN (COSTS OFF) EXECUTE lf_types_by_prefix('', 'Invoice');
+DEALLOCATE lf_types_by_prefix;
+RESET leapfrog.force;
+RESET plan_cache_mode;
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SELECT lf_check($$
+SELECT p.status, t.id FROM lf_types_pick p
+JOIN lf_types t ON t.status = lower(upper(p.status)) AND t.owner_id = p.owner_id
+ORDER BY t.id $$);
+RESET enable_mergejoin;
+RESET enable_hashjoin;
+SELECT lf_check($$
+SELECT p.status, t.id FROM lf_types_pick p
+CROSS JOIN LATERAL (SELECT id FROM lf_types t
+	WHERE t.status = p.status || '' AND t.model_type = 'App\Models\' || initcap(p.status)
+	ORDER BY id DESC LIMIT 10) t $$, false);
+-- a volatile value is evaluated per row by the stock plan, never used as a key
+SET leapfrog.force = on;
+SELECT * FROM lf_plan($$
+SELECT id FROM lf_types WHERE status = (CASE WHEN random() >= 0 THEN 'sent' END)
+	AND owner_id = '00000000-0000-0000-0000-000000000007' ORDER BY id LIMIT 5 $$);
+RESET leapfrog.force;
 DROP TABLE lf_types_pick;
 
 -- Overflow: an inner group too large for work_mem (64kB holds about 10900
@@ -138,6 +169,35 @@ SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'b' AND kind = 2 O
 SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'c' AND kind = 0 ORDER BY id4 $$);
 SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'c' AND kind = 0 ORDER BY id4 DESC LIMIT 30 $$);
 DROP TABLE lf_types_sort;
+
+-- Long text values, compressed in the index tuples, as constants and from
+-- the outer side of a nested loop; HOT updates of the matched rows.
+CREATE TABLE lf_types_long (
+	id bigint PRIMARY KEY,
+	path text NOT NULL,
+	kind integer NOT NULL,
+	payload text
+) WITH (autovacuum_enabled = false, fillfactor = 50);
+INSERT INTO lf_types_long
+SELECT g, repeat(md5((g % 4)::text), 40) || (g % 4), abs(hashint8(g)) % 5, 'p' || g
+FROM generate_series(1, 20000) g;
+CREATE INDEX lf_types_long_path_id ON lf_types_long (path, id);
+CREATE INDEX lf_types_long_kind_id ON lf_types_long (kind, id);
+ANALYZE lf_types_long;
+SELECT length(path), count(*) FROM lf_types_long GROUP BY 1;
+SELECT lf_check($$ SELECT id FROM lf_types_long WHERE path = repeat(md5('3'), 40) || '3' AND kind = 2 ORDER BY id $$);
+SELECT lf_check($$ SELECT id FROM lf_types_long WHERE path = repeat(md5('1'), 40) || '1' AND kind = 4 ORDER BY id DESC LIMIT 25 $$);
+SELECT lf_check($$
+SELECT p.g, t.id FROM generate_series(0, 3) p(g)
+CROSS JOIN LATERAL (SELECT id FROM lf_types_long t
+	WHERE t.path = repeat(md5(p.g::text), 40) || p.g AND t.kind = p.g
+	ORDER BY id DESC LIMIT 5) t $$, false);
+BEGIN;
+UPDATE lf_types_long SET payload = payload || '!' WHERE id % 3 = 0;
+SELECT n_tup_hot_upd > 0 AS hot_updates FROM pg_stat_xact_user_tables WHERE relname = 'lf_types_long';
+SELECT lf_check($$ SELECT id, payload FROM lf_types_long WHERE path = repeat(md5('3'), 40) || '3' AND kind = 2 ORDER BY id $$);
+COMMIT;
+DROP TABLE lf_types_long;
 
 -- A sort column of a domain over an integer type.  The ORDER BY equivalence
 -- class holds the column relabeled to the base type, (id)::bigint, which
