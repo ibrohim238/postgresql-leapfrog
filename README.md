@@ -104,6 +104,11 @@ the way `Index Scan` rechecks `indexqualorig`.
 
 ## Example
 
+One million orders of 200 customers. Recent orders are live; deleted orders
+are old ones, every fifth among the first 400,000 ids. The data is
+deterministic, so the counters below are exactly what you get; this example is
+also the regression test `leapfrog_example`.
+
 ```sql
 CREATE EXTENSION leapfrog;   -- SQL wrapper
 LOAD 'leapfrog';             -- or shared_preload_libraries
@@ -114,31 +119,103 @@ CREATE TABLE orders (
     deleted_at  timestamptz,
     payload     text
 );
+INSERT INTO orders
+SELECT g, g % 200,
+       CASE WHEN g <= 400000 AND g % 5 = 0 THEN '2026-01-01'::timestamptz END,
+       repeat('x', 100)
+FROM generate_series(1, 1000000) g;
 
 CREATE INDEX idx_orders_customer_id ON orders (customer_id, id);
 CREATE INDEX idx_orders_active_id   ON orders (id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_orders_deleted_id  ON orders (id) WHERE deleted_at IS NOT NULL;
+VACUUM ANALYZE orders;
+```
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+The latest 100 deleted orders of one customer. The planner picks the node by
+cost, without `leapfrog.force`:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
 SELECT * FROM orders
-WHERE customer_id = 100 AND deleted_at IS NULL
+WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100;
 ```
 
 ```text
- Limit (actual rows=100.00 loops=1)
-   ->  Custom Scan (Index Merge Intersect) on orders (actual rows=100.00 loops=1)
+ Limit (actual time=0.235..0.559 rows=100.00 loops=1)
+   Buffers: shared hit=128
+   ->  Custom Scan (Index Merge Intersect) on orders (actual time=0.234..0.546 rows=100.00 loops=1)
          Outer Index: idx_orders_customer_id
-         Inner Index: idx_orders_active_id
-         Outer Entries Read: 100
-         Inner Entries Read: 2534
+         Inner Index: idx_orders_deleted_id
+         Outer Entries Read: 3100
+         Inner Entries Read: 3982
          Matched TIDs: 100
          Heap Fetches: 100
          Peak Group Memory: 96 B
+         Buffers: shared hit=128
+ Planning Time: 0.084 ms
+ Execution Time: 0.591 ms
 ```
 
-The planner picks the node by cost, competing with the stock plans. To see
-the node where it loses on cost:
+The node walks both indexes from the newest `id` down. The outer side skips
+the customer's 3,000 recent live orders by reading index entries only; then
+the two streams meet, and exactly the 100 rows returned are fetched from the
+heap.
+
+The same query with `BitmapAnd` (`SET leapfrog.enabled = off; SET
+enable_indexscan = off;`):
+
+```text
+ Limit (actual time=8.407..8.427 rows=100.00 loops=1)
+   Buffers: shared hit=2242
+   ->  Sort (actual time=8.406..8.414 rows=100.00 loops=1)
+         Sort Key: id DESC
+         Sort Method: top-N heapsort  Memory: 76kB
+         Buffers: shared hit=2242
+         ->  Bitmap Heap Scan on orders (actual time=6.312..7.942 rows=2000.00 loops=1)
+               Recheck Cond: ((customer_id = 100) AND (deleted_at IS NOT NULL))
+               Heap Blocks: exact=2000
+               Buffers: shared hit=2242
+               ->  BitmapAnd (actual time=5.954..5.955 rows=0.00 loops=1)
+                     Buffers: shared hit=242
+                     ->  Bitmap Index Scan on idx_orders_customer_id (actual time=0.993..0.993 rows=5000.00 loops=1)
+                           Index Cond: (customer_id = 100)
+                           Index Searches: 1
+                           Buffers: shared hit=22
+                     ->  Bitmap Index Scan on idx_orders_deleted_id (actual time=4.688..4.688 rows=80000.00 loops=1)
+                           Index Searches: 1
+                           Buffers: shared hit=220
+ Planning Time: 0.102 ms
+ Execution Time: 8.642 ms
+```
+
+`BitmapAnd` cannot stop at 100 rows: it reads all 80,000 entries of the
+partial index, fetches all 2,000 matching rows and sorts them.
+
+All four plans for this query (warm cache, median of three runs on a laptop;
+the counters are exact, the timings are indicative):
+
+| Plan | Time | Buffers | Index entries read | Heap rows fetched | Sort |
+|---|---|---|---|---|---|
+| **Index Merge Intersect** (planner's choice) | **0.58 ms** | **128** | 3,100 + 3,982 | **100** | no |
+| Index Scan on `(id) WHERE deleted_at IS NOT NULL` + filter (stock planner's choice) | 0.68 ms | 383 | 3,981 | 3,981 | no |
+| Index Scan on `(customer_id, id)` + filter | 1.58 ms | 3,115 | 3,100 | 3,100 | no |
+| BitmapAnd + Bitmap Heap Scan | 9.6 ms | 2,242 | 5,000 + 80,000 | 2,000 | top-N |
+
+Where the node does **not** win, said plainly:
+
+- Without `LIMIT` the whole result is needed. Here the planner keeps
+  `BitmapAnd` (8.8 ms); the node under `leapfrog.force` is close (7.2 ms) with
+  the same 2,242 buffers, since both fetch all 2,000 rows.
+- With 1,000 customers instead of 200 (1,000 orders each) the planner chooses
+  `BitmapAnd` (3.0 ms, 626 buffers) even for `LIMIT 100`, although the node
+  under `force` takes 1.55 ms and 162 buffers: the cost model misses this one
+  (see Known issues).
+- The stock planner is already decent in this example (0.68 ms). The gap grows
+  when the matches are farther away; see [BENCHMARKS.md](BENCHMARKS.md) for
+  35–166× cases.
+
+To see the node where it loses on cost:
 
 ```sql
 SET leapfrog.force = on;   -- diagnostics only, not for production
@@ -326,6 +403,7 @@ Regression tests (`sql/`):
 | `leapfrog_parameters` | generic prepared statement (`$1`), `LATERAL` with one and two nestloop parameters, join through an equivalence class, `NULL` parameter, repeated ReScan, InitPlan, plan cache invalidation on `DROP INDEX`, no node on the nullable side of an outer join |
 | `leapfrog_mvcc` | HOT chains, rows moving between partial indexes, changes of the merge column and of an equality column, `REPEATABLE READ`, `FOR UPDATE/SHARE`, `UPDATE/DELETE` driven by the node, scrollable cursor, dead index entries with a NULL merge column |
 | `leapfrog_memory` | peak backend memory of the predicate fallback (Linux, reads `/proc/self/status`) |
+| `leapfrog_example` | the README example verbatim: the planner's choice, the stock Index Scan and `BitmapAnd` plans with their counters |
 | `leapfrog_explain` | every `EXPLAIN` format, `ANALYZE` counters, the node chosen **by cost** without `force`, back to the stock plan with `enabled = off`, each cost model input (heap correlation, filter cost, tablespace page cost, loop count) moving the estimate in the right direction |
 
 Every `lf_check(query)` runs the query with the stock plan and with

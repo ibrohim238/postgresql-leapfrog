@@ -17,6 +17,11 @@ versions: [SemVer](https://semver.org/).
   a `LEFT`/`FULL JOIN` when ordering by its column.
 - `make bench-smoke` (and a CI step): a tiny benchmark run in a database that
   holds a stale `bench_owners()`.
+- README example with real data and measured output, compared with the stock
+  Index Scan and `BitmapAnd` plans, including the cases where the node does
+  not win. The previous example output had been written by hand and could not
+  be reproduced (the table had no data). The example runs as the regression
+  test `leapfrog_example`.
 
 ### Removed
 

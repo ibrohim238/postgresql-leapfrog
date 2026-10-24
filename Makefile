@@ -27,7 +27,8 @@ REGRESS = \
 	leapfrog_parameters \
 	leapfrog_mvcc \
 	leapfrog_memory \
-	leapfrog_explain
+	leapfrog_explain \
+	leapfrog_example
 
 ISOLATION = \
 	leapfrog_concurrent_update \
