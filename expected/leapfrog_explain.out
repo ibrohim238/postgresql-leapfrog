@@ -258,6 +258,35 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 13 AND archi
  t
 (1 row)
 
+-- The node's row estimate is the matches inside the overlap, so that a Limit
+-- above takes the right share of it: owner 13 has 4/5 of its rows above id
+-- 60,000, where every third row is archived, 1,334 rows (lf_check below);
+-- the relation's estimate, with both conditions independent over the whole
+-- table, is half that.
+CREATE FUNCTION lf_node_rows(query text) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+	plan jsonb;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('enable_indexscan', 'off', true);
+	PERFORM set_config('enable_indexonlyscan', 'off', true);
+	PERFORM set_config('enable_bitmapscan', 'off', true);
+	EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+	RETURN (SELECT (n->>'Plan Rows')::float8
+			FROM jsonb_path_query(plan, 'strict $[0].Plan.**') AS n
+			WHERE n->>'Custom Plan Provider' = 'Index Merge Intersect');
+END
+$$;
+SELECT lf_node_rows($$ SELECT * FROM lf_cost_range WHERE owner_id = 13 AND archived ORDER BY id $$)
+	BETWEEN 1200 AND 1500 AS rows_are_the_matches,
+	lf_node_rows($$ EXECUTE lf_range(13) $$) < 1000 AS generic_plan_keeps_the_estimate;
+ rows_are_the_matches | generic_plan_keeps_the_estimate 
+----------------------+---------------------------------
+ t                    | t
+(1 row)
+
+DROP FUNCTION lf_node_rows(text);
 RESET plan_cache_mode;
 DEALLOCATE lf_range;
 SELECT lf_check($$ SELECT * FROM lf_cost_range WHERE owner_id = 3 AND archived ORDER BY id $$);

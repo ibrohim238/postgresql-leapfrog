@@ -536,9 +536,9 @@ lf_index_entries(PlannerInfo *root, Index rti, IndexOptInfo *index,
 
 /*
  * lf_cost_intersect_path
- *		Set the startup and total cost of an Index Merge Intersect path whose
- *		rows and parameterization are already set, as cost_index does for an
- *		index path.  outer_entries and inner_entries are lf_index_entries of
+ *		Set the rows, startup and total cost of an Index Merge Intersect path
+ *		whose parameterization is set and whose rows hold the planner's
+ *		estimate for the relation, as cost_index does for an index path.  outer_entries and inner_entries are lf_index_entries of
  *		both sides, group_size the expected TID group, correlation
  *		lf_outer_index_correlation of the outer index.
  */
@@ -603,6 +603,12 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 		qpqual_cost.startup + rel->reltarget->cost.startup +
 		run_cost / (matches + 1);
 
+	/*
+	 * The row estimate of the path is the matches: a Limit above takes the
+	 * share limit/rows of the run, which is right only when rows counts what
+	 * the node returns.  Without a probe this is the planner's estimate.
+	 */
+	cpath->path.rows = clamp_row_est(matches);
 	cpath->path.startup_cost = startup_cost;
 	cpath->path.total_cost = startup_cost + run_cost;
 }

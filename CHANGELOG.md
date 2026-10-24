@@ -83,6 +83,10 @@ versions: [SemVer](https://semver.org/).
   was more than 15 % faster but not chosen went from 18 to 11 of 24 at
   `random_page_cost = 4` and from 16 to 10 at 1.1. Tests in
   `leapfrog_explain`; they fail without the probe.
+- The node's row estimate is the matches inside the overlap of the two
+  streams rather than the relation's estimate, so that a `Limit` above takes
+  the right share of the run (test in `leapfrog_explain`: 1,334 actual rows,
+  estimated in range instead of the relation's ~667).
 - `tests/performance/cost_bench.sh`: estimated cost against measured time for
   the node and the stock plan on skewed and correlated data, with misses,
   wrong choices and the cost-to-time bias per query.
