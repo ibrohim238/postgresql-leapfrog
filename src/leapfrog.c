@@ -87,6 +87,23 @@ PG_MODULE_MAGIC_EXT(
 					.version = LEAPFROG_VERSION
 );
 
+/*
+ * A lagging scan is re-positioned once it has read this many entries in a
+ * row without catching up with the other side.  A re-descent through
+ * index_rescan costs tree_height buffer accesses plus restarting the scan,
+ * while a leaf page holds about 400 int8 entries, so a skip pays only when
+ * it moves past the next leaf page.  The threshold is the starting point of
+ * each side's adaptive threshold (SkipAhead in executor.c): it doubles after
+ * a skip that landed on the next leaf page, and halves back after a longer
+ * one.  Measured on 1M-row tables (tests/performance/skip_bench.sh): with
+ * clustered gaps, 64 read up to 1.9 times fewer buffers than 1024; with
+ * matches spread evenly it costs 0.2 % more buffers than not skipping, where
+ * a fixed 128 cost 38 %; 16 and 32 differ from 64 by less than 5 %.  The
+ * developer setting leapfrog.skip_after overrides it for measurements; 0
+ * turns skipping off.
+ */
+#define INTERSECT_SKIP_AFTER 64
+
 /* GUC variables */
 bool		intersect_enabled = true;
 bool		intersect_force = false;

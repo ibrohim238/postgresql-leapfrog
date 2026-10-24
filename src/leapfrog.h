@@ -26,30 +26,6 @@
 #define INTERSECT_NAME "Index Merge Intersect"
 
 /*
- * Under leapfrog.force the paths keep their relative costs, scaled down so
- * far that no other path can be cheaper: add_path compares costs by ratio,
- * so the cheapest index pair still wins among the pairs.
- */
-#define INTERSECT_FORCE_SCALE 1e-12
-
-/*
- * A lagging scan is re-positioned once it has read this many entries in a
- * row without catching up with the other side.  A re-descent through
- * index_rescan costs tree_height buffer accesses plus restarting the scan,
- * while a leaf page holds about 400 int8 entries, so a skip pays only when
- * it moves past the next leaf page.  The threshold is the starting point of
- * each side's adaptive threshold (SkipAhead): it doubles after a skip that
- * landed on the next leaf page, and halves back after a longer one.
- * Measured on 1M-row tables (tests/performance/skip_bench.sh): with clustered
- * gaps, 64 read up to 1.9 times fewer buffers than 1024; with matches spread
- * evenly it costs 0.2 % more buffers than not skipping, where a fixed 128
- * cost 38 %; 16 and 32 differ from 64 by less than 5 %.  The developer
- * setting leapfrog.skip_after overrides it for measurements; 0 turns
- * skipping off.
- */
-#define INTERSECT_SKIP_AFTER 64
-
-/*
  * Layout of CustomPath.custom_private.  The plan keeps the first
  * PRIVATE_COUNT entries in custom_private; the expression lists move to
  * custom_exprs at the EXPRS_* positions.

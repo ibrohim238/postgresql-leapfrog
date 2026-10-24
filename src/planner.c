@@ -41,6 +41,13 @@ typedef struct ColumnMatchArg
 	AttrNumber	attno;
 } ColumnMatchArg;
 
+/*
+ * Under leapfrog.force the paths keep their relative costs, scaled down so
+ * far that no other path can be cheaper: add_path compares costs by ratio,
+ * so the cheapest index pair still wins among the pairs.
+ */
+#define INTERSECT_FORCE_SCALE 1e-12
+
 /* Saved hook value */
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
 
