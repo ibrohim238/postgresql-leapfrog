@@ -146,13 +146,14 @@ PG_MODULE_MAGIC_EXT(
 
 /*
  * A lagging scan is re-positioned once it has read this many entries in a
- * row without catching up with the other side.  One more descent of the
- * B-tree visits tree_height pages (the upper levels usually cached) with a
- * binary search on each, about the work of reading a few dozen entries of a
- * leaf page one by one; past that point descending is cheaper than reading
- * on.
+ * row without catching up with the other side.  A re-descent through
+ * index_rescan costs tree_height buffer accesses plus restarting the scan,
+ * while a leaf page holds about 400 int8 entries; measured on 1M-row
+ * tables, a threshold of 32 read 2-3 times more buffers than not skipping
+ * at all, 256 broke even.  1024 entries, about two and a half leaf pages,
+ * skips only gaps that are clearly longer than a descent.
  */
-#define INTERSECT_SKIP_AFTER 32
+#define INTERSECT_SKIP_AFTER 1024
 
 /*
  * Layout of CustomPath.custom_private.  The plan keeps the first

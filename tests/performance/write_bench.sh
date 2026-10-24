@@ -177,12 +177,18 @@ for strategy in S G; do
 	load "$strategy"
 	echo "$strategy,$(index_count),$(index_size)" >> "$out/size.csv"
 
-	# reads first, on the freshly loaded table
-	if [ "$strategy" = S ]; then
-		read_mix S "SET leapfrog.enabled = off;"
-	else
-		read_mix "G+L" "SET leapfrog.enabled = on;"
-		read_mix G "SET leapfrog.enabled = off;"
+	# reads first, on the freshly loaded table, with the default page costs
+	# and with random_page_cost = 1.1 (SSD or data in memory)
+	for rpc in 4 1.1; do
+		if [ "$strategy" = S ]; then
+			read_mix "S rpc=$rpc" "SET leapfrog.enabled = off; SET random_page_cost = $rpc;"
+		else
+			read_mix "G+L rpc=$rpc" "SET leapfrog.enabled = on; SET random_page_cost = $rpc;"
+			read_mix "G rpc=$rpc" "SET leapfrog.enabled = off; SET random_page_cost = $rpc;"
+		fi
+	done
+	if [ "$strategy" = G ]; then
+		read_mix "G+L forced" "SET leapfrog.force = on;"
 	fi
 
 	measure "$strategy" insert "$BATCH_ROWS" "$(insert_rows "$next" $((next + BATCH_ROWS - 1)))"

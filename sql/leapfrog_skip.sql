@@ -17,14 +17,17 @@ CREATE TABLE lf_skip (
 	grp bigint NOT NULL,
 	deleted_at timestamptz
 );
--- Owner 1 has rows spread evenly over the ids; deleted rows come in
--- clusters far apart (every 1000th block of 50 ids), so both sides lag in
--- turn: the owner side across the gaps between clusters, the deleted side
--- inside the clusters.  grp repeats every value 3 times.
+-- Owner 1 has every other row; deleted rows come in clusters of 50 ids
+-- every 10,000 ids, plus one dense block of 20,000 deleted ids.  Between two
+-- clusters owner 1 has about 5,000 entries, more than INTERSECT_SKIP_AFTER
+-- (1024), so the owner side skips across every gap.  Owner 2 has rows only
+-- every 5,000th id, so inside the dense block the deleted side lags by
+-- 5,000 entries and skips.  grp repeats every value 3 times.
 INSERT INTO lf_skip
-SELECT g, CASE WHEN g % 7 = 0 THEN 1 ELSE 2 END, g / 3,
-	CASE WHEN g % 1000 < 50 THEN '2026-01-01'::timestamptz END
-FROM generate_series(1, 100000) g;
+SELECT g, CASE WHEN g % 2 = 0 THEN 1 WHEN g % 5000 = 25 THEN 2 ELSE 3 END, g / 3,
+	CASE WHEN g % 10000 < 50 OR g BETWEEN 100001 AND 120000
+		THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 200000) g;
 CREATE INDEX lf_skip_owner_id ON lf_skip (owner_id, id);
 CREATE INDEX lf_skip_deleted_id ON lf_skip (id) WHERE deleted_at IS NOT NULL;
 CREATE INDEX lf_skip_owner_grp ON lf_skip (owner_id, grp);
@@ -45,6 +48,13 @@ SELECT * FROM lf_counters($$
 SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id DESC $$)
 WHERE counter IN ('Outer Entries Read', 'Inner Entries Read', 'Matched TIDs', 'Skips');
 
+-- owner 2: the deleted side lags and skips
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_skip WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC $$)
+WHERE counter IN ('Outer Entries Read', 'Inner Entries Read', 'Matched TIDs', 'Skips');
+
 -- a non-unique sort column: the value skipped to must keep all its entries
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY grp $$, false);
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY grp DESC $$, false);
@@ -62,9 +72,9 @@ FROM (VALUES (1::bigint), (2), (1)) v (o),
 			 ORDER BY id DESC LIMIT 40) s $$);
 
 -- dead entries across a skip: deleted and re-inserted rows
-UPDATE lf_skip SET deleted_at = NULL WHERE id % 1000 = 21;
-UPDATE lf_skip SET deleted_at = '2026-02-01' WHERE id % 1000 = 500;
-DELETE FROM lf_skip WHERE id % 1000 = 14;
+UPDATE lf_skip SET deleted_at = NULL WHERE id % 10000 = 22;
+UPDATE lf_skip SET deleted_at = '2026-02-01' WHERE id % 10000 = 5000;
+DELETE FROM lf_skip WHERE id % 10000 = 14;
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
 

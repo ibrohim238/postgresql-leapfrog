@@ -40,6 +40,9 @@ DISTS=${BENCH_DISTS:-"uniform skewed"}
 DELETED=${BENCH_DELETED:-"1 10 50 90"}
 LIMITS=${BENCH_LIMITS:-"1 100 1000 0"}
 REPEATS=${BENCH_REPEATS:-5}
+# random_page_cost for the queries; empty means the server's setting.
+# 1.1 is the usual value for SSDs and data that fits in memory.
+RPC=${BENCH_RANDOM_PAGE_COST:-}
 SEED=${BENCH_SEED:-0.42}
 FORCE=${BENCH_FORCE:-1}
 
@@ -55,6 +58,7 @@ export PGOPTIONS="-c client_min_messages=warning"
 $PSQL -tAc "SELECT version()" > "$out/server.txt"
 $PSQL -tAc "LOAD 'leapfrog'; SELECT 'leapfrog=' || leapfrog_version()" >> "$out/server.txt" 2>/dev/null || true
 $PSQL -tAc "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('shared_buffers','work_mem','random_page_cost','seq_page_cost','effective_cache_size','shared_preload_libraries','jit','max_parallel_workers_per_gather')" >> "$out/server.txt"
+echo "queries run with random_page_cost=${RPC:-server setting}" >> "$out/server.txt"
 
 if ! $PSQL -tAc "SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'" | grep -q 1; then
 	$PSQL -c "CREATE EXTENSION leapfrog"
@@ -101,6 +105,7 @@ run_query() {
 	# every psql call is a new session: load the library explicitly, so the
 	# benchmark does not depend on shared_preload_libraries
 	settings="LOAD 'leapfrog'; SET leapfrog.enabled = $([ "$strategy" = B ] && echo on || echo off); SET leapfrog.force = $([ "$forced" = 1 ] && echo on || echo off);"
+	[ -n "$RPC" ] && settings="$settings SET random_page_cost = $RPC;"
 
 	$PSQL -tA -F',' <<-SQL >> "$csv"
 		$settings

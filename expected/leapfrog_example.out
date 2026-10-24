@@ -53,12 +53,12 @@ ORDER BY id DESC LIMIT 100 $$);
    ->  Custom Scan (Index Merge Intersect) on orders (actual rows=100.00 loops=1)
          Outer Index: idx_orders_customer_id
          Inner Index: idx_orders_deleted_id
-         Outer Entries Read: 553
-         Inner Entries Read: 11258
+         Outer Entries Read: 1545
+         Inner Entries Read: 20305
          Matched TIDs: 100
          Heap Fetches: 100
          Peak Group Memory: 96 B
-         Skips: 225
+         Skips: 1
 (10 rows)
 
 RESET random_page_cost;
@@ -130,11 +130,11 @@ ORDER BY id DESC $$);
 --------------------+--------------------------
  Outer Index        | "idx_orders_customer_id"
  Inner Index        | "idx_orders_deleted_id"
- Outer Entries Read | 2053
- Inner Entries Read | 44408
+ Outer Entries Read | 3045
+ Inner Entries Read | 80044
  Matched TIDs       | 393
  Heap Fetches       | 393
- Skips              | 886
+ Skips              | 1
  Peak Group Memory  | 96
  Actual Rows        | 393.00
  Actual Loops       | 1
