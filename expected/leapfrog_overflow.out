@@ -55,16 +55,17 @@ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY gro
  Outer Index               | "lf_overflow_owner_group"
  Inner Index               | "lf_overflow_live_group"
  Outer Entries Read        | 20000
- Inner Entries Read        | 14357
+ Inner Entries Read        | 13397
  Matched TIDs              | 0
  Heap Fetches              | 20000
  Skips                     | 1
+ Short Skips               | 0
  Rows Checked by Predicate | 20000
  Group Overflows           | 1
  Peak Group Memory         | 65532
  Actual Rows               | 13333.00
  Actual Loops              | 1
-(12 rows)
+(13 rows)
 
 SELECT count(*) FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL;
  count 
@@ -127,16 +128,17 @@ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY gro
  Outer Index               | "lf_overflow_owner_group"
  Inner Index               | "lf_overflow_live_group"
  Outer Entries Read        | 22201
- Inner Entries Read        | 16579
+ Inner Entries Read        | 15619
  Matched TIDs              | 0
  Heap Fetches              | 22201
  Skips                     | 1
+ Short Skips               | 0
  Rows Checked by Predicate | 22201
  Group Overflows           | 1
  Peak Group Memory         | 65532
  Actual Rows               | 14141.00
  Actual Loops              | 1
-(12 rows)
+(13 rows)
 
 -- A mix: one small group and one that overflows.
 UPDATE lf_overflow SET group_id = 200 + id WHERE group_id = 101 AND id % 1000 = 1;
@@ -154,16 +156,17 @@ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY gro
  Outer Index               | "lf_overflow_owner_group"
  Inner Index               | "lf_overflow_live_group"
  Outer Entries Read        | 22237
- Inner Entries Read        | 16607
+ Inner Entries Read        | 15647
  Matched TIDs              | 28
  Heap Fetches              | 22229
  Skips                     | 1
+ Short Skips               | 0
  Rows Checked by Predicate | 22201
  Group Overflows           | 1
  Peak Group Memory         | 65532
  Actual Rows               | 14141.00
  Actual Loops              | 1
-(12 rows)
+(13 rows)
 
 -- With enough work_mem the same query matches by TID.
 SET work_mem = '4MB';
@@ -174,14 +177,15 @@ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY gro
  Outer Index        | "lf_overflow_owner_group"
  Inner Index        | "lf_overflow_live_group"
  Outer Entries Read | 22237
- Inner Entries Read | 16607
+ Inner Entries Read | 15647
  Matched TIDs       | 15581
  Heap Fetches       | 15581
  Skips              | 1
+ Short Skips        | 0
  Peak Group Memory  | 98304
  Actual Rows        | 14141.00
  Actual Loops       | 1
-(10 rows)
+(11 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
                         lf_check                         

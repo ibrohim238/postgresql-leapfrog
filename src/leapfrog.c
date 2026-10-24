@@ -148,12 +148,18 @@ PG_MODULE_MAGIC_EXT(
  * A lagging scan is re-positioned once it has read this many entries in a
  * row without catching up with the other side.  A re-descent through
  * index_rescan costs tree_height buffer accesses plus restarting the scan,
- * while a leaf page holds about 400 int8 entries; measured on 1M-row
- * tables, a threshold of 32 read 2-3 times more buffers than not skipping
- * at all, 256 broke even.  1024 entries, about two and a half leaf pages,
- * skips only gaps that are clearly longer than a descent.
+ * while a leaf page holds about 400 int8 entries, so a skip pays only when
+ * it moves past the next leaf page.  The threshold is the starting point of
+ * each side's adaptive threshold (SkipAhead): it doubles after a skip that
+ * landed on the next leaf page, and halves back after a longer one.
+ * Measured on 1M-row tables (tests/performance/skip_bench.sh): with clustered
+ * gaps, 64 read up to 1.9 times fewer buffers than 1024; with matches spread
+ * evenly it costs 0.2 % more buffers than not skipping, where a fixed 128
+ * cost 38 %; 16 and 32 differ from 64 by less than 5 %.  The developer
+ * setting leapfrog.skip_after overrides it for measurements; 0 turns
+ * skipping off.
  */
-#define INTERSECT_SKIP_AFTER 1024
+#define INTERSECT_SKIP_AFTER 64
 
 /*
  * Layout of CustomPath.custom_private.  The plan keeps the first
@@ -174,6 +180,7 @@ PG_MODULE_MAGIC_EXT(
 /* GUC variables */
 static bool intersect_enabled = true;
 static bool intersect_force = false;
+static int	intersect_skip_after = INTERSECT_SKIP_AFTER;
 
 /* Saved hook value */
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
@@ -194,6 +201,22 @@ typedef struct EqualityKeys
 	int64		values[INDEX_MAX_KEYS];
 	AttrNumber	attnos[INDEX_MAX_KEYS];
 } EqualityKeys;
+
+/*
+ * Skip-ahead state of one side of the merge.  A skip that lands on the leaf
+ * page it left or on the next one in scan direction saved less than the
+ * descent cost, and the side's threshold doubles; a skip that lands further
+ * halves it, down to leapfrog.skip_after.
+ */
+typedef struct SkipAhead
+{
+	int64		behind;			/* entries read in a row without catching up */
+	int64		threshold;		/* entries read before the next skip */
+	bool		landing;		/* a skip happened, its landing page is not
+								 * checked yet */
+	BlockNumber from_page;		/* leaf page the skip left */
+	BlockNumber from_next;		/* its neighbour in scan direction */
+} SkipAhead;
 
 /*
  * Execution state of an Index Merge Intersect scan.
@@ -241,10 +264,10 @@ typedef struct IntersectScanState
 	int64		group_overflows;
 	int			peak_capacity;	/* largest group array allocated */
 	int64		skips;			/* re-descents of a lagging scan */
+	int64		short_skips;	/* skips that landed on the next leaf page */
 
-	/* entries the lagging side has read in a row without catching up */
-	int64		outer_behind;
-	int64		inner_behind;
+	SkipAhead	outer_skip;
+	SkipAhead	inner_skip;
 } IntersectScanState;
 
 /*
@@ -967,9 +990,11 @@ descent_cost(IndexOptInfo *index)
  *
  * With the matches spread evenly, the denser stream has dense/sparse
  * entries between two entries of the sparser one.  Up to
- * INTERSECT_SKIP_AFTER of them are read one by one; a longer gap is crossed
- * by one more descent of the B-tree, charged as btcostestimate charges a
- * descent plus the leaf page it lands on.
+ * leapfrog.skip_after of them are read one by one; a gap longer by more
+ * than two leaf pages is crossed by one more descent of the B-tree, charged
+ * as btcostestimate charges a descent plus the leaf page it lands on.  A
+ * shorter gap is read through: the executor backs off from skips that land
+ * on the next leaf page (check_landing).
  */
 static Cost
 merge_read_cost(PlannerInfo *root, IndexOptInfo *outer, IndexOptInfo *inner,
@@ -981,12 +1006,16 @@ merge_read_cost(PlannerInfo *root, IndexOptInfo *outer, IndexOptInfo *inner,
 	double		dense_entries = Max(outer_entries, inner_entries);
 	double		dense_read = dense_entries;
 	double		descents = 0;
+	double		leaf_entries;
 	double		spc_random_page_cost;
 	Cost		cost;
 
-	if (dense_entries / sparse_entries > INTERSECT_SKIP_AFTER)
+	leaf_entries = dense->tuples / Max(dense->pages, 1);
+	if (intersect_skip_after > 0 &&
+		dense_entries / sparse_entries >
+		intersect_skip_after + 2 * leaf_entries)
 	{
-		dense_read = sparse_entries * INTERSECT_SKIP_AFTER;
+		dense_read = sparse_entries * intersect_skip_after;
 		descents = sparse_entries;
 	}
 
@@ -1585,6 +1614,72 @@ no_bound(bool descending)
 }
 
 /*
+ * init_skip
+ *		Start a side's skip-ahead at leapfrog.skip_after; 0 never skips.
+ */
+static void
+init_skip(SkipAhead *skip)
+{
+	skip->behind = 0;
+	skip->threshold = intersect_skip_after > 0 ?
+		intersect_skip_after : PG_INT64_MAX;
+	skip->landing = false;
+}
+
+/*
+ * skip_ahead
+ *		Re-position a lagging scan on the other side's value, remembering the
+ *		leaf page it leaves so that check_landing can tell how far it went.
+ */
+static void
+skip_ahead(IntersectScanState *state, IndexScanDesc scan, EqualityKeys *keys,
+		   SkipAhead *skip, int64 bound)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+
+	skip->landing = BTScanPosIsValid(so->currPos);
+	if (skip->landing)
+	{
+		skip->from_page = so->currPos.currPage;
+		skip->from_next = state->descending ?
+			so->currPos.prevPage : so->currPos.nextPage;
+	}
+
+	rescan_with_keys(scan, keys, state->descending, bound);
+	skip->behind = 0;
+	state->skips++;
+}
+
+/*
+ * check_landing
+ *		After the first entry read since a skip: a skip that stayed on the
+ *		leaf page it left or moved to the next one did not pay for its
+ *		descent, so the side waits twice as long before the next one; a
+ *		longer skip halves the wait, down to leapfrog.skip_after.  The
+ *		threshold stays within 64 times leapfrog.skip_after.
+ */
+static void
+check_landing(IntersectScanState *state, IndexScanDesc scan, SkipAhead *skip)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+	BlockNumber page;
+
+	if (!skip->landing)
+		return;
+	skip->landing = false;
+
+	page = so->currPos.currPage;
+	if (page == skip->from_page || page == skip->from_next)
+	{
+		state->short_skips++;
+		skip->threshold = Min(skip->threshold * 2,
+							  (int64) intersect_skip_after * 64);
+	}
+	else
+		skip->threshold = Max(skip->threshold / 2, intersect_skip_after);
+}
+
+/*
  * intersect_start
  *		Evaluate the equality values and position both index scans.
  *		Returns false when a value is NULL: nothing can match then.
@@ -1599,6 +1694,8 @@ intersect_start(IntersectScanState *state)
 					 state->descending, no_bound(state->descending));
 	rescan_with_keys(state->inner_scan, &state->inner_keys,
 					 state->descending, no_bound(state->descending));
+	init_skip(&state->outer_skip);
+	init_skip(&state->inner_skip);
 
 	return true;
 }
@@ -1703,7 +1800,10 @@ read_inner_entry(IntersectScanState *state, ScanDirection dir)
 	if (read_index_entry(state->inner_scan, dir, state->inner_sortpos + 1,
 						 &state->inner_value,
 						 &state->inner_tid, &state->inner_read))
+	{
 		state->have_inner = true;
+		check_landing(state, state->inner_scan, &state->inner_skip);
+	}
 	else
 		state->inner_eof = true;
 }
@@ -1838,6 +1938,7 @@ intersect_next(ScanState *ss)
 								  &state->outer_read))
 				break;
 			state->have_outer = true;
+			check_landing(state, state->outer_scan, &state->outer_skip);
 		}
 
 		/* the outer entries of the collected value are looked up by TID */
@@ -1873,8 +1974,8 @@ intersect_next(ScanState *ss)
 
 		if (state->outer_value == state->inner_value)
 		{
-			state->outer_behind = 0;
-			state->inner_behind = 0;
+			state->outer_skip.behind = 0;
+			state->inner_skip.behind = 0;
 			collect_group(state, dir);
 			continue;
 		}
@@ -1886,35 +1987,27 @@ intersect_next(ScanState *ss)
 			outer_lags = state->outer_value < state->inner_value;
 
 		/*
-		 * Advance the lagging side by one entry, or, once it has read
-		 * INTERSECT_SKIP_AFTER entries in a row without catching up, descend
-		 * its B-tree again straight to the other side's value.  The entries
-		 * in between cannot match: the other side has consumed every value
+		 * Advance the lagging side by one entry, or, once it has read its
+		 * threshold of entries in a row without catching up, descend its
+		 * B-tree again straight to the other side's value.  The entries in
+		 * between cannot match: the other side has consumed every value
 		 * before its current one.
 		 */
 		if (outer_lags)
 		{
 			state->have_outer = false;
-			state->inner_behind = 0;
-			if (++state->outer_behind >= INTERSECT_SKIP_AFTER)
-			{
-				rescan_with_keys(state->outer_scan, &state->outer_keys,
-								 state->descending, state->inner_value);
-				state->outer_behind = 0;
-				state->skips++;
-			}
+			state->inner_skip.behind = 0;
+			if (++state->outer_skip.behind >= state->outer_skip.threshold)
+				skip_ahead(state, state->outer_scan, &state->outer_keys,
+						   &state->outer_skip, state->inner_value);
 		}
 		else
 		{
 			state->have_inner = false;
-			state->outer_behind = 0;
-			if (++state->inner_behind >= INTERSECT_SKIP_AFTER)
-			{
-				rescan_with_keys(state->inner_scan, &state->inner_keys,
-								 state->descending, state->outer_value);
-				state->inner_behind = 0;
-				state->skips++;
-			}
+			state->outer_skip.behind = 0;
+			if (++state->inner_skip.behind >= state->inner_skip.threshold)
+				skip_ahead(state, state->inner_scan, &state->inner_keys,
+						   &state->inner_skip, state->outer_value);
 		}
 	}
 
@@ -2001,8 +2094,6 @@ intersect_rescan(CustomScanState *node)
 	state->in_group = false;
 	state->group_overflow = false;
 	state->group_count = 0;
-	state->outer_behind = 0;
-	state->inner_behind = 0;
 }
 
 static void
@@ -2027,7 +2118,11 @@ intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 							   (int64) state->peak_capacity *
 							   sizeof(ItemPointerData), es);
 		if (state->skips > 0)
+		{
 			ExplainPropertyInteger("Skips", NULL, state->skips, es);
+			ExplainPropertyInteger("Short Skips", NULL, state->short_skips,
+								   es);
+		}
 		if (state->group_overflows > 0)
 		{
 			ExplainPropertyInteger("Group Overflows", NULL,
@@ -2065,6 +2160,19 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomIntVariable("leapfrog.skip_after",
+							"Entries a lagging scan reads in a row before it re-descends its B-tree.",
+							"Developer option for measuring skip-ahead; 0 turns skipping off.",
+							&intersect_skip_after,
+							INTERSECT_SKIP_AFTER,
+							0,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
 
 	MarkGUCPrefixReserved("leapfrog");
 

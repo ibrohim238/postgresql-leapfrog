@@ -128,13 +128,15 @@ SELECT * FROM lf_dup WHERE owner_id = 3 AND deleted_at IS NULL ORDER BY group_id
  Outer Index        | "lf_dup_owner_group"
  Inner Index        | "lf_dup_live_group"
  Outer Entries Read | 3000
- Inner Entries Read | 14281
+ Inner Entries Read | 14113
  Matched TIDs       | 1800
  Heap Fetches       | 1800
+ Skips              | 2
+ Short Skips        | 2
  Peak Group Memory  | 384
  Actual Rows        | 1800.00
  Actual Loops       | 1
-(9 rows)
+(11 rows)
 
 SELECT count(*) FROM lf_dup WHERE owner_id = 3 AND deleted_at IS NULL;
  count 

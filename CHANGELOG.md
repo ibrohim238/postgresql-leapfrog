@@ -70,8 +70,21 @@ versions: [SemVer](https://semver.org/).
 - `tests/performance/planning_bench.sh`: planning time with 10, 20 and 50
   indexes, with and without the extension.
 
+- `leapfrog.skip_after`: developer setting for the starting skip-ahead
+  threshold (0 turns skipping off), and `tests/performance/skip_bench.sh`,
+  buffers and entries read for thresholds 0–2048 on even and clustered gaps.
+- `Short Skips` in `EXPLAIN ANALYZE`.
+
 ### Changed
 
+- Skip-ahead is adaptive per side: it starts at 64 entries (was a fixed
+  1,024); a skip that lands on the leaf page it left or the next one doubles
+  the threshold (up to 64×), a longer one halves it back. On 1M rows with
+  clustered gaps it reads up to 1.9× fewer buffers than 0.0.1; with evenly
+  spread matches 0.2 % more than not skipping, where a fixed 128 read 38 %
+  more. The cost model charges a re-descent only for gaps longer than the
+  threshold by two leaf pages. Tested in `leapfrog_skip`: without the
+  back-off the counters show 74 and 396 skips instead of 2 and 4.
 - Planner search: each index is checked once per relation instead of once
   per pair, and the `ndistinct` of the sort column, the outer index
   correlation and the nbtree version (`_bt_metaversion`, which opens the

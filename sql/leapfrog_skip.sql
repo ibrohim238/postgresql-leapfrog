@@ -1,8 +1,8 @@
 --
 -- leapfrog_skip
 --
--- Skip-ahead: a scan that lags behind the other side for INTERSECT_SKIP_AFTER
--- entries descends its B-tree again straight to the other side's value
+-- Skip-ahead: a scan that lags behind the other side for leapfrog.skip_after
+-- (1024) entries descends its B-tree again straight to the other side's value
 -- (sortcol >= value forward, <= value backward).  The entries in between
 -- cannot match; entries equal to the value must not be skipped, which
 -- matters when the sort column is not unique.  Results are compared with the
@@ -19,8 +19,8 @@ CREATE TABLE lf_skip (
 );
 -- Owner 1 has every other row; deleted rows come in clusters of 50 ids
 -- every 10,000 ids, plus one dense block of 20,000 deleted ids.  Between two
--- clusters owner 1 has about 5,000 entries, more than INTERSECT_SKIP_AFTER
--- (1024), so the owner side skips across every gap.  Owner 2 has rows only
+-- clusters owner 1 has about 5,000 entries, more than the threshold, so
+-- the owner side skips across every gap.  Owner 2 has rows only
 -- every 5,000th id, so inside the dense block the deleted side lags by
 -- 5,000 entries and skips.  grp repeats every value 3 times.
 INSERT INTO lf_skip
@@ -70,6 +70,42 @@ FROM (VALUES (1::bigint), (2), (1)) v (o),
 	LATERAL (SELECT id FROM lf_skip
 			 WHERE owner_id = v.o AND deleted_at IS NOT NULL
 			 ORDER BY id DESC LIMIT 40) s $$);
+
+-- leapfrog.skip_after: 0 turns skipping off, 1 re-descends after every
+-- entry a scan lags by; the answers stay the same
+SET leapfrog.skip_after = 0;
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$);
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$)
+WHERE counter IN ('Outer Entries Read', 'Inner Entries Read', 'Matched TIDs', 'Skips');
+SET leapfrog.skip_after = 1;
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$);
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY grp $$, false);
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY grp DESC $$, false);
+RESET leapfrog.skip_after;
+
+-- Adaptive threshold: matches every 100th id, 50 owner-1 entries apart,
+-- inside one leaf page.  Starting at 8 the first skips land on the page they
+-- left or the next one (Short Skips), the threshold doubles past the gap and
+-- the scan stops skipping: a few skips instead of one per match (2,000).
+CREATE INDEX lf_skip_every100 ON lf_skip (id) WHERE id % 100 = 8;
+SET leapfrog.skip_after = 8;
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND id % 100 = 8 ORDER BY id $$);
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_skip WHERE owner_id = 1 AND id % 100 = 8 ORDER BY id $$)
+WHERE counter IN ('Inner Index', 'Matched TIDs', 'Skips', 'Short Skips');
+SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND id % 100 = 8 ORDER BY id DESC $$);
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_skip WHERE owner_id = 1 AND id % 100 = 8 ORDER BY id DESC $$)
+WHERE counter IN ('Matched TIDs', 'Skips', 'Short Skips');
+-- long gaps keep the threshold low: every gap of owner 1 between the deleted
+-- clusters is skipped, none of the skips is short
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$)
+WHERE counter IN ('Matched TIDs', 'Skips', 'Short Skips');
+RESET leapfrog.skip_after;
+DROP INDEX lf_skip_every100;
 
 -- dead entries across a skip: deleted and re-inserted rows
 UPDATE lf_skip SET deleted_at = NULL WHERE id % 10000 = 22;

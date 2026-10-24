@@ -53,13 +53,14 @@ ORDER BY id DESC LIMIT 100 $$);
    ->  Custom Scan (Index Merge Intersect) on orders (actual rows=100.00 loops=1)
          Outer Index: idx_orders_customer_id
          Inner Index: idx_orders_deleted_id
-         Outer Entries Read: 1545
-         Inner Entries Read: 20305
+         Outer Entries Read: 585
+         Inner Entries Read: 20131
          Matched TIDs: 100
          Heap Fetches: 100
          Peak Group Memory: 96 B
-         Skips: 1
-(10 rows)
+         Skips: 4
+         Short Skips: 3
+(11 rows)
 
 RESET random_page_cost;
 -- With the default random_page_cost = 4 it keeps the stock plan: an Index
@@ -130,15 +131,16 @@ ORDER BY id DESC $$);
 --------------------+--------------------------
  Outer Index        | "idx_orders_customer_id"
  Inner Index        | "idx_orders_deleted_id"
- Outer Entries Read | 3045
- Inner Entries Read | 80044
+ Outer Entries Read | 2085
+ Inner Entries Read | 79870
  Matched TIDs       | 393
  Heap Fetches       | 393
- Skips              | 1
+ Skips              | 4
+ Short Skips        | 3
  Peak Group Memory  | 96
  Actual Rows        | 393.00
  Actual Loops       | 1
-(10 rows)
+(11 rows)
 
 -- Same rows as the standard plans, with and without LIMIT.
 SELECT lf_check($$

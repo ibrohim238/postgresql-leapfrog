@@ -131,7 +131,8 @@ BEGIN
 			SELECT key, node->key FROM unnest(ARRAY[
 				'Outer Index', 'Inner Index',
 				'Outer Entries Read', 'Inner Entries Read', 'Matched TIDs',
-				'Heap Fetches', 'Skips', 'Rows Checked by Predicate', 'Group Overflows',
+				'Heap Fetches', 'Skips', 'Short Skips',
+				'Rows Checked by Predicate', 'Group Overflows',
 				'Peak Group Memory', 'Actual Rows', 'Actual Loops',
 				'Rows Removed by Filter']) AS key
 			WHERE node ? key;

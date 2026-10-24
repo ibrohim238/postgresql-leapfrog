@@ -124,9 +124,13 @@ For every base relation of the query the planner looks for an index pair:
 With every column before `sortcol` fixed, both scans return their entries in
 `sortcol` order. The executor reads both as sorted streams in the `ORDER BY`
 direction and advances the side that lags behind until the values meet. Once
-the lagging side has read 1,024 entries in a row without catching up, it
+the lagging side has read 64 entries in a row without catching up, it
 descends its B-tree again straight to the other side's value (**skip-ahead**,
-`index_rescan` with `sortcol >= value`) instead of reading the gap.
+`index_rescan` with `sortcol >= value`) instead of reading the gap. The
+threshold adapts per side: a skip that lands on the leaf page it left or on
+the next one did not pay for its descent and doubles it (up to 64×); a longer
+skip halves it back. Clustered gaps are skipped early, evenly spread matches
+are read through.
 
 When the values meet, the entries are matched **by heap TID**: the inner
 entries of the value are collected into a sorted group and the outer entries
@@ -179,25 +183,28 @@ ORDER BY id DESC LIMIT 100;
 ```
 
 ```text
- Limit (actual time=0.193..2.090 rows=100.00 loops=1)
-   Buffers: shared hit=165
-   ->  Custom Scan (Index Merge Intersect) on orders (actual time=0.192..2.072 rows=100.00 loops=1)
+ Limit (actual time=0.092..1.882 rows=100.00 loops=1)
+   Buffers: shared hit=166
+   ->  Custom Scan (Index Merge Intersect) on orders (actual time=0.091..1.866 rows=100.00 loops=1)
          Outer Index: idx_orders_customer_id
          Inner Index: idx_orders_deleted_id
-         Outer Entries Read: 1545
-         Inner Entries Read: 20305
+         Outer Entries Read: 585
+         Inner Entries Read: 20131
          Matched TIDs: 100
          Heap Fetches: 100
          Peak Group Memory: 96 B
-         Skips: 1
-         Buffers: shared hit=165
- Planning Time: 0.150 ms
- Execution Time: 2.142 ms
+         Skips: 4
+         Short Skips: 3
+         Buffers: shared hit=166
+ Planning Time: 0.106 ms
+ Execution Time: 1.907 ms
 ```
 
-The customer's ~1,500 recent orders are live; the outer side reads past them
-and then skips once, straight to the deleted range. Exactly the 100 returned
-rows are fetched from the heap.
+The customer's ~1,500 recent orders are live; the outer side skips past them
+straight to the deleted range. There about 40 deleted orders of other
+customers lie between two of this customer's, too few to skip: the short
+skips raised the inner side's threshold and it reads them through. Exactly
+the 100 returned rows are fetched from the heap.
 
 With the default `random_page_cost = 4` the planner keeps the stock plan, an
 `Index Scan` on the partial index that filters the customer on every deleted
@@ -228,7 +235,7 @@ are from a laptop and vary up to 2× between runs):
 
 | Plan | Time | Buffers | Heap rows fetched | Sort |
 |---|---|---|---|---|
-| **Index Merge Intersect** (planner's choice at `random_page_cost = 1.1`) | **2.1 ms** | **165** | **100** | no |
+| **Index Merge Intersect** (planner's choice at `random_page_cost = 1.1`) | **1.9 ms** | **166** | **100** | no |
 | Index Scan on `(id) WHERE deleted_at IS NOT NULL` + filter (choice at the default `4`) | 4.3–8.1 ms | 1,957 | 20,304 | no |
 | Index Scan on `(customer_id, id)` + filter | 2.5 ms | 3,133 | 3,554 | no |
 | BitmapAnd + Bitmap Heap Scan | 10.8 ms | 621 | 393 | top-N |
@@ -355,6 +362,7 @@ replaces the file instead of rewriting it.
 |---|---|---|---|
 | `leapfrog.enabled` | `on` | `USERSET` | The planner offers the Index Merge Intersect node and picks it by cost. `off` disables the hook completely. |
 | `leapfrog.force` | `off` | `USERSET` | The node is preferred over every other plan whenever a suitable index pair exists (the counterpart of MySQL's `INDEX_MERGE` hint); among several index pairs the cheapest still wins. The plan-time check of the group estimate against `work_mem` is skipped as well. **Diagnostic setting**: it can make a query many times slower. |
+| `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by `tests/performance/skip_bench.sh`; not in `postgresql.conf.sample`. |
 
 The node is costed with PostgreSQL's own page and CPU costs, so the usual
 tuning applies. In particular, with the default `random_page_cost = 4` (spinning
@@ -372,12 +380,13 @@ Custom Scan (Index Merge Intersect) on orders
   Filter: (payload <> 'x'::text)
   Outer Index: idx_orders_customer_id
   Inner Index: idx_orders_deleted_id
-  Outer Entries Read: 1545
-  Inner Entries Read: 20305
+  Outer Entries Read: 585
+  Inner Entries Read: 20131
   Matched TIDs: 100
   Heap Fetches: 100
   Peak Group Memory: 96 B
-  Skips: 1                  -- shown only when non-zero
+  Skips: 4                  -- shown only when non-zero
+  Short Skips: 3
   Group Overflows: 0        -- shown only when non-zero
   Rows Checked by Predicate: 0
 ```
@@ -392,6 +401,7 @@ Custom Scan (Index Merge Intersect) on orders
 | `Rows Removed by Filter` | the standard counter of rows dropped by `Filter`. |
 | `Peak Group Memory` | largest capacity of the TID group array, bytes. |
 | `Skips` | re-descents of a lagging scan to the other side's value. |
+| `Short Skips` | skips that landed on the leaf page they left or the next one; each doubles that side's threshold (see Skip-ahead). |
 | `Group Overflows` | how many times a value's group exceeded `work_mem` and the node fell back to checking the inner conditions on the row. |
 | `Rows Checked by Predicate` | outer rows of overflowed groups fetched and checked that way. |
 
@@ -439,7 +449,7 @@ Regression tests (`sql/`):
 | `leapfrog_explain` | every `EXPLAIN` format, `ANALYZE` counters, each cost model input moving the estimate in the right direction |
 | `leapfrog_example` | the example above verbatim, with the planner's choice at both page costs |
 | `leapfrog_btree_pair` | two ordinary indexes `(customer_id, id)` and `(product_id, id)`: both directions, parameters on either side, partial index with an equality prefix, pairs that must not be formed, the overflow fallback checking the inner equality |
-| `leapfrog_skip` | skip-ahead on both sides, both directions, non-unique sort column, rescans, dead entries |
+| `leapfrog_skip` | skip-ahead on both sides, both directions, non-unique sort column, rescans, dead entries; `leapfrog.skip_after` 0 and 1; the adaptive threshold backing off on evenly spread matches and staying low on long gaps |
 | `leapfrog_outer_partial` | partial index on the outer side: its predicate's conditions stay in the `Filter`, plain and `FOR UPDATE`, rows that left the index |
 
 Every `lf_check(query)` runs the query with the stock plan and with
@@ -494,9 +504,10 @@ total   = startup + run
 
 - **Index entries**: each side's entries are estimated from its equalities
   (`clauselist_selectivity`); a partial index without equalities is read in
-  full. `merge_read_cost` charges the denser stream at most 1,024 entries per
-  entry of the sparser one plus a re-descent when the gap is longer
-  (skip-ahead), with index pages as in `genericcostestimate`
+  full. `merge_read_cost` charges the denser stream at most 64 entries per
+  entry of the sparser one plus a re-descent when the gap is longer by more
+  than two leaf pages (skip-ahead; shorter gaps are read through, as the
+  executor backs off from short skips), with index pages as in `genericcostestimate`
   (`random_page_cost` of the index's tablespace, Mackert–Lohman for repeated
   scans in a Nested Loop).
 - **Heap pages**: as `cost_index` charges them, interpolated by the squared
@@ -571,8 +582,11 @@ Verified against `src/leapfrog.c` and the tests.
 - The inner entries of a value are materialised (`collect_group`): 6-byte TIDs,
   doubling up to `work_mem`, `qsort` and `bsearch`. A group larger than
   `work_mem` falls back to fetching every outer row of the value.
-- The skip threshold (1,024 entries) is fixed; it was chosen from buffer counts
-  on 1M-row tables, where 32 read 2–3× more buffers than not skipping.
+- Skip-ahead thresholds were measured with data in memory
+  (`tests/performance/skip_bench.sh`, buffer counts); a cold-cache run needs
+  the OS page cache dropped between runs and has not been made. The landing
+  check reads nbtree's scan position (`BTScanOpaque`), so it depends on that
+  internal structure of PostgreSQL 18.
 
 **Tests and benchmarks**
 
@@ -590,7 +604,7 @@ and `deleted_at`.
 | Priority | Improvement | Status |
 |---|---|---|
 | P1 | Two ordinary B-tree indexes | **done** (unreleased): `(customer_id, id)` ∩ `(product_id, id)` |
-| P1 | Adaptive skip-ahead | **done** with a fixed threshold; per-query adaptive threshold open |
+| P1 | Adaptive skip-ahead | **done**: per-side threshold from 64, doubled by short skips; cold-cache measurement open |
 | P1 | Cost model | partly: correlation as for the outer Index Scan, skip-aware reads; distribution of matches along `sortcol` open |
 | P2 | N-way intersection | open |
 | P2 | Planner search | **done**: per-index checks and lookups cached per relation, measured with 10/20/50 indexes; pathkeys beyond `ORDER BY` open |
@@ -611,8 +625,19 @@ slower, and fewer missed cases than the 38–48 of 192 today.
 
 #### Adaptive skip-ahead
 
-Choose the threshold per scan from the index's tree height and entries per
-leaf page, and stop skipping on a scan where skips did not save entries.
+Done: each side starts at 64 entries; a skip that lands on the leaf page it
+left or the next one doubles the side's threshold, a longer one halves it.
+Measured on 1M rows with thresholds 16–2048 (`skip_bench.sh`, buffers):
+
+| Gaps between matches | No skipping | Fixed 1,024 (0.0.1) | Fixed 128 | Adaptive from 64 |
+|---|---:|---:|---:|---:|
+| even, ~50 entries | 5,562 | 5,562 | 7,702 | 5,571 |
+| clusters every 1,000 entries | 2,518 | 2,592 | 2,361 | 2,245 |
+| clusters every 10,000 entries | 1,975 | 410 | 236 | 221 |
+| clusters every 100,000 entries | 1,922 | 44 | 26 | 24 |
+| same, `LIMIT 100` | 438 | 94 | 57 | 54 |
+
+Open: a cold-cache run, where a descent costs reads rather than buffer hits.
 
 #### N-way intersection
 

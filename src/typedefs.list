@@ -2,3 +2,4 @@ ColumnMatchArg
 EqualityKeys
 IndexCandidate
 IntersectScanState
+SkipAhead
