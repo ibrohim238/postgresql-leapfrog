@@ -5,8 +5,16 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.2] — 2026-10-24
+
+Still experimental. The shared library changes; the SQL functions do not:
+`ALTER EXTENSION leapfrog UPDATE` after installing the new files (the update
+script `leapfrog--0.0.1--0.0.2.sql` is empty). Reload or restart the backends
+so that they load the new library.
+
 ### Added
 
+- Extension update script from 0.0.1; `leapfrog_setup` checks the update path.
 - `tests/performance/write_bench.sh`: storage, WAL, write throughput and a read
   mix for 12 filter columns, specialised indexes (30) against general ones
   (14), read with and without leapfrog at both page costs.
@@ -216,5 +224,6 @@ output may still change.
   end of the `ExecScan` call. Replaced with `ExecQualAndReset`.
 - A shadowed variable declaration (`-Wshadow=compatible-local`).
 
-[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.2...HEAD
+[0.0.2]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/ibrohim238/postgresql-leapfrog/releases/tag/v0.0.1

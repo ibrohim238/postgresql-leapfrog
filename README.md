@@ -6,7 +6,7 @@ extension that lets the planner combine two general B-tree indexes at query time
 `(id) WHERE deleted_at IS NULL` — into one ordered stream, so that a table does
 not need a dedicated composite or partial index for every filter combination.
 
-Status: **experimental (0.0.1)**. The executor is covered by regression and
+Status: **experimental (0.0.2)**. The executor is covered by regression and
 isolation tests that compare every result with the stock plans
 (see [Tests](#tests)). The cost model is conservative: in the measured
 benchmarks it picked the node where it was slower only in `LIMIT 1` queries,
@@ -640,7 +640,7 @@ and `deleted_at`.
 
 | Priority | Improvement | Status |
 |---|---|---|
-| P1 | Two ordinary B-tree indexes | **done** (unreleased): `(customer_id, id)` ∩ `(product_id, id)` |
+| P1 | Two ordinary B-tree indexes | **done** (0.0.2): `(customer_id, id)` ∩ `(product_id, id)` |
 | P1 | Adaptive skip-ahead | **done**: per-side threshold from 64, doubled by short skips; measured warm and with shared buffers emptied; OS-cold run open |
 | P1 | Cost model | **done** for the node's own estimate: correlation as for the outer Index Scan, skip-aware reads, group size from `ndistinct`, actual sort ranges of both streams, rows = expected matches; the remaining misses come from the estimates of the competing stock plans |
 | P2 | N-way intersection | open |

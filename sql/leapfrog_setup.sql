@@ -13,9 +13,14 @@ LOAD 'leapfrog';
 SELECT extname, extversion FROM pg_extension WHERE extname = 'leapfrog';
 SELECT leapfrog_version(), leapfrog_is_loaded();
 
+-- An installation of the previous release can be updated in place.
+SELECT source, target, path FROM pg_extension_update_paths('leapfrog')
+WHERE path IS NOT NULL ORDER BY source, target;
+
 -- The GUCs exist with their defaults.
 SHOW leapfrog.enabled;
 SHOW leapfrog.force;
+SHOW leapfrog.skip_after;
 
 -- Deterministic plans.
 SET max_parallel_workers_per_gather = 0;
