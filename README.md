@@ -9,8 +9,9 @@ not need a dedicated composite or partial index for every filter combination.
 Status: **experimental (0.0.1)**. The executor is covered by regression and
 isolation tests that compare every result with the stock plans
 (see [Tests](#tests)). The cost model is conservative: in the measured
-benchmarks it never picked the node where it was slower, and it misses a part
-of the cases where the node is faster (see
+benchmarks it picked the node where it was slower only in `LIMIT 1` queries,
+by under 0.1 ms, and it misses a part of the cases where the node is faster
+(see
 [Known limitations](#known-limitations-and-planned-improvements)).
 
 ## Contents
@@ -594,13 +595,21 @@ Verified against `src/` and the tests.
   the query's equalities (6 in the last rows), not of all indexes; differences
   under 0.03 ms are within the noise of these runs.
 - Only the first key of the query's `ORDER BY` is considered.
-- The cost model is conservative. On the 1M-row benchmark (192 queries) it
-  never picked the node where it was slower, at either page cost — and it did
-  not pick it at all: in 38–48 queries the forced node was more than 15 %
-  faster than the planner's choice. In the largest of these misses the stock
-  planner itself chose a poor `BitmapAnd` (12 ms where another stock plan on the
-  same indexes takes 1.6 ms); the node's own clear misses are 1.5–3× on
-  deleted rows of skewed data and on two ordinary indexes.
+- The cost model is conservative. On the 1M-row benchmark (192 queries,
+  `tests/performance/choices.sql`) the planner picks the node 2 times at
+  `random_page_cost = 4` and 5 times at 1.1; it is clearly slower only in
+  `LIMIT 1` queries (by 0.02–0.09 ms, 1 and 4 cases). It misses the node in
+  27 and 21 queries where the node is more than 15 % faster than both the
+  planner's choice and the stock plan on `(customer_id, id)`. Most of these
+  are deleted rows (1 % uniform: 0.5 ms against 0.7–1.7 ms; skewed, `LIMIT
+  1000`: 1.1 ms against 2–8 ms). Three causes remain, all in how PostgreSQL
+  costs the competing plans rather than in the node's own estimate: the
+  stock plans' estimates assume the filter is spread evenly along `id` (a
+  partial index scan filtering the customer is estimated at 4 for 2 ms of
+  work); `BitmapAnd` reading the same index entries is estimated cheaper
+  (241 against 291 for the node, which is 2–3× faster); and the heap
+  correlation of a multicolumn index is taken as its leading column's × 0.75,
+  as `btcostestimate` does.
 - One relation per node; no partitioned tables, no parallel execution.
 
 **Executor and memory**
@@ -608,11 +617,12 @@ Verified against `src/` and the tests.
 - The inner entries of a value are materialised (`collect_group`): 6-byte TIDs,
   doubling up to `work_mem`, `qsort` and `bsearch`. A group larger than
   `work_mem` falls back to fetching every outer row of the value.
-- Skip-ahead thresholds were measured with data in memory
-  (`tests/performance/skip_bench.sh`, buffer counts); a cold-cache run needs
-  the OS page cache dropped between runs and has not been made. The landing
-  check reads nbtree's scan position (`BTScanOpaque`), so it depends on that
-  internal structure of PostgreSQL 18.
+- Skip-ahead thresholds were measured warm and with shared buffers emptied
+  before every run (`tests/performance/skip_bench.sh`); a run with the OS page
+  cache dropped as well needs root on the database host (`COLD_CMD`) and has
+  not been made. The landing check reads nbtree's scan position
+  (`BTScanOpaque`), so it depends on that internal structure of
+  PostgreSQL 18.
 
 **Tests and benchmarks**
 
@@ -620,7 +630,8 @@ Verified against `src/` and the tests.
   isolation tests: `isolationtester` does not see buffer pin waits. It was
   checked by hand (see Known issues).
 - Benchmarks ran on one laptop with data in memory; timings vary up to 2×
-  between runs. Cold-cache and 10M+ row runs have not been made.
+  between runs. Runs with the OS page cache dropped and 10M+ row runs have
+  not been made.
 
 ### Roadmap
 
@@ -630,8 +641,8 @@ and `deleted_at`.
 | Priority | Improvement | Status |
 |---|---|---|
 | P1 | Two ordinary B-tree indexes | **done** (unreleased): `(customer_id, id)` ∩ `(product_id, id)` |
-| P1 | Adaptive skip-ahead | **done**: per-side threshold from 64, doubled by short skips; cold-cache measurement open |
-| P1 | Cost model | partly: correlation as for the outer Index Scan, skip-aware reads; distribution of matches along `sortcol` open |
+| P1 | Adaptive skip-ahead | **done**: per-side threshold from 64, doubled by short skips; measured warm and with shared buffers emptied; OS-cold run open |
+| P1 | Cost model | **done** for the node's own estimate: correlation as for the outer Index Scan, skip-aware reads, group size from `ndistinct`, actual sort ranges of both streams, rows = expected matches; the remaining misses come from the estimates of the competing stock plans |
 | P2 | N-way intersection | open |
 | P2 | Planner search | **done**: per-index checks and lookups cached per relation, measured with 10/20/50 indexes; pathkeys beyond `ORDER BY` open |
 | P2 | Memory of non-unique keys | open |
@@ -641,13 +652,17 @@ and `deleted_at`.
 
 #### Cost model: distribution of matches along the sort column
 
-The main reason for the misses above. Estimate how many entries each stream
-reads before `LIMIT N` matches from where the conditions' rows lie along
-`sortcol` — histograms of `sortcol` per condition, MCV lists, extended
-statistics (`CREATE STATISTICS … (dependencies, mcv)`) — instead of an even
-spread, and cost skip-ahead on the real gaps. Acceptance: on the benchmark
-matrix, at both page costs, no case where the node is chosen and is clearly
-slower, and fewer missed cases than the 38–48 of 192 today.
+Done: the planner probes the actual smallest and largest sort value of each
+stream and costs only the overlap, with the matches estimated there and used
+as the path's row estimate. On `cost_bench.sh` (24 queries on skewed and
+correlated data) the misses went from 18 to 11 at `random_page_cost = 4` and
+from 16 to 9 at 1.1; on the 1M-row matrix from 32 to 27 and from 21 to 21.
+
+Not done, on purpose: estimating the density of the streams inside the
+overlap by more probes. In the measured misses the node's estimate is not
+the problem; the competing stock plans are estimated too cheaply (see
+Current limitations), and lowering the node's cost to match would be fitting
+the benchmark.
 
 #### Adaptive skip-ahead
 
@@ -663,7 +678,20 @@ Measured on 1M rows with thresholds 16–2048 (`skip_bench.sh`, buffers):
 | clusters every 100,000 entries | 1,922 | 44 | 26 | 24 |
 | same, `LIMIT 100` | 438 | 94 | 57 | 54 |
 
-Open: a cold-cache run, where a descent costs reads rather than buffer hits.
+With shared buffers emptied before every run (`COLD_CMD` running
+`pg_buffercache_evict_all()`; the OS cache stays warm), blocks read into
+shared buffers:
+
+| Gaps between matches | No skipping | Fixed 1,024 | Adaptive from 64 |
+|---|---:|---:|---:|
+| even, ~50 entries | 5,555 | 5,555 | 5,555 |
+| clusters every 1,000 entries | 2,511 | 2,511 | 1,246 |
+| clusters every 10,000 entries | 1,968 | 311 | 122 |
+| clusters every 100,000 entries | 1,917 | 33 | 13 |
+| same, `LIMIT 100` | 433 | 69 | 29 |
+
+Open: a run with the OS page cache dropped too (`COLD_CMD`, needs root on
+the database host), where every block read is a device read.
 
 #### N-way intersection
 

@@ -8,15 +8,23 @@
 # intersects (a, id) or (b, id) with one of them under leapfrog.force, at
 # every starting threshold in THRESHOLDS (leapfrog.skip_after; 0 = no
 # skipping; the executor adapts it per side from there), and records the shared
-# buffers the plan touched, the index entries read, the skips and the
-# median execution time over REPEATS runs after a warm-up.
+# buffers the plan touched (and of them read from outside shared buffers),
+# the index entries read, the skips and the median execution time over
+# REPEATS runs after a warm-up.
 #
-# Data is in shared buffers or the OS cache: a cold-cache run needs the OS
-# page cache dropped between runs (root on the host), which this script does
-# not do.
+# Cold cache: with COLD_CMD set, that command runs before every measurement
+# and the query runs once, without a warm-up.  It must empty both caches:
+# restart the server (shared buffers) and drop the OS page cache, which needs
+# root on the machine the data lives on, for example
+#
+#   COLD_CMD='docker compose restart postgres &&
+#             sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"' \
+#     bash tests/performance/skip_bench.sh
+#
+# The script waits for the server (pg_isready) after the command.
 #
 # Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; ROWS (1000000), THRESHOLDS
-# ("0 128 256 512 1024 2048"), REPEATS (5).
+# ("0 128 256 512 1024 2048"), REPEATS (5), COLD_CMD (unset).
 # Output: tests/performance/results/skip-<timestamp>/skip.csv and a summary
 # on stdout.
 set -euo pipefail
@@ -26,6 +34,7 @@ cd "$(dirname "$0")"
 ROWS=${ROWS:-1000000}
 THRESHOLDS=${THRESHOLDS:-"0 128 256 512 1024 2048"}
 REPEATS=${REPEATS:-5}
+COLD_CMD=${COLD_CMD:-}
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 out="results/skip-$stamp"
@@ -59,16 +68,18 @@ CREATE INDEX lf_skip_bench_m ON lf_skip_bench (id) WHERE del_m;
 CREATE INDEX lf_skip_bench_l ON lf_skip_bench (id) WHERE del_l;
 VACUUM ANALYZE lf_skip_bench;
 
-CREATE OR REPLACE FUNCTION lf_skip_bench_run(query text, repeats int)
-RETURNS TABLE (buffers bigint, outer_read bigint, inner_read bigint,
-			   skips bigint, rows bigint, ms numeric)
+CREATE OR REPLACE FUNCTION lf_skip_bench_run(query text, repeats int, warm boolean)
+RETURNS TABLE (buffers bigint, read bigint, outer_read bigint,
+			   inner_read bigint, skips bigint, rows bigint, ms numeric)
 LANGUAGE plpgsql AS \$\$
 DECLARE
 	plan jsonb;
 	node jsonb;
 	times numeric[] := '{}';
 BEGIN
-	EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' || query INTO plan;
+	IF warm THEN
+		EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' || query INTO plan;
+	END IF;
 	FOR i IN 1 .. repeats LOOP
 		EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' || query INTO plan;
 		times := times || (plan -> 0 ->> 'Execution Time')::numeric;
@@ -80,6 +91,7 @@ BEGIN
 	END IF;
 	buffers := (plan -> 0 -> 'Plan' ->> 'Shared Hit Blocks')::bigint +
 		(plan -> 0 -> 'Plan' ->> 'Shared Read Blocks')::bigint;
+	read := (plan -> 0 -> 'Plan' ->> 'Shared Read Blocks')::bigint;
 	outer_read := (node ->> 'Outer Entries Read')::bigint;
 	inner_read := (node ->> 'Inner Entries Read')::bigint;
 	skips := coalesce((node ->> 'Skips')::bigint, 0);
@@ -104,17 +116,36 @@ queries=(
 	"b+long|SELECT id FROM lf_skip_bench WHERE b = 1 AND del_l ORDER BY id"
 )
 
-echo "query,threshold,buffers,outer_read,inner_read,skips,rows,ms" > "$out/skip.csv"
+repeats=$REPEATS
+warm=true
+if [ -n "$COLD_CMD" ]; then
+	repeats=1
+	warm=false
+	echo "cold cache: $COLD_CMD" >> "$out/server.txt"
+fi
+
+# empty the caches and wait until the server accepts connections again
+make_cold() {
+	bash -c "$COLD_CMD"
+	until pg_isready -q; do
+		sleep 1
+	done
+}
+
+echo "query,threshold,buffers,read,outer_read,inner_read,skips,rows,ms" > "$out/skip.csv"
 for entry in "${queries[@]}"; do
 	name=${entry%%|*}
 	query=${entry#*|}
 	for t in $THRESHOLDS; do
-		row=$($PSQL -tA -F, -c "LOAD 'leapfrog'; SET max_parallel_workers_per_gather = 0; SET leapfrog.force = on; SET leapfrog.skip_after = $t; SELECT * FROM lf_skip_bench_run(\$q\$$query\$q\$, $REPEATS)")
+		if [ -n "$COLD_CMD" ]; then
+			make_cold
+		fi
+		row=$($PSQL -tA -F, -c "LOAD 'leapfrog'; SET max_parallel_workers_per_gather = 0; SET leapfrog.force = on; SET leapfrog.skip_after = $t; SELECT * FROM lf_skip_bench_run(\$q\$$query\$q\$, $repeats, $warm)")
 		echo "$name,$t,$row" >> "$out/skip.csv"
 	done
 done
 
-$PSQL -c "DROP TABLE lf_skip_bench; DROP FUNCTION lf_skip_bench_run(text, int)"
+$PSQL -c "DROP TABLE lf_skip_bench; DROP FUNCTION lf_skip_bench_run(text, int, boolean)"
 
 column -s, -t "$out/skip.csv"
 echo "results: $out"

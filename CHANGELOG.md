@@ -87,6 +87,11 @@ versions: [SemVer](https://semver.org/).
   streams rather than the relation's estimate, so that a `Limit` above takes
   the right share of the run (test in `leapfrog_explain`: 1,334 actual rows,
   estimated in range instead of the relation's ~667).
+- `tests/performance/choices.sql`: planner choices, wrong choices and misses
+  of a `run.sh` run; a miss is now counted only where the node beats both the
+  planner's choice and the stock plan on `(customer_id, id)`.
+- `skip_bench.sh`: `COLD_CMD`, a command run before every measurement (one
+  run, no warm-up) to empty the caches, and the blocks read per query.
 - `tests/performance/cost_bench.sh`: estimated cost against measured time for
   the node and the stock plan on skewed and correlated data, with misses,
   wrong choices and the cost-to-time bias per query.

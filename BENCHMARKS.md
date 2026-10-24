@@ -26,7 +26,10 @@ committed.
   Buffer counts, entries read, heap fetches, index sizes and WAL are
   deterministic; conclusions rest on them where timings are close.
 - Writes are single measurements per run; the range over four runs is given.
-- Cold cache and 10M+ rows were not measured.
+- The OS page cache was never dropped (needs root on the host;
+  `skip_bench.sh` takes a `COLD_CMD` for that). `skip_bench.sh` was also run
+  with shared buffers emptied before every query. 10M+ rows were not
+  measured.
 
 ## Write and storage benchmark
 
@@ -115,15 +118,29 @@ strategy, 5 repetitions after a warm-up.
 
 ### Planner choices
 
-| `random_page_cost` | Node chosen (of 192) | Chosen and >15 % slower than the best of A, B\* | Not chosen though B\* >15 % faster than B |
-|---|---|---|---|
-| 4 | 0 | 0 | 48 |
-| 1.1 | 0 | 0 | 38 |
+Counted by `tests/performance/choices.sql` from the `results.csv` of a run
+with `BENCH_FORCE=1`. A miss is a query where the node (B\*) is more than 15 %
+faster than both B's choice and A: A's index is one of B's, so A's plan is
+open to B's planner as well.
 
-The cost model is now conservative: no wrong choices, and no choices at all on
-this matrix. In the largest misses (uniform, 90 % deleted, live rows) the stock
-planner itself picks a poor `BitmapAnd` with B's indexes — 12.3 ms, where A's
-plan on the same `(customer_id, id)` index takes 1.6 ms and the node 3.6 ms.
+| `random_page_cost` | Node chosen (of 192) | Chosen and >15 % slower than the best of A, B\* | Missed |
+|---|---|---|---|
+| 4 | 2 | 1 | 27 |
+| 1.1 | 5 | 4 | 21 |
+
+Final code (commit `ebeb049`, range probe and row estimate). The wrong
+choices are all `LIMIT 1` queries, off by 0.02–0.09 ms. Most misses are
+deleted rows: 1 % uniform (node 0.5 ms against 0.7–1.7 ms) and skewed with
+`LIMIT 1000` (1.1 ms against 2–8 ms). In them the competing stock plans are
+estimated too cheaply — PostgreSQL assumes the customer is spread evenly
+along `id` and costs `BitmapAnd` below the node on the same index entries —
+rather than the node too dearly; see the README's Current limitations.
+
+The earlier count on this matrix (48 and 38 misses, nothing chosen) used B\*
+against B only. With that definition the largest "misses" were queries where
+the stock planner itself picked a poor `BitmapAnd` with B's indexes (12.3 ms,
+while A's plan on the same `(customer_id, id)` index takes 1.6 ms and the
+node 3.6 ms) — not cases the node should win.
 
 ### Skewed, largest customer (50,172 rows), `random_page_cost = 1.1`
 
@@ -151,5 +168,5 @@ scale, with every timing below 2 ms.
 ## Not done
 
 - 10M and 100M rows (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).
-- Cold cache: all measurements are warm, data in memory.
+- OS-cold runs: everything above is with data in the OS page cache.
 - Real-world data: synthetic data only.
