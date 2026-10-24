@@ -481,6 +481,9 @@ bash tests/performance/write_bench.sh            # storage, writes and reads for
 bash tests/performance/run.sh                    # reads: 3 strategies, uniform and skewed, 1/10/50/90 % deleted
 BENCH_RANDOM_PAGE_COST=1.1 bash tests/performance/run.sh
 BENCH_SIZES="10000000" bash tests/performance/run.sh
+bash tests/performance/cost_bench.sh             # cost model: estimate against time, skewed and correlated data
+bash tests/performance/skip_bench.sh             # skip-ahead thresholds: buffers and entries read
+bash tests/performance/planning_bench.sh         # planning time with 10/20/50 indexes
 ```
 
 Both scripts record `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` after a warm-up,
@@ -493,13 +496,16 @@ The structure follows MySQL's `ROR_intersect_plan::add`; the components are
 PostgreSQL cost functions:
 
 ```text
-run     = merge_read_cost(outer entries, inner entries)
-        + group_cost(outer + inner, log2(group size))
-        + heap_fetch_cost(rows)
-        + rows × (cpu_tuple_cost + qual cost + tlist cost)
+read    = entries of each stream inside the overlap of their sortcol ranges
+matches = rows × outer share × inner share / table share of the overlap
+run     = merge_read_cost(outer read, inner read)
+        + group_cost(outer + inner read, log2(group size))
+        + heap_fetch_cost(matches)
+        + matches × (cpu_tuple_cost + qual cost + tlist cost)
+        + one descent per stream that skips into the overlap
 startup = descent into both B-trees (as in btcostestimate)
         + startup cost of qual and tlist
-        + run / (rows + 1)          -- both streams advance to the first match
+        + run / (matches + 1)       -- both streams advance to the first match
 total   = startup + run
 ```
 
@@ -508,20 +514,39 @@ total   = startup + run
   full. `merge_read_cost` charges the denser stream at most 64 entries per
   entry of the sparser one plus a re-descent when the gap is longer by more
   than two leaf pages (skip-ahead; shorter gaps are read through, as the
-  executor backs off from short skips), with index pages as in `genericcostestimate`
-  (`random_page_cost` of the index's tablespace, Mackert–Lohman for repeated
-  scans in a Nested Loop).
+  executor backs off from short skips), with index pages as in
+  `genericcostestimate` (`random_page_cost` of the index's tablespace,
+  Mackert–Lohman for repeated scans in a Nested Loop).
+- **Where the streams meet**: when every equality value is a constant, the
+  planner reads the smallest and the largest sortcol value of each stream
+  from its index (one descent from each end, like `get_actual_variable_range`
+  for the selectivity functions; entries of any visibility, so a dead entry
+  at an end only widens the range). Only the overlap of the two ranges is
+  read — the rest is skipped — and matches can only lie there. The shares of
+  each stream and of the table inside the overlap come from the sortcol
+  histogram, with each stream assumed to follow the table's distribution
+  within its own range; the planner's row estimate (conditions independent
+  over the whole table) becomes one where they are independent inside the
+  overlap. Disjoint ranges cost next to nothing. A parameterized path or a
+  generic plan is costed without the probe. Like any plan built on actual
+  values, a cached plan with constants keeps this estimate until it is
+  replanned.
+- **Group size**: inner entries / the number of distinct sortcol values in
+  the table (`get_variable_numdistinct`).
 - **Heap pages**: as `cost_index` charges them, interpolated by the squared
   correlation that `btcostestimate` uses for an Index Scan on the outer index
   (its leading column, ×0.75 for a multicolumn index). The node visits the
   same heap rows in the same order as that Index Scan, so both are charged
   alike; the node wins only by fetching fewer rows.
-- `LIMIT` is applied by the planner: `startup + (total − startup) × fraction`.
+- `LIMIT` is applied by the planner: `startup + (total − startup) × fraction`,
+  where fraction is `LIMIT` over the planner's row estimate of the relation,
+  not over `matches`.
 
-**Documented assumptions**: matches are spread evenly along both indexes, and
-a TID group has the average size (`inner entries / ndistinct(sortcol)`). Real
-data is often skewed — deleted rows only among old ids — and then the model
-underestimates how much skip-ahead saves; see Known limitations.
+**Documented assumptions**: inside the overlap, matches are spread evenly
+along both indexes, and a TID group has the average size. Skew inside the
+overlap, and the correlation of a filter with the sort column, are not seen —
+by the node or by PostgreSQL's own estimate of the stock plans; see Known
+limitations.
 
 ## Known limitations and planned improvements
 

@@ -154,6 +154,42 @@ FROM (SELECT 7::bigint AS o OFFSET 0) v
 ORDER BY s.id $$)
 	AS repeated_scans_are_cheaper_per_loop;
 
+-- The actual sortcol range of each stream, probed at plan time when the
+-- equality values are constants: owner 3 has rows among ids 1-50,000 only,
+-- archived rows are ids above 60,000, so the streams cannot meet and the
+-- node costs next to nothing.  A generic plan (a parameter instead of the
+-- constant) cannot probe and is costed for the whole streams.
+CREATE TABLE lf_cost_range (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	archived boolean NOT NULL
+);
+INSERT INTO lf_cost_range
+SELECT g, CASE WHEN g <= 50000 THEN g % 10 ELSE 10 + g % 10 END, g > 60000 AND g % 3 = 0
+FROM generate_series(1, 100000) g;
+CREATE INDEX lf_cost_range_owner_id ON lf_cost_range (owner_id, id);
+CREATE INDEX lf_cost_range_archived_id ON lf_cost_range (id) WHERE archived;
+ANALYZE lf_cost_range;
+PREPARE lf_range(bigint) AS
+	SELECT * FROM lf_cost_range WHERE owner_id = $1 AND archived ORDER BY id;
+SET plan_cache_mode = force_generic_plan;
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 3 AND archived ORDER BY id $$) * 10
+	 < lf_node_cost($$ EXECUTE lf_range(3) $$)
+	AS disjoint_ranges_are_cheap;
+-- An owner without rows: the stream is empty.
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 99 AND archived ORDER BY id $$) * 10
+	 < lf_node_cost($$ EXECUTE lf_range(99) $$)
+	AS empty_stream_is_cheap;
+-- Owner 13 (ids above 50,000) meets the archived rows: no discount.
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 13 AND archived ORDER BY id $$)
+	 > lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 3 AND archived ORDER BY id $$) * 10
+	AS overlapping_ranges_are_not_discounted;
+RESET plan_cache_mode;
+DEALLOCATE lf_range;
+SELECT lf_check($$ SELECT * FROM lf_cost_range WHERE owner_id = 3 AND archived ORDER BY id $$);
+SELECT lf_check($$ SELECT * FROM lf_cost_range WHERE owner_id = 13 AND archived ORDER BY id DESC $$);
+DROP TABLE lf_cost_range;
+
 DROP FUNCTION lf_costly(text);
 DROP TABLE lf_cost_sorted;
 DROP TABLE lf_cost_shuffled;

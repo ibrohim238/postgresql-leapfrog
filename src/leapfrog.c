@@ -104,6 +104,7 @@
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/stratnum.h"
+#include "access/table.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_statistic.h"
@@ -128,6 +129,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
+#include "utils/snapmgr.h"
 #include "utils/spccache.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -276,7 +278,8 @@ typedef struct IntersectScanState
  * outer rels they refer to, and the position of sortcol among the key
  * columns.  Built once per index while the relation's paths are planned and
  * shared by every pair the index takes part in; heapkeyspace is looked up on
- * first use (-1 until then) because it opens the index.
+ * first use (-1 until then) because it opens the index.  So is the range of
+ * sortcol values the stream holds (probe_range).
  */
 typedef struct IndexCandidate
 {
@@ -287,6 +290,10 @@ typedef struct IndexCandidate
 	Relids		required_outer;
 	int			sortpos;
 	int			heapkeyspace;
+	int			range_known;	/* -1 not probed yet, 0 cannot be probed */
+	bool		range_empty;	/* the stream holds no entries */
+	int64		range_lo;
+	int64		range_hi;
 } IndexCandidate;
 
 /*
@@ -317,6 +324,14 @@ static void intersect_end(CustomScanState *node);
 static void intersect_rescan(CustomScanState *node);
 static void intersect_explain(CustomScanState *node, List *ancestors,
 							  ExplainState *es);
+
+/* index stream helpers shared by the planner's range probe and the executor */
+static void rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys,
+							 bool descending, int64 bound);
+static int64 no_bound(bool descending);
+static bool read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
+							 int64 *value, ItemPointer tid,
+							 int64 *entries_read);
 
 static const CustomPathMethods intersect_path_methods = {
 	.CustomName = INTERSECT_NAME,
@@ -654,6 +669,7 @@ find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	candidate->exprs = NIL;
 	candidate->required_outer = NULL;
 	candidate->heapkeyspace = -1;
+	candidate->range_known = -1;
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{
@@ -1056,6 +1072,162 @@ sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
 }
 
 /*
+ * probe_range
+ *		The smallest and the largest sortcol value of the stream, read from
+ *		the index with one descent from each end, as get_actual_variable_range
+ *		reads the ends of a column for the selectivity functions.  Only when
+ *		every equality value is a constant at plan time: a parameterized path
+ *		or a generic plan is costed without it.  Entries are read regardless
+ *		of visibility (SnapshotAny); a dead entry at an end only widens the
+ *		range.  The result is cached in the candidate; returns false when the
+ *		range cannot be probed.
+ */
+static bool
+probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
+{
+	EqualityKeys keys;
+	Relation	heap;
+	Relation	index;
+	IndexScanDesc scan;
+	ItemPointerData tid;
+	int64		entries = 0;
+	ListCell   *lc;
+
+	if (candidate->range_known >= 0)
+		return candidate->range_known == 1;
+	candidate->range_known = 0;
+
+	keys.nequal = 0;
+	foreach(lc, candidate->exprs)
+	{
+		Const	   *value = (Const *) lfirst(lc);
+
+		if (!IsA(value, Const) || value->constisnull)
+			return false;
+		keys.values[keys.nequal++] = datum_get_int64(value->constvalue,
+													 value->consttype);
+	}
+
+	/* the planner holds locks on the table and its indexes */
+	heap = table_open(rte->relid, NoLock);
+	index = index_open(candidate->index->indexoid, NoLock);
+	scan = index_beginscan(heap, index, SnapshotAny, NULL, keys.nequal + 1, 0);
+	scan->xs_want_itup = true;
+
+	rescan_with_keys(scan, &keys, false, no_bound(false));
+	candidate->range_empty = !read_index_entry(scan, ForwardScanDirection,
+											   keys.nequal + 1,
+											   &candidate->range_lo, &tid,
+											   &entries);
+	if (!candidate->range_empty)
+	{
+		rescan_with_keys(scan, &keys, true, no_bound(true));
+		if (!read_index_entry(scan, BackwardScanDirection, keys.nequal + 1,
+							  &candidate->range_hi, &tid, &entries))
+			candidate->range_hi = candidate->range_lo;
+	}
+
+	index_endscan(scan);
+	index_close(index, NoLock);
+	table_close(heap, NoLock);
+
+	candidate->range_known = 1;
+	return true;
+}
+
+/*
+ * sortcol_range_selectivity
+ *		Share of the table's rows with lo <= sortcol <= hi, from the column's
+ *		histogram.
+ */
+static Selectivity
+sortcol_range_selectivity(PlannerInfo *root, Index rti, AttrNumber sort_attno,
+						  int64 lo, int64 hi)
+{
+	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
+	List	   *clauses = NIL;
+	Oid			ge = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT8OID, INT8OID,
+										 BTGreaterEqualStrategyNumber);
+	Oid			le = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT8OID, INT8OID,
+										 BTLessEqualStrategyNumber);
+
+	clauses = lappend(clauses,
+					  make_opclause(ge, BOOLOID, false, (Expr *) var,
+									(Expr *) makeConst(INT8OID, -1, InvalidOid,
+													   sizeof(int64),
+													   Int64GetDatum(lo),
+													   false, FLOAT8PASSBYVAL),
+									InvalidOid, InvalidOid));
+	clauses = lappend(clauses,
+					  make_opclause(le, BOOLOID, false, (Expr *) var,
+									(Expr *) makeConst(INT8OID, -1, InvalidOid,
+													   sizeof(int64),
+													   Int64GetDatum(hi),
+													   false, FLOAT8PASSBYVAL),
+									InvalidOid, InvalidOid));
+
+	return clauselist_selectivity(root, clauses, rti, JOIN_INNER, NULL);
+}
+
+/*
+ * stream_overlap
+ *		Where the two streams can meet: the merge reads only the entries
+ *		inside the overlap of their sortcol ranges, skipping ahead into it,
+ *		and matches can only lie there.  Sets the share of each stream's
+ *		entries inside the overlap, and the factor that turns the planner's
+ *		row estimate (both conditions independent over the whole table) into
+ *		one where they are independent inside the overlap:
+ *
+ *			rows' = rows * outer_share * inner_share / table_share
+ *
+ *		A stream is assumed to follow the table's distribution of sortcol
+ *		within its own range.  All three are 1 when a range cannot be probed;
+ *		an empty overlap gives 0.
+ */
+static void
+stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
+			   AttrNumber sort_attno, IndexCandidate *outer,
+			   IndexCandidate *inner, double *outer_share,
+			   double *inner_share, double *rows_factor)
+{
+	int64		lo;
+	int64		hi;
+	Selectivity table_share;
+	Selectivity outer_sel;
+	Selectivity inner_sel;
+
+	*outer_share = 1.0;
+	*inner_share = 1.0;
+	*rows_factor = 1.0;
+
+	if (!probe_range(rte, outer) || !probe_range(rte, inner))
+		return;
+
+	lo = Max(outer->range_lo, inner->range_lo);
+	hi = Min(outer->range_hi, inner->range_hi);
+	if (outer->range_empty || inner->range_empty || lo > hi)
+	{
+		*outer_share = 0.0;
+		*inner_share = 0.0;
+		*rows_factor = 0.0;
+		return;
+	}
+
+	table_share = sortcol_range_selectivity(root, rti, sort_attno, lo, hi);
+	outer_sel = sortcol_range_selectivity(root, rti, sort_attno,
+										  outer->range_lo, outer->range_hi);
+	inner_sel = sortcol_range_selectivity(root, rti, sort_attno,
+										  inner->range_lo, inner->range_hi);
+
+	if (outer_sel > 0)
+		*outer_share = Min(table_share / outer_sel, 1.0);
+	if (inner_sel > 0)
+		*inner_share = Min(table_share / inner_sel, 1.0);
+	if (table_share > 0)
+		*rows_factor = *outer_share * *inner_share / table_share;
+}
+
+/*
  * index_entries
  *		Entries of an index matching the equalities on its leading columns.
  *		A partial index holds index->tuples entries to begin with.
@@ -1082,6 +1254,7 @@ index_entries(PlannerInfo *root, Index rti, IndexOptInfo *index,
  */
 static void
 add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
+				   RangeTblEntry *rte, AttrNumber sort_attno,
 				   PathKey *pathkey, IndexCandidate *outer_candidate,
 				   IndexCandidate *inner_candidate, double ndistinct,
 				   double correlation)
@@ -1095,6 +1268,12 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	double		loop_count;
 	double		outer_entries;
 	double		inner_entries;
+	double		outer_share;
+	double		inner_share;
+	double		rows_factor;
+	double		outer_read;
+	double		inner_read;
+	double		matches;
 	double		group_size;
 	QualCost	qpqual_cost;
 	Cost		run_cost;
@@ -1164,23 +1343,38 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 									copyObject(inner_candidate->exprs));
 
 	/*
+	 * Only the entries inside the overlap of the two streams' sortcol ranges
+	 * are read, and the matches lie there (stream_overlap); a stream that
+	 * starts outside it skips in with one more descent.
+	 */
+	stream_overlap(root, rte, rti, sort_attno, outer_candidate,
+				   inner_candidate, &outer_share, &inner_share, &rows_factor);
+	outer_read = outer_entries * outer_share;
+	inner_read = inner_entries * inner_share;
+	matches = Min(rows * rows_factor, Min(outer_read, inner_read));
+
+	/*
 	 * Reading both indexes, grouping the entries of each value, fetching the
-	 * result rows and running the qual and the target list on them.  The heap
-	 * fetches are charged as for an Index Scan on the outer index (see
+	 * matched rows and running the qual and the target list on them.  The
+	 * heap fetches are charged as for an Index Scan on the outer index (see
 	 * outer_index_correlation).
 	 */
-	run_cost = merge_read_cost(root, outer, inner, outer_entries,
-							   inner_entries, loop_count) +
-		group_cost(outer_entries, inner_entries, group_size) +
-		heap_fetch_cost(root, rel, rows, loop_count, correlation,
+	run_cost = merge_read_cost(root, outer, inner, outer_read, inner_read,
+							   loop_count) +
+		group_cost(outer_read, inner_read, group_size) +
+		heap_fetch_cost(root, rel, matches, loop_count, correlation,
 						(double) outer->pages + inner->pages) +
-		rows * (cpu_tuple_cost + qpqual_cost.per_tuple +
-				rel->reltarget->cost.per_tuple);
+		matches * (cpu_tuple_cost + qpqual_cost.per_tuple +
+				   rel->reltarget->cost.per_tuple);
+	if (outer_share < 1.0)
+		run_cost += descent_cost(outer);
+	if (inner_share < 1.0)
+		run_cost += descent_cost(inner);
 
-	/* both streams advance through run/(rows+1) before the first match */
+	/* both streams advance through run/(matches+1) before the first match */
 	startup_cost = descent_cost(outer) + descent_cost(inner) +
 		qpqual_cost.startup + rel->reltarget->cost.startup +
-		run_cost / (rows + 1);
+		run_cost / (matches + 1);
 
 	/*
 	 * With leapfrog.force the competition with the other plans is skipped,
@@ -1286,7 +1480,8 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				correlation = outer_index_correlation(root, rti, outer->index);
 				has_correlation = true;
 			}
-			add_intersect_path(root, rel, rti, pathkey, outer, inner,
+			add_intersect_path(root, rel, rti, rte, sort_attno, pathkey,
+							   outer, inner,
 							   ndistinct, correlation);
 		}
 	}

@@ -74,6 +74,18 @@ versions: [SemVer](https://semver.org/).
   threshold (0 turns skipping off), and `tests/performance/skip_bench.sh`,
   buffers and entries read for thresholds 0–2048 on even and clustered gaps.
 - `Short Skips` in `EXPLAIN ANALYZE`.
+- Cost model: where the streams meet. With constant equality values the
+  planner reads the smallest and the largest sort value of each stream from
+  its index (one descent from each end, as `get_actual_variable_range` does),
+  charges only the entries inside the overlap of the two ranges and
+  estimates the matches there from the sort column's histogram. Disjoint
+  ranges cost next to nothing. On `cost_bench.sh` the queries where the node
+  was more than 15 % faster but not chosen went from 18 to 11 of 24 at
+  `random_page_cost = 4` and from 16 to 10 at 1.1. Tests in
+  `leapfrog_explain`; they fail without the probe.
+- `tests/performance/cost_bench.sh`: estimated cost against measured time for
+  the node and the stock plan on skewed and correlated data, with misses,
+  wrong choices and the cost-to-time bias per query.
 
 ### Changed
 
