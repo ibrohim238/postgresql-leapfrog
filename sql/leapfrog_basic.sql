@@ -194,7 +194,7 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
 ROLLBACK;
 
--- A nullable sort column is rejected, a non-bigint one as well.
+-- A nullable sort column is rejected.
 CREATE TABLE lf_basic_nullable (id bigint, owner_id bigint NOT NULL, deleted_at timestamptz);
 CREATE INDEX ON lf_basic_nullable (owner_id, id);
 CREATE INDEX ON lf_basic_nullable (id) WHERE deleted_at IS NULL;
@@ -210,14 +210,21 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 DROP TABLE lf_basic_nullable;
 
+-- An integer sort column is accepted, a non-integer one is rejected.
 CREATE TABLE lf_basic_int4 (id integer NOT NULL, owner_id bigint NOT NULL, deleted_at timestamptz);
 CREATE INDEX ON lf_basic_int4 (owner_id, id);
 CREATE INDEX ON lf_basic_int4 (id) WHERE deleted_at IS NULL;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_int4 WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 DROP TABLE lf_basic_int4;
+CREATE TABLE lf_basic_numeric (id numeric NOT NULL, owner_id bigint NOT NULL, deleted_at timestamptz);
+CREATE INDEX ON lf_basic_numeric (owner_id, id);
+CREATE INDEX ON lf_basic_numeric (id) WHERE deleted_at IS NULL;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_numeric WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+DROP TABLE lf_basic_numeric;
 
--- A non-bigint equality column is rejected.
+-- An equality column of any type with a btree operator family is accepted.
 CREATE TABLE lf_basic_int4_owner (id bigint NOT NULL, owner_id integer NOT NULL, deleted_at timestamptz);
 CREATE INDEX ON lf_basic_int4_owner (owner_id, id);
 CREATE INDEX ON lf_basic_int4_owner (id) WHERE deleted_at IS NULL;

@@ -47,10 +47,12 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "parser/parsetree.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
+#include "utils/typcache.h"
 
 #include "leapfrog.h"
 
@@ -117,14 +119,32 @@ lf_outer_index_correlation(PlannerInfo *root, Index rti, IndexOptInfo *outer)
 }
 
 /*
+ * column_var
+ *		A Var for column attno of relation rti, with the column's type,
+ *		typmod and collation, as the selectivity functions expect it.
+ */
+static Var *
+column_var(PlannerInfo *root, Index rti, AttrNumber attno)
+{
+	Oid			type;
+	int32		typmod;
+	Oid			collation;
+
+	get_atttypetypmodcoll(planner_rt_fetch(rti, root)->relid, attno,
+						  &type, &typmod, &collation);
+
+	return makeVar(rti, attno, type, typmod, collation, 0);
+}
+
+/*
  * column_correlation
- *		Correlation of a bigint column with the heap order, from the
- *		pg_statistic slot of the "<" operator of the integer family.
+ *		Correlation of a column with the heap order, from the pg_statistic
+ *		slot of its type's default "<" operator, which ANALYZE uses.
  */
 static double
 column_correlation(PlannerInfo *root, Index rti, AttrNumber attno)
 {
-	Var		   *var = makeVar(rti, attno, INT8OID, -1, InvalidOid, 0);
+	Var		   *var = column_var(root, rti, attno);
 	VariableStatData vardata;
 	AttStatsSlot sslot;
 	Oid			sortop;
@@ -137,8 +157,7 @@ column_correlation(PlannerInfo *root, Index rti, AttrNumber attno)
 		return 0.0;
 	}
 
-	sortop = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT8OID, INT8OID,
-								 BTLessStrategyNumber);
+	sortop = lookup_type_cache(var->vartype, TYPECACHE_LT_OPR)->lt_opr;
 	if (OidIsValid(sortop) &&
 		get_attstatsslot(&sslot, vardata.statsTuple,
 						 STATISTIC_KIND_CORRELATION, sortop,
@@ -392,7 +411,7 @@ double
 lf_sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
 					 AttrNumber sort_attno)
 {
-	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
+	Var		   *var = column_var(root, rti, sort_attno);
 	VariableStatData vardata;
 	bool		isdefault;
 	double		ndistinct;
@@ -424,6 +443,7 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 	IndexScanDesc scan;
 	ItemPointerData tid;
 	int64		entries = 0;
+	Oid			sort_type;
 	ListCell   *lc;
 
 	if (candidate->range_known >= 0)
@@ -433,13 +453,24 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 	keys.nequal = 0;
 	foreach(lc, candidate->exprs)
 	{
-		Const	   *value = (Const *) lfirst(lc);
+		Node	   *expr = (Node *) lfirst(lc);
+		Const	   *value;
 
-		if (!IsA(value, Const) || value->constisnull)
+		while (IsA(expr, RelabelType))
+			expr = (Node *) ((RelabelType *) expr)->arg;
+		if (!IsA(expr, Const) || ((Const *) expr)->constisnull)
 			return false;
-		keys.values[keys.nequal++] = lf_datum_get_int64(value->constvalue,
-														value->consttype);
+		value = (Const *) expr;
+		keys.values[keys.nequal] = value->constvalue;
+		keys.operators[keys.nequal] = list_nth_oid(candidate->operators,
+												   keys.nequal);
+		keys.collations[keys.nequal] = list_nth_oid(candidate->collations,
+													keys.nequal);
+		keys.nequal++;
 	}
+	sort_type = get_atttype(rte->relid,
+							candidate->index->indexkeys[candidate->sortpos]);
+	lf_init_key_procs(&keys, sort_type);
 
 	/* the planner holds locks on the table and its indexes */
 	heap = table_open(rte->relid, NoLock);
@@ -449,14 +480,15 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 
 	lf_rescan_with_keys(scan, &keys, false, lf_no_bound(false));
 	candidate->range_empty = !lf_read_index_entry(scan, ForwardScanDirection,
-												  keys.nequal + 1,
+												  keys.nequal + 1, sort_type,
 												  &candidate->range_lo, &tid,
 												  &entries);
 	if (!candidate->range_empty)
 	{
 		lf_rescan_with_keys(scan, &keys, true, lf_no_bound(true));
 		if (!lf_read_index_entry(scan, BackwardScanDirection, keys.nequal + 1,
-								 &candidate->range_hi, &tid, &entries))
+								 sort_type, &candidate->range_hi, &tid,
+								 &entries))
 			candidate->range_hi = candidate->range_lo;
 	}
 
@@ -478,12 +510,13 @@ static Selectivity
 sortcol_range_selectivity(PlannerInfo *root, Index rti, AttrNumber sort_attno,
 						  int64 lo, int64 hi)
 {
-	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
+	Var		   *var = column_var(root, rti, sort_attno);
 	List	   *clauses = NIL;
-	Oid			ge = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT8OID, INT8OID,
+	Oid			ge = get_opfamily_member(INTEGER_BTREE_FAM_OID, var->vartype,
+										 INT8OID,
 										 BTGreaterEqualStrategyNumber);
-	Oid			le = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT8OID, INT8OID,
-										 BTLessEqualStrategyNumber);
+	Oid			le = get_opfamily_member(INTEGER_BTREE_FAM_OID, var->vartype,
+										 INT8OID, BTLessEqualStrategyNumber);
 
 	clauses = lappend(clauses,
 					  make_opclause(ge, BOOLOID, false, (Expr *) var,

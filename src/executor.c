@@ -20,6 +20,9 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
+#include "utils/datum.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
 #include "leapfrog.h"
@@ -82,6 +85,7 @@ typedef struct IntersectScanState
 	IndexStream *streams;
 	bool		values_ready;	/* key values are evaluated */
 	bool		values_null;	/* some equality value is NULL */
+	MemoryContext values_cxt;	/* copies of the values, reset per rescan */
 	bool		descending;
 	bool		started;
 	bool		done;
@@ -143,7 +147,8 @@ intersect_create_scan_state(CustomScan *cscan)
  *		expression is compared with the i-th key column of the index.
  */
 static void
-init_equality_keys(EqualityKeys *keys, List *exprs, Relation index,
+init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
+				   List *collations, Relation index, int sort_attno,
 				   PlanState *parent)
 {
 	ListCell   *lc;
@@ -156,9 +161,15 @@ init_equality_keys(EqualityKeys *keys, List *exprs, Relation index,
 		keys->exprs[i] = ExecInitExpr(expr, parent);
 		keys->types[i] = exprType((Node *) expr);
 		keys->attnos[i] = index->rd_index->indkey.values[i];
+		keys->operators[i] = list_nth_oid(operators, i);
+		keys->collations[i] = list_nth_oid(collations, i);
+		fmgr_info(get_opcode(keys->operators[i]), &keys->eqfns[i]);
 		i++;
 	}
 	keys->nequal = i;
+	lf_init_key_procs(keys,
+					  TupleDescAttr(RelationGetDescr(index),
+									sort_attno - 1)->atttypid);
 }
 
 static Datum
@@ -172,6 +183,16 @@ stream_datum(List *private, int stream, int pos)
 {
 	return private_datum(private,
 						 PRIVATE_COUNT + stream * STREAM_PRIVATE_COUNT + pos);
+}
+
+static List *
+stream_oids(List *private, int stream, int pos)
+{
+	List	   *oids = list_nth(private,
+								PRIVATE_COUNT + stream * STREAM_PRIVATE_COUNT + pos);
+
+	Assert(oids == NIL || IsA(oids, OidList));
+	return oids;
 }
 
 static void
@@ -203,9 +224,15 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 			DatumGetInt32(stream_datum(private, i, STREAM_PRIVATE_SORTPOS)) + 1;
 		stream->estimate =
 			DatumGetFloat8(stream_datum(private, i, STREAM_PRIVATE_ESTIMATE));
-		init_equality_keys(&stream->keys, keys, stream->index, &node->ss.ps);
+		init_equality_keys(&stream->keys, keys,
+						   stream_oids(private, i, STREAM_PRIVATE_OPERATORS),
+						   stream_oids(private, i, STREAM_PRIVATE_COLLATIONS),
+						   stream->index, stream->sort_attno, &node->ss.ps);
 		stream->pred = ExecInitQual(pred, &node->ss.ps);
 	}
+	state->values_cxt = AllocSetContextCreate(CurrentMemoryContext,
+											  "leapfrog equality values",
+											  ALLOCSET_SMALL_SIZES);
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
@@ -242,18 +269,28 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
  *		value is NULL.
  */
 static bool
-evaluate_keys(EqualityKeys *keys, ExprContext *econtext)
+evaluate_keys(EqualityKeys *keys, ExprContext *econtext, MemoryContext cxt)
 {
 	for (int i = 0; i < keys->nequal; i++)
 	{
 		Datum		value;
 		bool		isnull;
+		int16		typlen;
+		bool		typbyval;
+		MemoryContext oldcxt;
 
 		value = ExecEvalExprSwitchContext(keys->exprs[i], econtext, &isnull);
 		if (isnull)
 			return false;
 
-		keys->values[i] = lf_datum_get_int64(value, keys->types[i]);
+		/*
+		 * The value lives in the per-tuple memory the next row resets; a text
+		 * or uuid key must outlast the scan positioned on it.
+		 */
+		get_typlenbyval(keys->types[i], &typlen, &typbyval);
+		oldcxt = MemoryContextSwitchTo(cxt);
+		keys->values[i] = datumCopy(value, typbyval, typlen);
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	return true;
@@ -276,9 +313,11 @@ evaluate_equal_values(IntersectScanState *state)
 
 	state->values_ready = true;
 	state->values_null = false;
+	MemoryContextReset(state->values_cxt);
 	for (int i = 0; i < state->nstreams; i++)
 	{
-		if (!evaluate_keys(&state->streams[i].keys, econtext))
+		if (!evaluate_keys(&state->streams[i].keys, econtext,
+						   state->values_cxt))
 			state->values_null = true;
 	}
 
@@ -388,7 +427,10 @@ row_matches_keys(TupleTableSlot *slot, EqualityKeys *keys)
 		Datum		value;
 
 		value = slot_getattr(slot, keys->attnos[i], &isnull);
-		if (isnull || DatumGetInt64(value) != keys->values[i])
+		if (isnull ||
+			!DatumGetBool(FunctionCall2Coll(&keys->eqfns[i],
+											keys->collations[i], value,
+											keys->values[i])))
 			return false;
 	}
 
@@ -431,7 +473,7 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream,
 				  ScanDirection dir)
 {
 	if (lf_read_index_entry(stream->scan, dir, stream->sort_attno,
-							&stream->value, &stream->tid, &stream->read))
+							stream->keys.sort_type, &stream->value, &stream->tid, &stream->read))
 	{
 		stream->have = true;
 		check_landing(state, stream);

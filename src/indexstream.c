@@ -17,9 +17,11 @@
 #include "access/itup.h"
 #include "access/relscan.h"
 #include "access/stratnum.h"
+#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
 
 #include "leapfrog.h"
 
@@ -55,18 +57,55 @@ lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, bool descending,
 	ScanKeyData scankeys[INDEX_MAX_KEYS + 1];
 
 	for (int i = 0; i < keys->nequal; i++)
-		ScanKeyInit(&scankeys[i], i + 1, BTEqualStrategyNumber, F_INT8EQ,
-					Int64GetDatum(keys->values[i]));
+		ScanKeyEntryInitialize(&scankeys[i], 0, i + 1, BTEqualStrategyNumber,
+							   keys->subtypes[i], keys->collations[i],
+							   keys->procs[i], keys->values[i]);
 
 	if (descending)
-		ScanKeyInit(&scankeys[keys->nequal], keys->nequal + 1,
-					BTLessEqualStrategyNumber, F_INT8LE, Int64GetDatum(bound));
+		ScanKeyEntryInitialize(&scankeys[keys->nequal], 0, keys->nequal + 1,
+							   BTLessEqualStrategyNumber, INT8OID, InvalidOid,
+							   keys->bound_le, Int64GetDatum(bound));
 	else
-		ScanKeyInit(&scankeys[keys->nequal], keys->nequal + 1,
-					BTGreaterEqualStrategyNumber, F_INT8GE,
-					Int64GetDatum(bound));
+		ScanKeyEntryInitialize(&scankeys[keys->nequal], 0, keys->nequal + 1,
+							   BTGreaterEqualStrategyNumber, INT8OID,
+							   InvalidOid, keys->bound_ge,
+							   Int64GetDatum(bound));
 
 	index_rescan(scan, scankeys, keys->nequal + 1, NULL, 0);
+}
+
+/*
+ * lf_init_key_procs
+ *		Look up what the scan keys need once the operators are set: each
+ *		equality operator's function and right input type, and the integer
+ *		family's ">=" and "<=" of the sort column's type against int8 for the
+ *		bound.  Every integer type has those cross-type operators in
+ *		integer_ops, so a bound is always an int8.
+ */
+void
+lf_init_key_procs(EqualityKeys *keys, Oid sort_type)
+{
+	Oid			ge;
+	Oid			le;
+
+	for (int i = 0; i < keys->nequal; i++)
+	{
+		Oid			lefttype;
+
+		keys->procs[i] = get_opcode(keys->operators[i]);
+		op_input_types(keys->operators[i], &lefttype, &keys->subtypes[i]);
+	}
+
+	keys->sort_type = sort_type;
+	ge = get_opfamily_member(INTEGER_BTREE_FAM_OID, sort_type, INT8OID,
+							 BTGreaterEqualStrategyNumber);
+	le = get_opfamily_member(INTEGER_BTREE_FAM_OID, sort_type, INT8OID,
+							 BTLessEqualStrategyNumber);
+	if (!OidIsValid(ge) || !OidIsValid(le))
+		elog(ERROR, "no integer_ops comparison of type %u with bigint",
+			 sort_type);
+	keys->bound_ge = get_opcode(ge);
+	keys->bound_le = get_opcode(le);
 }
 
 /*
@@ -95,7 +134,8 @@ lf_no_bound(bool descending)
  */
 bool
 lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
-					int64 *value, ItemPointer tid, int64 *entries_read)
+					Oid sort_type, int64 *value, ItemPointer tid,
+					int64 *entries_read)
 {
 	for (;;)
 	{
@@ -117,7 +157,7 @@ lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
 			continue;
 		}
 
-		*value = DatumGetInt64(datum);
+		*value = lf_datum_get_int64(datum, sort_type);
 		ItemPointerCopy(&scan->xs_heaptid, tid);
 
 		return true;

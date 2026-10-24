@@ -483,6 +483,7 @@ Regression tests (`sql/`):
 | `leapfrog_skip` | skip-ahead on both sides, both directions, non-unique sort column, rescans, dead entries; `leapfrog.skip_after` 0 and 1; the adaptive threshold backing off on evenly spread matches and staying low on long gaps |
 | `leapfrog_outer_partial` | partial index on the outer side: its predicate's conditions stay in the `Filter`, plain and `FOR UPDATE`, rows that left the index |
 | `leapfrog_nway` | three, four and five streams against the stock plans, both directions, `LIMIT`; the planner adding a third stream only where it is estimated cheaper and never beyond `leapfrog.max_indexes`; generic plans and `LATERAL` rescans; a non-unique sort column across three groups; two groups overflowing `work_mem`; rows moving between the streams; `FOR UPDATE` |
+| `leapfrog_types` | `uuid`, `text`, `varchar` (with a `text` constant), `smallint` (with a `bigint` constant) and `timestamptz` equality columns, three streams of three types; generic plans with `text` and `uuid` parameters and `NULL`; `LATERAL` rescans with changing `text` and `uuid` values; an inner `text` group overflowing `work_mem`; `smallint` and `integer` sort columns in both directions; an index in another collation than the condition's |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -505,6 +506,7 @@ Isolation tests (`tests/isolation/specs/`):
 | `leapfrog_insert_vacuum` | concurrent `INSERT` under `READ COMMITTED`, `FOR UPDATE` waiting on a transaction that also inserts, `VACUUM` with an open cursor whose scan has run out |
 | `leapfrog_overflow_epq` | EvalPlanQual through the overflow fallback (`work_mem = 64kB`): rows leaving and joining the inner side |
 | `leapfrog_nway` | EvalPlanQual with three streams: the second stream's column, the third stream's predicate and an unrelated column changing while `FOR UPDATE` waits |
+| `leapfrog_types` | EvalPlanQual with `text` and `uuid` equalities: the status, the owner and an unrelated column changing while `FOR UPDATE` waits |
 
 ## Benchmarks
 
@@ -608,9 +610,14 @@ Verified against `src/` and the tests.
 
 **Data types and conditions**
 
-- `bigint` columns only, `integer_ops` operator family only
-  (`is_usable_btree`). `int2`/`int4` constants and parameters are accepted, but
-  `int4`, `uuid` and other column types are not.
+- Equality columns: any type whose index column has a B-tree operator family
+  (`uuid`, `text`, `varchar`, `smallint`, `integer`, `bigint`, `timestamptz`,
+  …), as for an `Index Cond`. The operator is looked up in the index column's
+  family, cross-type ones included (`varchar = text`, `smallint = bigint`); a
+  `text` column indexed in another collation than the condition's is not
+  used. Expression index columns are not supported.
+- Sort column: `smallint`, `integer` or `bigint` (`integer_ops`). Other sort
+  types (`timestamptz`, `numeric`, `uuid`) are not supported yet.
 - Equality (`=`) only on the equality columns; `IN (…)`, ranges and `IS NULL`
   are not supported.
 - The sort column must be `NOT NULL` according to the planner
@@ -714,7 +721,7 @@ and `deleted_at`.
 | P2 | Memory of non-unique keys | open |
 | P2 | Concurrency tests | **done**: EPQ for both pair kinds, partial outer index, overflow fallback; `INSERT`, `VACUUM` |
 | P2 | Write and storage benchmarks | **done**: `write_bench.sh` |
-| P3 | More types and conditions | open |
+| P3 | More types and conditions | **partly**: equality columns of any B-tree type, integer sort columns of every width; other sort types and `IN (…)` open |
 
 #### Cost model: distribution of matches along the sort column
 
@@ -801,8 +808,15 @@ backward scans and posting lists to be verified against nbtree first).
 
 #### More types and conditions
 
-`int4`, `uuid` and other B-tree operator families through operators looked up
-from the index's operator family; `IN (…)` as several outer scans merged in
+Done: equality columns of any type with a B-tree operator family, with the
+operator looked up in the index column's family and the row rechecks
+(EvalPlanQual, overflow fallback) done with that operator and collation;
+sort columns `smallint`, `integer` and `bigint`. Tested in `leapfrog_types`
+(regression and isolation).
+
+Open: sort columns of other types (`timestamptz`, `numeric`), to be measured
+first, since the merge then compares values through the type's comparison
+function instead of as `int64`; `IN (…)` as several outer scans merged in
 `sortcol` order; composite sort keys. A range on a leading column breaks the
 `sortcol` order and can only be supported as several per-value scans.
 

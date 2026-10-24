@@ -1,0 +1,154 @@
+--
+-- leapfrog_types
+--
+-- Equality columns of any type with a btree operator family (uuid, text,
+-- varchar, smallint, integer, timestamptz) and integer sort columns of every
+-- width.  Values of a by-reference type outlive the per-tuple memory they
+-- are evaluated in, rows are rechecked with the column's own equality
+-- operator and collation, and an index sorted in another collation than the
+-- condition's is not used.  Results are compared with the standard plans
+-- throughout.
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+
+CREATE TABLE lf_types (
+	id bigint PRIMARY KEY,
+	owner_id uuid NOT NULL,
+	model_type varchar(64) NOT NULL,
+	status text NOT NULL,
+	kind smallint NOT NULL,
+	shard integer NOT NULL,
+	created_at timestamptz NOT NULL,
+	deleted_at timestamptz,
+	payload text
+) WITH (autovacuum_enabled = false);
+-- 40,000 rows; hashed values, independent of each other and of id.
+SET default_statistics_target = 200;
+INSERT INTO lf_types
+SELECT g,
+	('00000000-0000-0000-0000-' || lpad(to_hex(abs(hashint8(g * 8 + 1)) % 40), 12, '0'))::uuid,
+	(ARRAY['App\Models\Contract', 'App\Models\Invoice', 'App\Models\Creative'])[1 + abs(hashint8(g * 8 + 2)) % 3],
+	(ARRAY['draft', 'sent', 'registered', 'error', 'deleted'])[1 + abs(hashint8(g * 8 + 3)) % 5],
+	abs(hashint8(g * 8 + 4)) % 7,
+	abs(hashint8(g * 8 + 5)) % 11,
+	'2026-01-01'::timestamptz + (abs(hashint8(g * 8 + 6)) % 4) * interval '1 day',
+	CASE WHEN abs(hashint8(g * 8 + 7)) % 10 = 0 THEN '2026-01-01'::timestamptz END,
+	'p' || g
+FROM generate_series(1, 40000) g;
+CREATE INDEX lf_types_owner_id ON lf_types (owner_id, id);
+CREATE INDEX lf_types_model_type_id ON lf_types (model_type, id);
+CREATE INDEX lf_types_status_id ON lf_types (status, id);
+CREATE INDEX lf_types_kind_id ON lf_types (kind, id);
+CREATE INDEX lf_types_created_at_id ON lf_types (created_at, id);
+CREATE INDEX lf_types_live_id ON lf_types (id) WHERE deleted_at IS NULL;
+ANALYZE lf_types;
+
+-- uuid, varchar and text equalities, with constants and with the
+-- varchar = text comparison the parser produces for a text literal.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_types WHERE owner_id = '00000000-0000-0000-0000-000000000007'
+	AND status = 'sent' ORDER BY id LIMIT 20 $$);
+SELECT lf_check($$ SELECT * FROM lf_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'sent' ORDER BY id $$);
+SELECT lf_check($$ SELECT * FROM lf_types WHERE model_type = 'App\Models\Invoice' AND status = 'error' AND deleted_at IS NULL ORDER BY id DESC LIMIT 50 $$);
+SELECT lf_check($$ SELECT * FROM lf_types WHERE model_type = 'App\Models\Invoice'::text AND kind = 3 ORDER BY id $$);
+SELECT lf_check($$ SELECT * FROM lf_types WHERE kind = 3::bigint AND created_at = '2026-01-02' ORDER BY id DESC $$);
+-- a value no row has
+SELECT lf_check($$ SELECT * FROM lf_types WHERE model_type = 'App\Models\Feed' AND status = 'sent' ORDER BY id $$);
+
+-- Three streams of three different types.
+SET leapfrog.min_indexes = 3;
+SELECT lf_check($$ SELECT * FROM lf_types WHERE owner_id = '00000000-0000-0000-0000-000000000003' AND model_type = 'App\Models\Contract' AND status = 'registered' ORDER BY id $$);
+RESET leapfrog.min_indexes;
+
+-- Generic plans: text and uuid parameters, re-evaluated per execution.
+SET plan_cache_mode = force_generic_plan;
+SET leapfrog.force = on;
+PREPARE lf_types_by_status(text, uuid) AS
+SELECT id FROM lf_types WHERE status = $1 AND owner_id = $2 ORDER BY id LIMIT 5;
+EXPLAIN (COSTS OFF) EXECUTE lf_types_by_status('sent', '00000000-0000-0000-0000-000000000007');
+EXECUTE lf_types_by_status('sent', '00000000-0000-0000-0000-000000000007');
+EXECUTE lf_types_by_status('draft', '00000000-0000-0000-0000-000000000011');
+EXECUTE lf_types_by_status(NULL, '00000000-0000-0000-0000-000000000011');
+DEALLOCATE lf_types_by_status;
+RESET leapfrog.force;
+RESET plan_cache_mode;
+SELECT id FROM lf_types WHERE status = 'sent' AND owner_id = '00000000-0000-0000-0000-000000000007' ORDER BY id LIMIT 5;
+SELECT id FROM lf_types WHERE status = 'draft' AND owner_id = '00000000-0000-0000-0000-000000000011' ORDER BY id LIMIT 5;
+
+-- Values from the outer side of a nested loop: the text and uuid values
+-- change on every rescan.
+CREATE TABLE lf_types_pick (status text, owner_id uuid);
+INSERT INTO lf_types_pick VALUES
+	('sent', '00000000-0000-0000-0000-000000000007'),
+	('error', '00000000-0000-0000-0000-000000000021'),
+	('draft', '00000000-0000-0000-0000-000000000007');
+SELECT lf_check($$
+SELECT p.status, t.id FROM lf_types_pick p
+CROSS JOIN LATERAL (SELECT id FROM lf_types t
+	WHERE t.status = p.status AND t.owner_id = p.owner_id ORDER BY id LIMIT 10) t $$, false);
+DROP TABLE lf_types_pick;
+
+-- Overflow: an inner group too large for work_mem (64kB holds about 10900
+-- TIDs, each group has 20000) is checked on the row with the text and uuid
+-- equalities of the inner stream.
+CREATE TABLE lf_types_overflow (
+	id bigint PRIMARY KEY,
+	owner_id uuid NOT NULL,
+	status text NOT NULL,
+	group_id bigint NOT NULL
+) WITH (autovacuum_enabled = false);
+INSERT INTO lf_types_overflow
+SELECT g, ('00000000-0000-0000-0000-00000000000' || g % 2)::uuid,
+	(ARRAY['sent', 'draft', 'error'])[1 + g % 3], g % 2 + 100
+FROM generate_series(1, 120000) g;
+CREATE INDEX lf_types_overflow_owner ON lf_types_overflow (owner_id, group_id);
+CREATE INDEX lf_types_overflow_status ON lf_types_overflow (status, group_id);
+ANALYZE lf_types_overflow;
+SET work_mem = '64kB';
+SET leapfrog.force = on;
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_types_overflow WHERE owner_id = '00000000-0000-0000-0000-000000000001'
+	AND status = 'draft' ORDER BY group_id $$)
+WHERE counter IN ('Outer Index', 'Inner Index', 'Group Overflows', 'Rows Checked by Predicate');
+RESET leapfrog.force;
+SELECT lf_check($$ SELECT * FROM lf_types_overflow WHERE owner_id = '00000000-0000-0000-0000-000000000001' AND status = 'draft' ORDER BY group_id, id $$);
+SELECT lf_check($$ SELECT * FROM lf_types_overflow WHERE owner_id = '00000000-0000-0000-0000-000000000000' AND status = 'error' ORDER BY group_id DESC, id DESC $$);
+RESET work_mem;
+DROP TABLE lf_types_overflow;
+
+-- Integer sort columns of every width.
+CREATE TABLE lf_types_sort (
+	id2 smallint NOT NULL,
+	id4 integer NOT NULL,
+	status text NOT NULL,
+	kind smallint NOT NULL
+);
+INSERT INTO lf_types_sort
+SELECT g - 16000, g * 3 - 50000, (ARRAY['a', 'b', 'c'])[1 + abs(hashint8(g * 2)) % 3],
+	abs(hashint8(g * 2 + 1)) % 4
+FROM generate_series(1, 30000) g;
+CREATE INDEX ON lf_types_sort (status, id2);
+CREATE INDEX ON lf_types_sort (kind, id2);
+CREATE INDEX ON lf_types_sort (status, id4);
+CREATE INDEX ON lf_types_sort (kind, id4);
+ANALYZE lf_types_sort;
+SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'b' AND kind = 2 ORDER BY id2 $$);
+SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'b' AND kind = 2 ORDER BY id2 DESC LIMIT 30 $$);
+SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'c' AND kind = 0 ORDER BY id4 $$);
+SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'c' AND kind = 0 ORDER BY id4 DESC LIMIT 30 $$);
+DROP TABLE lf_types_sort;
+
+-- An index sorted in another collation than the condition's is not used.
+CREATE TABLE lf_types_coll (id bigint NOT NULL, status text NOT NULL, kind integer NOT NULL);
+CREATE INDEX lf_types_coll_status_c ON lf_types_coll (status COLLATE "C", id);
+CREATE INDEX lf_types_coll_kind ON lf_types_coll (kind, id);
+SET leapfrog.force = on;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_types_coll WHERE status = 'sent' AND kind = 1 ORDER BY id LIMIT 20 $$);
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_types_coll WHERE status = 'sent' COLLATE "C" AND kind = 1 ORDER BY id LIMIT 20 $$);
+RESET leapfrog.force;
+DROP TABLE lf_types_coll;
+
+DROP TABLE lf_types;

@@ -24,6 +24,17 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Equality columns of any type with a B-tree operator family: `uuid`,
+  `text`, `varchar`, `smallint`, `integer`, `timestamptz` and so on, where
+  only `bigint` was accepted. The equality operator is looked up in the
+  index column's family as for an `Index Cond` (cross-type `varchar = text`,
+  `smallint = bigint` included) and the index column's collation must match
+  the condition's. Values of by-reference types are copied out of the
+  per-tuple memory; EvalPlanQual and the overflow fallback recheck the row
+  with the same operator and collation. Sort columns may be `smallint` or
+  `integer` as well as `bigint`. Tests in `leapfrog_types` (regression and
+  isolation); `leapfrog_basic` now expects `integer` columns to be used and
+  a `numeric` sort column to be rejected.
 - N-way intersection: a node combines up to `leapfrog.max_indexes` (default
   4, at most 16) indexes instead of two. Every stream after the outer index
   is an inner one with its own TID group; the merge advances every stream

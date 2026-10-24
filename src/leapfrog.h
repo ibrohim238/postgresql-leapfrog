@@ -44,23 +44,37 @@
 									 * columns */
 #define STREAM_PRIVATE_ESTIMATE 2	/* entries the cost model expects to read;
 									 * EXPLAIN VERBOSE */
-#define STREAM_PRIVATE_COUNT	3
+#define STREAM_PRIVATE_OPERATORS 3	/* OID list: equality operator per key */
+#define STREAM_PRIVATE_COLLATIONS 4 /* OID list: its collation per key */
+#define STREAM_PRIVATE_COUNT	5
 #define STREAM_EXPRS_KEYS		0
 #define STREAM_EXPRS_PRED		1
 #define STREAM_EXPRS_COUNT		2
 
 /*
  * The equality conditions on the leading columns of one index: the value
- * expressions, their values for the current (re)scan, and the heap columns
- * they apply to (for the EvalPlanQual recheck and the overflow fallback).
+ * expressions, their values for the current (re)scan, the heap columns they
+ * apply to (for the EvalPlanQual recheck and the overflow fallback), and
+ * for each the equality operator of the column's btree family with the
+ * column on the left, the collation and what a scan key needs.  The values
+ * may be of any type; the sort column is an integer, read as int64, and
+ * bounded by the integer family's cross-type operators against int8.
  */
 typedef struct EqualityKeys
 {
 	int			nequal;
 	ExprState  *exprs[INDEX_MAX_KEYS];
 	Oid			types[INDEX_MAX_KEYS];
-	int64		values[INDEX_MAX_KEYS];
+	Datum		values[INDEX_MAX_KEYS];
 	AttrNumber	attnos[INDEX_MAX_KEYS];
+	Oid			operators[INDEX_MAX_KEYS];
+	Oid			collations[INDEX_MAX_KEYS];
+	Oid			subtypes[INDEX_MAX_KEYS];	/* right input of the operator */
+	RegProcedure procs[INDEX_MAX_KEYS];
+	FmgrInfo	eqfns[INDEX_MAX_KEYS];	/* for checks on the row */
+	Oid			sort_type;		/* smallint, integer or bigint */
+	RegProcedure bound_ge;		/* sortcol >= int8 */
+	RegProcedure bound_le;		/* sortcol <= int8 */
 } EqualityKeys;
 
 /*
@@ -78,6 +92,8 @@ typedef struct IndexCandidate
 	bool		usable;
 	List	   *clauses;
 	List	   *exprs;
+	List	   *operators;		/* OIDs: equality operator per column */
+	List	   *collations;		/* OIDs: its collation per column */
 	Relids		required_outer;
 	int			sortpos;
 	double		entries;		/* entries matching the equalities */
@@ -115,12 +131,13 @@ extern void lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 
 /* indexstream.c */
 extern int64 lf_datum_get_int64(Datum value, Oid type);
+extern void lf_init_key_procs(EqualityKeys *keys, Oid sort_type);
 extern void lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys,
 								bool descending, int64 bound);
 extern int64 lf_no_bound(bool descending);
 extern bool lf_read_index_entry(IndexScanDesc scan, ScanDirection dir,
-								int attno, int64 *value, ItemPointer tid,
-								int64 *entries_read);
+								int attno, Oid sort_type, int64 *value,
+								ItemPointer tid, int64 *entries_read);
 
 /* executor.c */
 extern const CustomScanMethods lf_scan_methods;

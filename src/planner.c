@@ -47,7 +47,22 @@ typedef struct ColumnMatchArg
 {
 	Index		rti;
 	AttrNumber	attno;
+	Oid			opfamily;
 } ColumnMatchArg;
+
+/*
+ * An equality the scan can enforce on one index column: the clause, the
+ * value expression, its operator with the column on the left and the
+ * collation it compares in, and the outer rels the value refers to.
+ */
+typedef struct IndexEquality
+{
+	RestrictInfo *clause;
+	Node	   *expr;
+	Oid			opno;
+	Oid			collation;
+	Relids		outer_relids;
+} IndexEquality;
 
 /*
  * What the hook looks at for one relation: the sort column and the index
@@ -101,26 +116,44 @@ make_float8_const(double value)
 					 Float8GetDatum(value), false, FLOAT8PASSBYVAL);
 }
 
+/*
+ * is_column_var
+ *		Is the node column attno of relation rti?  A binary-compatible
+ *		relabeling is looked through: a varchar column compared with texteq
+ *		appears as (col)::text, and its text_ops index serves the comparison
+ *		as it is, as match_index_to_operand accepts it.
+ */
 static bool
 is_column_var(Node *node, Index rti, AttrNumber attno)
 {
-	return IsA(node, Var) && ((Var *) node)->varno == rti &&
+	while (node && IsA(node, RelabelType))
+		node = (Node *) ((RelabelType *) node)->arg;
+
+	return node != NULL && IsA(node, Var) && ((Var *) node)->varno == rti &&
 		((Var *) node)->varattno == attno &&
 		((Var *) node)->varlevelsup == 0;
 }
 
 /*
- * is_int8_equality
- *		Is the clause "x = y" with x the bigint column attno of relation rti
- *		and y a plain integer value?  Returns y in *other.
+ * match_index_equality
+ *		Is the clause "x = y" with x key column col of the index, compared by
+ *		an equality operator of the column's btree operator family, as an
+ *		Index Scan would use it for an Index Cond?  Any type with a btree
+ *		family qualifies: bigint, integer, uuid, text, varchar, timestamptz.
+ *		Fills *equality with the value y, the operator with x on the left
+ *		(the commutator when the clause has x on the right) and the
+ *		collation the clause compares in.  As for an Index Cond, the index
+ *		column must be sorted in that collation, unless it has none.
  */
 static bool
-is_int8_equality(RestrictInfo *rinfo, Index rti, AttrNumber attno,
-				 Node **other)
+match_index_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
+					 int col, IndexEquality *equality)
 {
+	AttrNumber	attno = index->indexkeys[col];
 	OpExpr	   *op;
 	Node	   *left;
 	Node	   *right;
+	Oid			opno;
 
 	if (rinfo->pseudoconstant || !IsA(rinfo->clause, OpExpr))
 		return false;
@@ -129,21 +162,9 @@ is_int8_equality(RestrictInfo *rinfo, Index rti, AttrNumber attno,
 	if (list_length(op->args) != 2 || op->opresulttype != BOOLOID)
 		return false;
 
-	/* bigint = bigint, bigint = integer/smallint and the reverse */
-	switch (get_opcode(op->opno))
-	{
-		case F_INT8EQ:
-		case F_INT84EQ:
-		case F_INT48EQ:
-		case F_INT82EQ:
-		case F_INT28EQ:
-			break;
-		default:
-			return false;
-	}
-
 	left = linitial(op->args);
 	right = lsecond(op->args);
+	opno = op->opno;
 
 	if (!is_column_var(left, rti, attno))
 	{
@@ -151,23 +172,25 @@ is_int8_equality(RestrictInfo *rinfo, Index rti, AttrNumber attno,
 
 		left = right;
 		right = tmp;
-	}
-
-	if (!is_column_var(left, rti, attno) || exprType(left) != INT8OID)
-		return false;
-
-	/* the value is passed to the btree as an int8 key */
-	switch (exprType(right))
-	{
-		case INT2OID:
-		case INT4OID:
-		case INT8OID:
-			break;
-		default:
+		opno = get_commutator(opno);
+		if (!OidIsValid(opno))
 			return false;
 	}
 
-	*other = right;
+	if (!is_column_var(left, rti, attno) ||
+		get_op_opfamily_strategy(opno, index->opfamily[col]) !=
+		BTEqualStrategyNumber)
+		return false;
+
+	if (OidIsValid(index->indexcollations[col]) &&
+		index->indexcollations[col] != op->inputcollid)
+		return false;
+
+	equality->clause = rinfo;
+	equality->expr = right;
+	equality->opno = opno;
+	equality->collation = op->inputcollid;
+	equality->outer_relids = NULL;
 
 	return true;
 }
@@ -175,7 +198,7 @@ is_int8_equality(RestrictInfo *rinfo, Index rti, AttrNumber attno,
 /*
  * ec_member_is_column
  *		ec_matches_callback_type: does the equivalence member stand for
- *		column attno of relation rti, in an equivalence class the integer
+ *		column attno of relation rti, in an equivalence class the column's
  *		btree family can enforce?
  */
 static bool
@@ -184,7 +207,7 @@ ec_member_is_column(PlannerInfo *root, RelOptInfo *rel, EquivalenceClass *ec,
 {
 	ColumnMatchArg *column = (ColumnMatchArg *) arg;
 
-	if (!list_member_oid(ec->ec_opfamilies, INTEGER_BTREE_FAM_OID))
+	if (!list_member_oid(ec->ec_opfamilies, column->opfamily))
 		return false;
 
 	return is_column_var((Node *) em->em_expr, column->rti, column->attno);
@@ -192,13 +215,13 @@ ec_member_is_column(PlannerInfo *root, RelOptInfo *rel, EquivalenceClass *ec,
 
 /*
  * find_join_equality
- *		Pick "attno = othercolumn" from a list of join clauses: the value is
+ *		Pick "col = othercolumn" from a list of join clauses: the value is
  *		a column of a single other relation, which becomes a nestloop
- *		parameter.  Returns NULL when there is no such clause.
+ *		parameter.  Returns false when there is no such clause.
  */
-static RestrictInfo *
+static bool
 find_join_equality(List *clauses, RelOptInfo *rel, Index rti,
-				   AttrNumber attno, Node **expr, Relids *outer_relids)
+				   IndexOptInfo *index, int col, IndexEquality *equality)
 {
 	ListCell   *lc;
 
@@ -207,81 +230,70 @@ find_join_equality(List *clauses, RelOptInfo *rel, Index rti,
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 		Node	   *other;
 
-		if (!is_int8_equality(rinfo, rti, attno, &other))
+		if (!match_index_equality(rinfo, rti, index, col, equality))
 			continue;
 
+		other = equality->expr;
+		while (IsA(other, RelabelType))
+			other = (Node *) ((RelabelType *) other)->arg;
 		if (IsA(other, Var) && ((Var *) other)->varlevelsup == 0 &&
 			((Var *) other)->varno != rti &&
 			join_clause_is_movable_to(rinfo, rel))
 		{
-			*expr = other;
-			*outer_relids = bms_make_singleton(((Var *) other)->varno);
-			return rinfo;
+			equality->outer_relids =
+				bms_make_singleton(((Var *) other)->varno);
+			return true;
 		}
 	}
 
-	return NULL;
+	return false;
 }
 
 /*
  * find_equality_clause
- *		Look for "attno = value" among the restrictions of rel, among its
+ *		Look for "col = value" among the restrictions of rel, among its
  *		join clauses when the value is a column of another relation, or
  *		among the equalities implied by the equivalence classes the column
  *		belongs to (a mergejoinable join clause lives there, not in
- *		joininfo), the way match_eclass_clauses_to_index does.
- *
- * Returns the clause, the value expression in *expr and the relids the
- * expression refers to in *outer_relids; NULL when there is none.
+ *		joininfo), the way match_eclass_clauses_to_index does.  Returns
+ *		false when there is none.
  */
-static RestrictInfo *
+static bool
 find_equality_clause(PlannerInfo *root, RelOptInfo *rel, Index rti,
-					 AttrNumber attno, Node **expr, Relids *outer_relids)
+					 IndexOptInfo *index, int col, IndexEquality *equality)
 {
 	ListCell   *lc;
-	RestrictInfo *join_rinfo;
 	ColumnMatchArg arg;
 
 	foreach(lc, rel->baserestrictinfo)
 	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-		Node	   *other;
 
-		if (!is_int8_equality(rinfo, rti, attno, &other))
+		if (!match_index_equality(rinfo, rti, index, col, equality))
 			continue;
 
 		/* constants and query parameters, both known at execution time */
-		if (IsA(other, Const) && !((Const *) other)->constisnull)
-		{
-			*expr = other;
-			*outer_relids = NULL;
-			return rinfo;
-		}
-
-		if (IsA(other, Param))
-		{
-			*expr = other;
-			*outer_relids = NULL;
-			return rinfo;
-		}
+		if ((IsA(equality->expr, Const) &&
+			 !((Const *) equality->expr)->constisnull) ||
+			IsA(equality->expr, Param))
+			return true;
 	}
 
-	join_rinfo = find_join_equality(rel->joininfo, rel, rti, attno, expr,
-									outer_relids);
-	if (join_rinfo != NULL)
-		return join_rinfo;
+	if (find_join_equality(rel->joininfo, rel, rti, index, col, equality))
+		return true;
 
 	if (!rel->has_eclass_joins)
-		return NULL;
+		return false;
 
 	arg.rti = rti;
-	arg.attno = attno;
+	arg.attno = index->indexkeys[col];
+	arg.opfamily = index->opfamily[col];
 
 	return find_join_equality(generate_implied_equalities_for_column(root, rel,
 																	 ec_member_is_column,
 																	 &arg,
 																	 rel->lateral_referencers),
-							  rel, rti, attno, expr, outer_relids);
+							  rel, rti, index, col, equality);
 }
 
 /*
@@ -307,10 +319,21 @@ pathkey_is_column(PathKey *pathkey, Index rti, AttrNumber attno)
 	return false;
 }
 
+/*
+ * is_integer_column
+ *		The sort column is compared and skipped to as a 64-bit integer:
+ *		smallint, integer or bigint.
+ */
 static bool
-is_int8_column(RangeTblEntry *rte, AttrNumber attno)
+is_integer_column(RangeTblEntry *rte, AttrNumber attno)
 {
-	return attno > 0 && get_atttype(rte->relid, attno) == INT8OID;
+	Oid			type;
+
+	if (attno <= 0)
+		return false;
+	type = get_atttype(rte->relid, attno);
+
+	return type == INT2OID || type == INT4OID || type == INT8OID;
 }
 
 /*
@@ -389,6 +412,8 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 	candidate->index = index;
 	candidate->clauses = NIL;
 	candidate->exprs = NIL;
+	candidate->operators = NIL;
+	candidate->collations = NIL;
 	candidate->required_outer = NULL;
 	candidate->heapkeyspace = -1;
 	candidate->range_known = -1;
@@ -408,25 +433,21 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 
 	for (int i = 0; i < sortpos; i++)
 	{
-		AttrNumber	attno = index->indexkeys[i];
-		RestrictInfo *clause;
-		Node	   *expr;
-		Relids		outer_relids;
+		IndexEquality equality;
 
-		/* the scan keys use int8 operators of the integer family */
-		if (!is_int8_column(search->rte, attno) ||
-			index->opfamily[i] != INTEGER_BTREE_FAM_OID)
+		/* an expression column has no attno to compare with */
+		if (index->indexkeys[i] == 0 ||
+			!find_equality_clause(search->root, search->rel, search->rti,
+								  index, i, &equality))
 			return false;
 
-		clause = find_equality_clause(search->root, search->rel, search->rti,
-									  attno, &expr, &outer_relids);
-		if (clause == NULL)
-			return false;
-
-		candidate->clauses = lappend(candidate->clauses, clause);
-		candidate->exprs = lappend(candidate->exprs, expr);
+		candidate->clauses = lappend(candidate->clauses, equality.clause);
+		candidate->exprs = lappend(candidate->exprs, equality.expr);
+		candidate->operators = lappend_oid(candidate->operators, equality.opno);
+		candidate->collations = lappend_oid(candidate->collations,
+											equality.collation);
 		candidate->required_outer = bms_add_members(candidate->required_outer,
-													outer_relids);
+													equality.outer_relids);
 	}
 
 	candidate->entries = lf_index_entries(search->root, search->rti, candidate);
@@ -638,6 +659,10 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 										make_int4_const(streams[i]->sortpos));
 		cpath->custom_private = lappend(cpath->custom_private,
 										make_float8_const(reads[i]));
+		cpath->custom_private = lappend(cpath->custom_private,
+										list_copy(streams[i]->operators));
+		cpath->custom_private = lappend(cpath->custom_private,
+										list_copy(streams[i]->collations));
 	}
 	for (int i = 0; i < nstreams; i++)
 	{
@@ -814,7 +839,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	search.sort_attno = InvalidAttrNumber;
 	search.ndistinct = -1.0;
 
-	/* the sort column: a bigint NOT NULL column of this relation */
+	/* the sort column: an integer NOT NULL column of this relation */
 	search.pathkey = linitial_node(PathKey, root->query_pathkeys);
 	foreach(lc, search.pathkey->pk_eclass->ec_members)
 	{
@@ -825,7 +850,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			continue;
 		attno = ((Var *) em->em_expr)->varattno;
 		if (attno > 0 && pathkey_is_column(search.pathkey, rti, attno) &&
-			is_int8_column(rte, attno) && is_notnull_column(rel, attno))
+			is_integer_column(rte, attno) && is_notnull_column(rel, attno))
 		{
 			search.sort_attno = attno;
 			break;
@@ -879,10 +904,10 @@ is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
 
 	foreach(lc, exprs)
 	{
-		Node	   *other;
+		IndexEquality equality;
 
-		if (is_int8_equality(rinfo, rti, index->indexkeys[i], &other) &&
-			equal(other, lfirst(lc)))
+		if (match_index_equality(rinfo, rti, index, i, &equality) &&
+			equal(equality.expr, lfirst(lc)))
 			return true;
 		i++;
 	}

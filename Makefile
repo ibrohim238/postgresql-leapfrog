@@ -37,7 +37,8 @@ REGRESS = \
 	leapfrog_btree_pair \
 	leapfrog_skip \
 	leapfrog_outer_partial \
-	leapfrog_nway
+	leapfrog_nway \
+	leapfrog_types
 
 ISOLATION = \
 	leapfrog_concurrent_update \
@@ -49,7 +50,8 @@ ISOLATION = \
 	leapfrog_outer_partial \
 	leapfrog_insert_vacuum \
 	leapfrog_overflow_epq \
-	leapfrog_nway
+	leapfrog_nway \
+	leapfrog_types
 
 ISOLATION_OPTS = --load-extension=leapfrog
 REGRESS_OPTS = --load-extension=leapfrog

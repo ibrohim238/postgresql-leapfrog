@@ -2,6 +2,7 @@ BestPair
 ColumnMatchArg
 EqualityKeys
 IndexCandidate
+IndexEquality
 IndexStream
 IntersectScanState
 IntersectSearch

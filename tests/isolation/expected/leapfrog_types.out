@@ -1,0 +1,125 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_plan
+step s2_plan: 
+	EXPLAIN (COSTS OFF)
+	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
+	ORDER BY id DESC LIMIT 3 FOR UPDATE;
+
+QUERY PLAN                                                     
+---------------------------------------------------------------
+Limit                                                          
+  ->  LockRows                                                 
+        ->  Custom Scan (Index Merge Intersect) on lf_iso_types
+              Outer Index: lf_iso_types_status_id              
+              Inner Index: lf_iso_types_owner_id               
+(5 rows)
+
+
+starting permutation: s1_begin s1_move_status s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_move_status: UPDATE lf_iso_types SET status = 'sent' WHERE id = 4997;
+step s2_lock: 
+	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
+	ORDER BY id DESC LIMIT 3 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+  id|payload
+----+-------
+4987|p4987  
+4977|p4977  
+4967|p4967  
+(3 rows)
+
+
+starting permutation: s1_begin s1_move_status s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_move_status: UPDATE lf_iso_types SET status = 'sent' WHERE id = 4997;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
+	ORDER BY id DESC LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+  id|payload
+----+-------
+4987|p4987  
+4977|p4977  
+4967|p4967  
+(3 rows)
+
+
+starting permutation: s1_begin s1_move_owner s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_move_owner: UPDATE lf_iso_types SET owner_id = '00000000-0000-0000-0000-000000000008' WHERE id = 4987;
+step s2_lock: 
+	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
+	ORDER BY id DESC LIMIT 3 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+  id|payload
+----+-------
+4997|p4997  
+4977|p4977  
+4967|p4967  
+(3 rows)
+
+
+starting permutation: s1_begin s1_move_owner s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_move_owner: UPDATE lf_iso_types SET owner_id = '00000000-0000-0000-0000-000000000008' WHERE id = 4987;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
+	ORDER BY id DESC LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+  id|payload
+----+-------
+4997|p4997  
+4977|p4977  
+4967|p4967  
+(3 rows)
+
+
+starting permutation: s1_begin s1_payload s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_payload: UPDATE lf_iso_types SET payload = 'changed' WHERE id = 4997;
+step s2_lock: 
+	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
+	ORDER BY id DESC LIMIT 3 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+  id|payload
+----+-------
+4997|changed
+4987|p4987  
+4977|p4977  
+(3 rows)
+
+
+starting permutation: s1_begin s1_payload s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_payload: UPDATE lf_iso_types SET payload = 'changed' WHERE id = 4997;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
+	ORDER BY id DESC LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+  id|payload
+----+-------
+4997|changed
+4987|p4987  
+4977|p4977  
+(3 rows)
+
