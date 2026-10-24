@@ -1,0 +1,189 @@
+--
+-- leapfrog_overflow
+--
+-- A TID group that does not fit into work_mem.  At plan time the average
+-- group size is checked against work_mem and the path is not offered;
+-- under leapfrog.force the executor falls back for the oversized value:
+-- every outer entry of the value is fetched from the heap and the predicate
+-- of the inner index is checked on the row.  No row may be lost or
+-- duplicated.
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE lf_overflow (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	group_id bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+);
+-- 40000 rows in 2 groups of 20000; work_mem = 64kB holds about 10900 TIDs
+-- and each group has 13333 live entries, so both groups overflow.  Owner 1
+-- has 20000 rows, two thirds live.
+INSERT INTO lf_overflow (id, owner_id, group_id, deleted_at, payload)
+SELECT g, g % 2, g % 2 + 100, CASE WHEN g % 3 = 0 THEN '2026-01-01'::timestamptz END, 'p' || g
+FROM generate_series(1, 40000) g;
+CREATE INDEX lf_overflow_owner_group ON lf_overflow (owner_id, group_id);
+CREATE INDEX lf_overflow_live_group ON lf_overflow (group_id) WHERE deleted_at IS NULL;
+ANALYZE lf_overflow;
+SET work_mem = '64kB';
+-- Not forced: the estimated group does not fit, the path is not offered.
+SET leapfrog.force = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Index Scan using lf_overflow_owner_group on lf_overflow
+   Index Cond: (owner_id = 1)
+   Filter: (deleted_at IS NULL)
+(3 rows)
+
+-- Forced: the scan runs and overflows on the group.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id $$);
+                      lf_plan                       
+----------------------------------------------------
+ Custom Scan (Index Merge Intersect) on lf_overflow
+   Outer Index: lf_overflow_owner_group
+   Inner Index: lf_overflow_live_group
+(3 rows)
+
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id $$);
+          counter          |           value           
+---------------------------+---------------------------
+ Outer Index               | "lf_overflow_owner_group"
+ Inner Index               | "lf_overflow_live_group"
+ Outer Entries Read        | 20000
+ Inner Entries Read        | 26667
+ Matched TIDs              | 0
+ Heap Fetches              | 20000
+ Rows Checked by Predicate | 20000
+ Group Overflows           | 1
+ Peak Group Memory         | 65532
+ Actual Rows               | 13333.00
+ Actual Loops              | 1
+(11 rows)
+
+SELECT count(*) FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL;
+ count 
+-------
+ 13333
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id $$, false);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 13333/13333, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id DESC $$, false);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 13333/13333, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 13333/13333, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id DESC, id DESC LIMIT 100 $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 0 AND deleted_at IS NULL ORDER BY group_id $$, false);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 13334/13334, missing: 0, extra: 0
+(1 row)
+
+-- With a stricter condition than the predicate the filter still applies
+-- after the predicate fallback.
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL AND id % 7 = 0 ORDER BY group_id, id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1905/1905, missing: 0, extra: 0
+(1 row)
+
+-- Dead entries in an overflowed group
+UPDATE lf_overflow SET payload = payload || '!' WHERE id % 4 = 0;
+UPDATE lf_overflow SET deleted_at = NULL WHERE id % 9 = 0;
+DELETE FROM lf_overflow WHERE id % 11 = 0;
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 14141/14141, missing: 0, extra: 0
+(1 row)
+
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
+          counter          |           value           
+---------------------------+---------------------------
+ Outer Index               | "lf_overflow_owner_group"
+ Inner Index               | "lf_overflow_live_group"
+ Outer Entries Read        | 22201
+ Inner Entries Read        | 36346
+ Matched TIDs              | 0
+ Heap Fetches              | 22201
+ Rows Checked by Predicate | 22201
+ Group Overflows           | 1
+ Peak Group Memory         | 65532
+ Actual Rows               | 14141.00
+ Actual Loops              | 1
+(11 rows)
+
+-- A mix: one small group and one that overflows.
+UPDATE lf_overflow SET group_id = 200 + id WHERE group_id = 101 AND id % 1000 = 1;
+ANALYZE lf_overflow;
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 14141/14141, missing: 0, extra: 0
+(1 row)
+
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
+          counter          |           value           
+---------------------------+---------------------------
+ Outer Index               | "lf_overflow_owner_group"
+ Inner Index               | "lf_overflow_live_group"
+ Outer Entries Read        | 22237
+ Inner Entries Read        | 36374
+ Matched TIDs              | 28
+ Heap Fetches              | 22229
+ Rows Checked by Predicate | 22201
+ Group Overflows           | 1
+ Peak Group Memory         | 65532
+ Actual Rows               | 14141.00
+ Actual Loops              | 1
+(11 rows)
+
+-- With enough work_mem the same query matches by TID.
+SET work_mem = '4MB';
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
+      counter       |           value           
+--------------------+---------------------------
+ Outer Index        | "lf_overflow_owner_group"
+ Inner Index        | "lf_overflow_live_group"
+ Outer Entries Read | 22237
+ Inner Entries Read | 36374
+ Matched TIDs       | 15581
+ Heap Fetches       | 15581
+ Peak Group Memory  | 98304
+ Actual Rows        | 14141.00
+ Actual Loops       | 1
+(9 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id, id $$);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 14141/14141, missing: 0, extra: 0
+(1 row)
+
+RESET work_mem;
+DROP TABLE lf_overflow;

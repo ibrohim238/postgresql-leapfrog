@@ -1,0 +1,613 @@
+--
+-- leapfrog_basic
+--
+-- The index pair the extension is built for: (owner_id, id) plus a partial
+-- (id) WHERE deleted_at IS NULL, and the mirror partial index for the
+-- deleted rows.  Results are compared with the standard plans through
+-- lf_check (EXCEPT ALL in both directions, plus the output order).
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE lf_basic (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	kind_id bigint NOT NULL,
+	deleted_at timestamptz,
+	status integer NOT NULL,
+	payload text
+);
+-- 20000 rows: 20 owners, every 7th row deleted, owner 19 never deleted,
+-- owner 18 always deleted; rows are inserted out of id order so that the
+-- heap order does not coincide with the sort order.
+INSERT INTO lf_basic (id, owner_id, kind_id, deleted_at, status, payload)
+SELECT g,
+	g % 20,
+	g % 3,
+	CASE WHEN g % 20 = 18 OR (g % 7 = 0 AND g % 20 <> 19)
+		THEN '2026-01-01'::timestamptz + g * interval '1 second' END,
+	g % 13,
+	'payload ' || g
+FROM generate_series(1, 20000) g
+ORDER BY (g * 7919) % 20000;
+CREATE INDEX lf_basic_owner_id ON lf_basic (owner_id, id);
+CREATE INDEX lf_basic_owner_kind_id ON lf_basic (owner_id, kind_id, id);
+CREATE INDEX lf_basic_live_id ON lf_basic (id) WHERE deleted_at IS NULL;
+CREATE INDEX lf_basic_deleted_id ON lf_basic (id) WHERE deleted_at IS NOT NULL;
+CREATE INDEX lf_basic_live_low_status_id ON lf_basic (id)
+	WHERE deleted_at IS NULL AND status < 10;
+ANALYZE lf_basic;
+-- On this small table the standard plan wins on cost (the cost-driven
+-- choice is covered by leapfrog_explain) ...
+SET leapfrog.force = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
+ORDER BY id DESC LIMIT 100;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id DESC
+         ->  Bitmap Heap Scan on lf_basic
+               Recheck Cond: (owner_id = 5)
+               Filter: (deleted_at IS NOT NULL)
+               ->  Bitmap Index Scan on lf_basic_owner_id
+                     Index Cond: (owner_id = 5)
+(8 rows)
+
+-- ... and the forced plan is the custom scan with both indexes named.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
+ORDER BY id DESC LIMIT 100 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Outer Index: lf_basic_owner_id
+         Inner Index: lf_basic_deleted_id
+(4 rows)
+
+-- Disabled: the standard plan comes back, force has no effect.
+SET leapfrog.enabled = off;
+SET leapfrog.force = on;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
+ORDER BY id DESC LIMIT 100;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id DESC
+         ->  Bitmap Heap Scan on lf_basic
+               Recheck Cond: (owner_id = 5)
+               Filter: (deleted_at IS NOT NULL)
+               ->  Bitmap Index Scan on lf_basic_owner_id
+                     Index Cond: (owner_id = 5)
+(8 rows)
+
+RESET leapfrog.enabled;
+RESET leapfrog.force;
+-- ORDER BY ASC / DESC, with and without LIMIT
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 143/143, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 143/143, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id LIMIT 1 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 1/1, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 1 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 1/1, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id LIMIT 100 $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 100 $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 857/857, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+-- LIMIT with OFFSET
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 OFFSET 50 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+-- Empty intersection: owner 19 has no deleted rows, owner 18 no live rows.
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 19 AND deleted_at IS NOT NULL ORDER BY id $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 0/0, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 18 AND deleted_at IS NULL ORDER BY id DESC LIMIT 5 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 0/0, missing: 0, extra: 0
+(1 row)
+
+-- Full intersection: every row of owner 19 is live, of owner 18 deleted.
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 19 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1000/1000, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 18 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1000/1000, missing: 0, extra: 0
+(1 row)
+
+-- No such owner
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 12345 AND deleted_at IS NULL ORDER BY id $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 0/0, missing: 0, extra: 0
+(1 row)
+
+-- Early termination: LIMIT 1 reads a handful of entries, not the indexes.
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
+ORDER BY id DESC LIMIT 1 $$);
+      counter       |         value         
+--------------------+-----------------------
+ Outer Index        | "lf_basic_owner_id"
+ Inner Index        | "lf_basic_deleted_id"
+ Outer Entries Read | 1
+ Inner Entries Read | 4
+ Matched TIDs       | 1
+ Heap Fetches       | 1
+ Peak Group Memory  | 96
+ Actual Rows        | 1.00
+ Actual Loops       | 1
+(9 rows)
+
+-- Without LIMIT every entry of both sides is read, and only matches are
+-- fetched from the heap.
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
+ORDER BY id $$);
+      counter       |         value         
+--------------------+-----------------------
+ Outer Index        | "lf_basic_owner_id"
+ Inner Index        | "lf_basic_deleted_id"
+ Outer Entries Read | 1000
+ Inner Entries Read | 3570
+ Matched TIDs       | 143
+ Heap Fetches       | 143
+ Peak Group Memory  | 96
+ Actual Rows        | 143.00
+ Actual Loops       | 1
+(9 rows)
+
+-- Several equality columns: the three-column outer index.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND kind_id = 2 AND deleted_at IS NULL
+ORDER BY id DESC LIMIT 20 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Outer Index: lf_basic_owner_kind_id
+         Inner Index: lf_basic_live_id
+(4 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND kind_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND kind_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 48/48, missing: 0, extra: 0
+(1 row)
+
+-- Equality with integer and smallint constants, and the column on the right
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5::integer AND deleted_at IS NULL ORDER BY id LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5::smallint AND deleted_at IS NULL ORDER BY id LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE 5 = owner_id AND deleted_at IS NULL ORDER BY id LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+-- Partial index with two conditions: the query implies the predicate
+-- (status < 5 implies status < 10), the rows with status 5..9 that the
+-- inner index holds are removed by the node's filter.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 5
+ORDER BY id LIMIT 20 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Filter: (status < 5)
+         Outer Index: lf_basic_owner_id
+         Inner Index: lf_basic_live_low_status_id
+(5 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 5 ORDER BY id LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 5 ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 330/330, missing: 0, extra: 0
+(1 row)
+
+-- Predicate exactly equal to the query: no filter left.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 10
+ORDER BY id LIMIT 20 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Outer Index: lf_basic_owner_id
+         Inner Index: lf_basic_live_low_status_id
+(4 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 10 ORDER BY id LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+-- Extra filter that neither index covers stays in the plan.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND payload LIKE '%45'
+ORDER BY id LIMIT 20 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Filter: (payload ~~ '%45'::text)
+         Outer Index: lf_basic_owner_id
+         Inner Index: lf_basic_live_id
+(5 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND payload LIKE '%45' ORDER BY id LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+-- Projection of a subset of columns and an expression
+SELECT lf_check($$ SELECT id, upper(payload) FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+-- Aggregation over the scan
+SELECT lf_check($$ SELECT count(*), sum(id) FROM (SELECT id FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id) s $$, false);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 1/1, missing: 0, extra: 0
+(1 row)
+
+--
+-- Cases that must NOT produce the custom scan, even when forced
+--
+-- No ORDER BY: no sort key to merge on.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL LIMIT 20 $$);
+                          lf_plan                          
+-----------------------------------------------------------
+ Limit
+   ->  Seq Scan on lf_basic
+         Filter: ((deleted_at IS NULL) AND (owner_id = 5))
+(3 rows)
+
+-- ORDER BY another column
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY status LIMIT 20 $$);
+                         lf_plan                          
+----------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: status
+         ->  Bitmap Heap Scan on lf_basic
+               Recheck Cond: (owner_id = 5)
+               Filter: (deleted_at IS NULL)
+               ->  Bitmap Index Scan on lf_basic_owner_id
+                     Index Cond: (owner_id = 5)
+(8 rows)
+
+-- The predicate is not implied by the query.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 ORDER BY id LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Index Scan using lf_basic_owner_id on lf_basic
+         Index Cond: (owner_id = 5)
+(3 rows)
+
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND status < 20 ORDER BY id LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Index Scan using lf_basic_owner_id on lf_basic
+         Index Cond: (owner_id = 5)
+         Filter: (status < 20)
+(4 rows)
+
+-- No equality on the outer index's leading column (range instead).
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id > 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                       lf_plan                       
+-----------------------------------------------------
+ Limit
+   ->  Index Scan using lf_basic_live_id on lf_basic
+         Filter: (owner_id > 5)
+(3 rows)
+
+-- IN (...) is not an equality.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id IN (5, 6) AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Index Scan using lf_basic_live_id on lf_basic
+         Filter: (owner_id = ANY ('{5,6}'::bigint[]))
+(3 rows)
+
+-- NULL constant: the clause is "owner_id = NULL", nothing can match; the
+-- planner reduces it to a dummy result and the hook sees no base rel.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = NULL AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+               lf_plan                
+--------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id
+         ->  Result
+               One-Time Filter: false
+(5 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = NULL AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: f, rows: 0/0, missing: 0, extra: 0
+(1 row)
+
+-- Without the inner partial index there is no pair.
+BEGIN;
+DROP INDEX lf_basic_live_id;
+DROP INDEX lf_basic_live_low_status_id;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Index Scan using lf_basic_owner_id on lf_basic
+         Index Cond: (owner_id = 5)
+         Filter: (deleted_at IS NULL)
+(4 rows)
+
+-- the mirror index still pairs for the deleted rows
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id LIMIT 20 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Outer Index: lf_basic_owner_id
+         Inner Index: lf_basic_deleted_id
+(4 rows)
+
+ROLLBACK;
+-- Without the outer index there is no pair either.
+BEGIN;
+DROP INDEX lf_basic_owner_id;
+DROP INDEX lf_basic_owner_kind_id;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                       lf_plan                       
+-----------------------------------------------------
+ Limit
+   ->  Index Scan using lf_basic_live_id on lf_basic
+         Filter: (owner_id = 5)
+(3 rows)
+
+ROLLBACK;
+-- A DESC index column is rejected: the two streams would not agree.
+BEGIN;
+DROP INDEX lf_basic_owner_id;
+DROP INDEX lf_basic_owner_kind_id;
+CREATE INDEX lf_basic_owner_id_desc ON lf_basic (owner_id, id DESC);
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
+                          lf_plan                          
+-----------------------------------------------------------
+ Limit
+   ->  Index Scan using lf_basic_owner_id_desc on lf_basic
+         Index Cond: (owner_id = 5)
+         Filter: (deleted_at IS NULL)
+(4 rows)
+
+ROLLBACK;
+-- A nullable sort column is rejected, a non-bigint one as well.
+CREATE TABLE lf_basic_nullable (id bigint, owner_id bigint NOT NULL, deleted_at timestamptz);
+CREATE INDEX ON lf_basic_nullable (owner_id, id);
+CREATE INDEX ON lf_basic_nullable (id) WHERE deleted_at IS NULL;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                                    lf_plan                                     
+--------------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id
+         ->  Bitmap Heap Scan on lf_basic_nullable
+               Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
+               ->  BitmapAnd
+                     ->  Bitmap Index Scan on lf_basic_nullable_id_idx
+                     ->  Bitmap Index Scan on lf_basic_nullable_owner_id_id_idx
+                           Index Cond: (owner_id = 5)
+(9 rows)
+
+-- a NOT NULL constraint added NOT VALID does not count yet ...
+ALTER TABLE lf_basic_nullable ADD CONSTRAINT lf_basic_nullable_id_notnull NOT NULL id NOT VALID;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                                    lf_plan                                     
+--------------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id
+         ->  Bitmap Heap Scan on lf_basic_nullable
+               Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
+               ->  BitmapAnd
+                     ->  Bitmap Index Scan on lf_basic_nullable_id_idx
+                     ->  Bitmap Index Scan on lf_basic_nullable_owner_id_id_idx
+                           Index Cond: (owner_id = 5)
+(9 rows)
+
+-- ... until it is validated.
+ALTER TABLE lf_basic_nullable VALIDATE CONSTRAINT lf_basic_nullable_id_notnull;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                            lf_plan                             
+----------------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic_nullable
+         Outer Index: lf_basic_nullable_owner_id_id_idx
+         Inner Index: lf_basic_nullable_id_idx
+(4 rows)
+
+DROP TABLE lf_basic_nullable;
+CREATE TABLE lf_basic_int4 (id integer NOT NULL, owner_id bigint NOT NULL, deleted_at timestamptz);
+CREATE INDEX ON lf_basic_int4 (owner_id, id);
+CREATE INDEX ON lf_basic_int4 (id) WHERE deleted_at IS NULL;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_int4 WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                                  lf_plan                                   
+----------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id
+         ->  Bitmap Heap Scan on lf_basic_int4
+               Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
+               ->  BitmapAnd
+                     ->  Bitmap Index Scan on lf_basic_int4_id_idx
+                     ->  Bitmap Index Scan on lf_basic_int4_owner_id_id_idx
+                           Index Cond: (owner_id = 5)
+(9 rows)
+
+DROP TABLE lf_basic_int4;
+-- A non-bigint equality column is rejected.
+CREATE TABLE lf_basic_int4_owner (id bigint NOT NULL, owner_id integer NOT NULL, deleted_at timestamptz);
+CREATE INDEX ON lf_basic_int4_owner (owner_id, id);
+CREATE INDEX ON lf_basic_int4_owner (id) WHERE deleted_at IS NULL;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_int4_owner WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                                     lf_plan                                      
+----------------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id
+         ->  Bitmap Heap Scan on lf_basic_int4_owner
+               Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
+               ->  BitmapAnd
+                     ->  Bitmap Index Scan on lf_basic_int4_owner_id_idx
+                     ->  Bitmap Index Scan on lf_basic_int4_owner_owner_id_id_idx
+                           Index Cond: (owner_id = 5)
+(9 rows)
+
+DROP TABLE lf_basic_int4_owner;
+-- A partitioned table and a view are left alone.
+CREATE TABLE lf_basic_part (id bigint NOT NULL, owner_id bigint NOT NULL, deleted_at timestamptz)
+	PARTITION BY HASH (id);
+CREATE TABLE lf_basic_part_0 PARTITION OF lf_basic_part FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE lf_basic_part_1 PARTITION OF lf_basic_part FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+CREATE INDEX ON lf_basic_part (owner_id, id);
+CREATE INDEX ON lf_basic_part (id) WHERE deleted_at IS NULL;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_part WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                                      lf_plan                                       
+------------------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: lf_basic_part.id
+         ->  Append
+               ->  Bitmap Heap Scan on lf_basic_part_0 lf_basic_part_1
+                     Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
+                     ->  BitmapAnd
+                           ->  Bitmap Index Scan on lf_basic_part_0_id_idx
+                           ->  Bitmap Index Scan on lf_basic_part_0_owner_id_id_idx
+                                 Index Cond: (owner_id = 5)
+               ->  Bitmap Heap Scan on lf_basic_part_1 lf_basic_part_2
+                     Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
+                     ->  BitmapAnd
+                           ->  Bitmap Index Scan on lf_basic_part_1_id_idx
+                           ->  Bitmap Index Scan on lf_basic_part_1_owner_id_id_idx
+                                 Index Cond: (owner_id = 5)
+(16 rows)
+
+DROP TABLE lf_basic_part;
+CREATE VIEW lf_basic_view AS SELECT * FROM lf_basic WHERE deleted_at IS NULL;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic_view WHERE owner_id = 5 ORDER BY id LIMIT 20 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Outer Index: lf_basic_owner_id
+         Inner Index: lf_basic_live_id
+(4 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_basic_view WHERE owner_id = 5 ORDER BY id LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+DROP VIEW lf_basic_view;
+DROP TABLE lf_basic;

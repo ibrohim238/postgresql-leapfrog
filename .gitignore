@@ -1,0 +1,29 @@
+# build artefacts
+*.o
+*.so
+*.so.*
+*.bc
+*.dylib
+*.dll
+/src/*.o
+/leapfrog.so
+
+# pg_regress / pg_isolation_regress output
+/results/
+/tests/isolation/results/
+/tests/isolation/output_iso/
+/regression.diffs
+/regression.out
+/tests/isolation/regression.diffs
+/tests/isolation/regression.out
+/log/
+/tmp_check/
+/tmp_check_iso/
+
+# benchmark results
+/tests/performance/results/
+
+# editors
+*.swp
+.idea/
+.vscode/

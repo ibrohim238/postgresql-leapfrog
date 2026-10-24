@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bench:
+        description: "Run the benchmark profile (1M rows)"
+        type: boolean
+        default: false
+
+jobs:
+  build-and-test:
+    name: PostgreSQL ${{ matrix.pg }} / ${{ matrix.cc }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [18]
+        cc: [gcc, clang]
+    env:
+      PGVERSION: ${{ matrix.pg }}
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }} from PGDG
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-${PGVERSION} postgresql-server-dev-${PGVERSION} \
+            libipc-run-perl ${{ matrix.cc }}
+          echo "/usr/lib/postgresql/${PGVERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Build (warnings are errors)
+        run: make with_llvm=no WERROR=1 CC=${CC}
+
+      - name: Code style (pgindent)
+        if: matrix.cc == 'gcc'
+        run: make pgindent
+
+      - name: Install
+        run: sudo make with_llvm=no install
+
+      - name: Start a cluster with the library preloaded
+        run: |
+          sudo pg_dropcluster --stop ${PGVERSION} main || true
+          sudo pg_createcluster ${PGVERSION} test -p 5432 -- --auth-local=trust
+          sudo tee -a /etc/postgresql/${PGVERSION}/test/postgresql.conf <<'EOF'
+          shared_preload_libraries = 'leapfrog'
+          max_parallel_workers_per_gather = 0
+          jit = off
+          EOF
+          sudo pg_ctlcluster ${PGVERSION} test start
+          sudo -u postgres psql -c "CREATE ROLE runner SUPERUSER LOGIN" || true
+          echo "PGUSER=runner" >> "$GITHUB_ENV"
+          echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
+
+      - name: CREATE EXTENSION and the key query
+        run: |
+          psql -v ON_ERROR_STOP=1 -d postgres <<'EOF'
+          CREATE DATABASE smoke;
+          \c smoke
+          CREATE EXTENSION leapfrog;
+          SELECT leapfrog_version(), leapfrog_is_loaded();
+          CREATE TABLE orders (id bigint PRIMARY KEY, customer_id bigint NOT NULL, deleted_at timestamptz);
+          INSERT INTO orders SELECT g, g % 100, CASE WHEN g % 7 = 0 THEN now() END FROM generate_series(1, 50000) g;
+          CREATE INDEX idx_orders_customer_id ON orders (customer_id, id);
+          CREATE INDEX idx_orders_active_id ON orders (id) WHERE deleted_at IS NULL;
+          ANALYZE orders;
+          SET leapfrog.force = on;
+          EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100;
+          SELECT count(*) FROM (SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100) s;
+          SET leapfrog.enabled = off;
+          EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100;
+          EOF
+          # the forced plan must contain the custom scan, the disabled one must not
+          psql -tA -d smoke -c "SET leapfrog.force = on" -c "EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" | grep -q "Custom Scan (Index Merge Intersect)"
+          ! psql -tA -d smoke -c "SET leapfrog.enabled = off" -c "EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" | grep -q "Custom Scan"
+
+      - name: Regression and isolation tests (make installcheck)
+        run: make installcheck
+
+      - name: Show diffs on failure
+        if: failure()
+        run: |
+          cat regression.diffs 2>/dev/null || true
+          cat tests/isolation/regression.diffs 2>/dev/null || true
+          sudo cat /var/log/postgresql/postgresql-${PGVERSION}-test.log | tail -100 || true
+
+  docker:
+    name: Docker compose
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images, start the server, run the suites in a container
+        run: bash tests/run-in-docker.sh
+      - name: Show diffs on failure
+        if: failure()
+        run: |
+          cat results/*.diff 2>/dev/null || true
+          cat tests/isolation/results/*.diff 2>/dev/null || true
+
+  bench:
+    name: Benchmark (manual, 1M rows)
+    if: github.event_name == 'workflow_dispatch' && inputs.bench
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the benchmark profile
+        env:
+          BENCH_SIZES: "100000 1000000"
+          BENCH_REPEATS: "5"
+        run: |
+          docker compose up -d --build --wait postgres
+          docker compose --profile bench run --rm --build bench
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: tests/performance/results/

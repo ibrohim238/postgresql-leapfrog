@@ -1,0 +1,443 @@
+--
+-- leapfrog_parameters
+--
+-- Equality values that are not constants: query parameters of prepared
+-- statements, nestloop parameters from LATERAL and from join clauses, and
+-- repeated rescans of the node.
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE lf_param (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	kind_id bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+);
+INSERT INTO lf_param (id, owner_id, kind_id, deleted_at, payload)
+SELECT g, g % 10, g % 3,
+	CASE WHEN g % 4 = 0 THEN '2026-01-01'::timestamptz END, 'p' || g
+FROM generate_series(1, 20000) g
+ORDER BY (g * 7919) % 20000;
+CREATE INDEX lf_param_owner_id ON lf_param (owner_id, id);
+CREATE INDEX lf_param_owner_kind_id ON lf_param (owner_id, kind_id, id);
+CREATE INDEX lf_param_live_id ON lf_param (id) WHERE deleted_at IS NULL;
+ANALYZE lf_param;
+CREATE TABLE lf_owners (owner_id bigint PRIMARY KEY, name text);
+INSERT INTO lf_owners SELECT g, 'owner ' || g FROM generate_series(0, 12) g;
+ANALYZE lf_owners;
+SET leapfrog.force = on;
+--
+-- Prepared statement with a generic plan: the value is a Param.
+--
+SET plan_cache_mode = force_generic_plan;
+PREPARE lf_by_owner (bigint) AS
+	SELECT id, owner_id FROM lf_param WHERE owner_id = $1 AND deleted_at IS NULL
+	ORDER BY id DESC LIMIT 5;
+EXPLAIN (COSTS OFF) EXECUTE lf_by_owner(3);
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_param
+         Outer Index: lf_param_owner_id
+         Inner Index: lf_param_live_id
+(4 rows)
+
+EXECUTE lf_by_owner(3);
+  id   | owner_id 
+-------+----------
+ 19993 |        3
+ 19983 |        3
+ 19973 |        3
+ 19963 |        3
+ 19953 |        3
+(5 rows)
+
+EXECUTE lf_by_owner(4);
+  id   | owner_id 
+-------+----------
+ 19994 |        4
+ 19974 |        4
+ 19954 |        4
+ 19934 |        4
+ 19914 |        4
+(5 rows)
+
+-- NULL parameter: no row can match, no error
+EXECUTE lf_by_owner(NULL);
+ id | owner_id 
+----+----------
+(0 rows)
+
+-- a value with no rows
+EXECUTE lf_by_owner(12345);
+ id | owner_id 
+----+----------
+(0 rows)
+
+EXECUTE lf_by_owner(3);
+  id   | owner_id 
+-------+----------
+ 19993 |        3
+ 19983 |        3
+ 19973 |        3
+ 19963 |        3
+ 19953 |        3
+(5 rows)
+
+DEALLOCATE lf_by_owner;
+-- integer parameter against the bigint column
+PREPARE lf_by_owner_int4 (integer) AS
+	SELECT id, owner_id FROM lf_param WHERE owner_id = $1 AND deleted_at IS NULL
+	ORDER BY id LIMIT 3;
+EXPLAIN (COSTS OFF) EXECUTE lf_by_owner_int4(3);
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_param
+         Outer Index: lf_param_owner_id
+         Inner Index: lf_param_live_id
+(4 rows)
+
+EXECUTE lf_by_owner_int4(3);
+ id | owner_id 
+----+----------
+  3 |        3
+ 13 |        3
+ 23 |        3
+(3 rows)
+
+DEALLOCATE lf_by_owner_int4;
+RESET plan_cache_mode;
+--
+-- LATERAL: the value is a column of the outer relation, the path is
+-- parameterized and the node is rescanned for every outer row.
+--
+EXPLAIN (COSTS OFF)
+SELECT v.owner_id, s.id
+FROM (VALUES (1::bigint), (5), (12345), (7)) v (owner_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
+			 ORDER BY id DESC LIMIT 3) s;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*"
+   ->  Limit
+         ->  Custom Scan (Index Merge Intersect) on lf_param
+               Outer Index: lf_param_owner_id
+               Inner Index: lf_param_live_id
+(6 rows)
+
+SELECT v.owner_id, s.id
+FROM (VALUES (1::bigint), (5), (12345), (7)) v (owner_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
+			 ORDER BY id DESC LIMIT 3) s;
+ owner_id |  id   
+----------+-------
+        1 | 19991
+        1 | 19981
+        1 | 19971
+        5 | 19995
+        5 | 19985
+        5 | 19975
+        7 | 19997
+        7 | 19987
+        7 | 19977
+(9 rows)
+
+-- the same against the standard plan, with and without LIMIT
+SELECT lf_check($$
+SELECT v.owner_id, s.id
+FROM (VALUES (1::bigint), (5), (12345), (7)) v (owner_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
+			 ORDER BY id DESC LIMIT 3) s $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 9/9, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$
+SELECT v.owner_id, s.id
+FROM (VALUES (1::bigint), (5), (12345), (7)) v (owner_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
+			 ORDER BY id) s $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 6000/6000, missing: 0, extra: 0
+(1 row)
+
+-- NULL outer value among the rows: that iteration yields nothing.
+SELECT lf_check($$
+SELECT v.owner_id, s.id
+FROM (VALUES (1::bigint), (NULL), (7)) v (owner_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
+			 ORDER BY id LIMIT 2) s $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 4/4, missing: 0, extra: 0
+(1 row)
+
+-- Two nestloop parameters from two outer relations on the three-column index.
+EXPLAIN (COSTS OFF)
+SELECT o.owner_id, k.kind_id, s.id
+FROM (VALUES (2::bigint), (3)) o (owner_id),
+	(VALUES (0::bigint), (2)) k (kind_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = o.owner_id AND kind_id = k.kind_id AND deleted_at IS NULL
+			 ORDER BY id DESC LIMIT 2) s;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*_1"
+   ->  Nested Loop
+         ->  Values Scan on "*VALUES*"
+         ->  Limit
+               ->  Custom Scan (Index Merge Intersect) on lf_param
+                     Outer Index: lf_param_owner_kind_id
+                     Inner Index: lf_param_live_id
+(8 rows)
+
+SELECT lf_check($$
+SELECT o.owner_id, k.kind_id, s.id
+FROM (VALUES (2::bigint), (3)) o (owner_id),
+	(VALUES (0::bigint), (2)) k (kind_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = o.owner_id AND kind_id = k.kind_id AND deleted_at IS NULL
+			 ORDER BY id DESC LIMIT 2) s $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 8/8, missing: 0, extra: 0
+(1 row)
+
+-- The counters are summed over all rescans: 4 outer rows, 3 with matches.
+SELECT * FROM lf_counters($$
+SELECT v.owner_id, s.id
+FROM (VALUES (1::bigint), (5), (12345), (7)) v (owner_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
+			 ORDER BY id DESC LIMIT 3) s $$);
+      counter       |        value        
+--------------------+---------------------
+ Outer Index        | "lf_param_owner_id"
+ Inner Index        | "lf_param_live_id"
+ Outer Entries Read | 9
+ Inner Entries Read | 62
+ Matched TIDs       | 9
+ Heap Fetches       | 9
+ Peak Group Memory  | 96
+ Actual Rows        | 2.25
+ Actual Loops       | 4
+(9 rows)
+
+--
+-- A join clause: the equality comes from the equivalence class of
+-- lf_owners.owner_id = lf_param.owner_id, the node is the inner side of a
+-- nested loop.
+--
+EXPLAIN (COSTS OFF)
+SELECT o.name, s.id
+FROM lf_owners o
+	JOIN LATERAL (SELECT id FROM lf_param
+				  WHERE owner_id = o.owner_id AND deleted_at IS NULL
+				  ORDER BY id DESC LIMIT 2) s ON true
+WHERE o.owner_id IN (2, 3);
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on lf_owners o
+         Filter: (owner_id = ANY ('{2,3}'::bigint[]))
+   ->  Limit
+         ->  Custom Scan (Index Merge Intersect) on lf_param
+               Outer Index: lf_param_owner_id
+               Inner Index: lf_param_live_id
+(7 rows)
+
+SELECT lf_check($$
+SELECT o.name, s.id
+FROM lf_owners o
+	JOIN LATERAL (SELECT id FROM lf_param
+				  WHERE owner_id = o.owner_id AND deleted_at IS NULL
+				  ORDER BY id DESC LIMIT 2) s ON true
+WHERE o.owner_id IN (2, 3) $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 4/4, missing: 0, extra: 0
+(1 row)
+
+-- Plain join without LATERAL.  With a constant on the other side the
+-- equivalence class gives the scan a constant equality of its own.
+EXPLAIN (COSTS OFF)
+SELECT o.name, s.id
+FROM lf_owners o JOIN lf_param s ON s.owner_id = o.owner_id
+WHERE s.deleted_at IS NULL AND o.owner_id = 3
+ORDER BY s.id DESC LIMIT 10;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Limit
+   ->  Nested Loop
+         ->  Custom Scan (Index Merge Intersect) on lf_param s
+               Outer Index: lf_param_owner_id
+               Inner Index: lf_param_live_id
+         ->  Materialize
+               ->  Seq Scan on lf_owners o
+                     Filter: (owner_id = 3)
+(8 rows)
+
+SELECT lf_check($$
+SELECT o.name, s.id
+FROM lf_owners o JOIN lf_param s ON s.owner_id = o.owner_id
+WHERE s.deleted_at IS NULL AND o.owner_id = 3
+ORDER BY s.id DESC LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+-- Without a constant the join clause lives in the equivalence class only;
+-- the parameterized path is the inner side of a nested loop whose output
+-- is in the outer's order, so a Sort follows.
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+EXPLAIN (COSTS OFF)
+SELECT o.name, s.id
+FROM lf_owners o JOIN lf_param s ON s.owner_id = o.owner_id
+WHERE s.deleted_at IS NULL AND o.name IN ('owner 2', 'owner 3')
+ORDER BY s.id;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Sort
+   Sort Key: s.id
+   ->  Nested Loop
+         ->  Seq Scan on lf_owners o
+               Filter: (name = ANY ('{"owner 2","owner 3"}'::text[]))
+         ->  Custom Scan (Index Merge Intersect) on lf_param s
+               Outer Index: lf_param_owner_id
+               Inner Index: lf_param_live_id
+(8 rows)
+
+SELECT lf_check($$
+SELECT o.name, s.id
+FROM lf_owners o JOIN lf_param s ON s.owner_id = o.owner_id
+WHERE s.deleted_at IS NULL AND o.name IN ('owner 2', 'owner 3')
+ORDER BY s.id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 3000/3000, missing: 0, extra: 0
+(1 row)
+
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+-- Rescan with the same parameter twice in a row (duplicate outer values)
+SELECT lf_check($$
+SELECT v.owner_id, s.id
+FROM (VALUES (5::bigint), (5), (5)) v (owner_id),
+	LATERAL (SELECT id FROM lf_param
+			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
+			 ORDER BY id LIMIT 4) s $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 12/12, missing: 0, extra: 0
+(1 row)
+
+-- A subplan parameter (uncorrelated scalar subquery = InitPlan Param)
+SELECT lf_check($$
+SELECT id FROM lf_param
+WHERE owner_id = (SELECT min(owner_id) + 2 FROM lf_owners) AND deleted_at IS NULL
+ORDER BY id LIMIT 5 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 5/5, missing: 0, extra: 0
+(1 row)
+
+SELECT * FROM lf_plan($$
+SELECT id FROM lf_param
+WHERE owner_id = (SELECT min(owner_id) + 2 FROM lf_owners) AND deleted_at IS NULL
+ORDER BY id LIMIT 5 $$);
+                                 lf_plan                                 
+-------------------------------------------------------------------------
+ Limit
+   InitPlan 2
+     ->  Result
+           InitPlan 1
+             ->  Limit
+                   ->  Index Only Scan using lf_owners_pkey on lf_owners
+   ->  Custom Scan (Index Merge Intersect) on lf_param
+         Outer Index: lf_param_owner_id
+         Inner Index: lf_param_live_id
+(9 rows)
+
+-- A correlated subquery in the target list runs the node once per row.
+SELECT lf_check($$
+SELECT o.owner_id,
+	(SELECT max(id) FROM (SELECT id FROM lf_param
+						  WHERE owner_id = o.owner_id AND deleted_at IS NULL
+						  ORDER BY id DESC LIMIT 10) t) AS top_id
+FROM lf_owners o ORDER BY o.owner_id $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 13/13, missing: 0, extra: 0
+(1 row)
+
+--
+-- Plan invalidation: a cached plan that uses the pair is replanned when
+-- one of its indexes is dropped.
+--
+SET plan_cache_mode = force_generic_plan;
+PREPARE lf_cached (bigint) AS
+	SELECT id FROM lf_param WHERE owner_id = $1 AND deleted_at IS NULL
+	ORDER BY id DESC LIMIT 3;
+EXPLAIN (COSTS OFF) EXECUTE lf_cached(3);
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_param
+         Outer Index: lf_param_owner_id
+         Inner Index: lf_param_live_id
+(4 rows)
+
+EXECUTE lf_cached(3);
+  id   
+-------
+ 19993
+ 19983
+ 19973
+(3 rows)
+
+DROP INDEX lf_param_live_id;
+EXPLAIN (COSTS OFF) EXECUTE lf_cached(3);
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Limit
+   ->  Index Scan Backward using lf_param_owner_id on lf_param
+         Index Cond: (owner_id = $1)
+         Filter: (deleted_at IS NULL)
+(4 rows)
+
+EXECUTE lf_cached(3);
+  id   
+-------
+ 19993
+ 19983
+ 19973
+(3 rows)
+
+CREATE INDEX lf_param_live_id ON lf_param (id) WHERE deleted_at IS NULL;
+EXPLAIN (COSTS OFF) EXECUTE lf_cached(3);
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_param
+         Outer Index: lf_param_owner_id
+         Inner Index: lf_param_live_id
+(4 rows)
+
+DEALLOCATE lf_cached;
+RESET plan_cache_mode;
+RESET leapfrog.force;
+DROP TABLE lf_param;
+DROP TABLE lf_owners;

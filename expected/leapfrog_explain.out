@@ -1,0 +1,331 @@
+--
+-- leapfrog_explain
+--
+-- EXPLAIN output of the node in every format and the instrumentation of
+-- EXPLAIN ANALYZE.
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE lf_explain (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+);
+INSERT INTO lf_explain (id, owner_id, deleted_at, payload)
+SELECT g, g % 4, CASE WHEN g % 2 = 0 THEN '2026-01-01'::timestamptz END, 'p' || g
+FROM generate_series(1, 8000) g;
+CREATE INDEX lf_explain_owner_id ON lf_explain (owner_id, id);
+CREATE INDEX lf_explain_live_id ON lf_explain (id) WHERE deleted_at IS NULL;
+ANALYZE lf_explain;
+SET leapfrog.force = on;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_explain
+         Outer Index: lf_explain_owner_id
+         Inner Index: lf_explain_live_id
+(4 rows)
+
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Limit
+   Output: id
+   ->  Custom Scan (Index Merge Intersect) on public.lf_explain
+         Output: id
+         Outer Index: lf_explain_owner_id
+         Inner Index: lf_explain_live_id
+(6 rows)
+
+-- Costs are present without force (numbers masked).  Here the standard
+-- plan is cheaper: half of the rows are live and every fourth belongs to
+-- the owner, a plain index scan finds a match every few rows.
+SELECT * FROM lf_plan_costs($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
+                                        lf_plan_costs                                         
+----------------------------------------------------------------------------------------------
+ Limit  (cost=N..N rows=N width=N)
+   ->  Index Scan Backward using lf_explain_live_id on lf_explain  (cost=N..N rows=N width=N)
+         Filter: (owner_id = N)
+(3 rows)
+
+-- The case the node is built for: the owner holds 2% of the rows and 2%
+-- of the rows are deleted, independently, and the rows are wide enough
+-- that every fetched row costs a heap page.  Either standard index scan
+-- discards 49 of 50 fetched rows, BitmapAnd has to read both indexes
+-- completely and sort; the intersection wins on cost without force.
+CREATE TABLE lf_explain_cost (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+);
+INSERT INTO lf_explain_cost (id, owner_id, deleted_at, payload)
+SELECT g, g % 50, CASE WHEN g % 2500 < 50 THEN '2026-01-01'::timestamptz END, repeat('x', 400)
+FROM generate_series(1, 50000) g;
+CREATE INDEX lf_explain_cost_owner_id ON lf_explain_cost (owner_id, id);
+CREATE INDEX lf_explain_cost_deleted_id ON lf_explain_cost (id) WHERE deleted_at IS NOT NULL;
+VACUUM ANALYZE lf_explain_cost;
+SET leapfrog.force = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_explain_cost
+         Outer Index: lf_explain_cost_owner_id
+         Inner Index: lf_explain_cost_deleted_id
+(4 rows)
+
+SELECT * FROM lf_plan_costs($$
+SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10 $$);
+                                      lf_plan_costs                                       
+------------------------------------------------------------------------------------------
+ Limit  (cost=N..N rows=N width=N)
+   ->  Custom Scan (Index Merge Intersect) on lf_explain_cost  (cost=N..N rows=N width=N)
+         Outer Index: lf_explain_cost_owner_id
+         Inner Index: lf_explain_cost_deleted_id
+(4 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+-- Without LIMIT the whole result is needed and BitmapAnd is competitive;
+-- whichever wins, the result is the same.
+SELECT lf_check($$ SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+-- With leapfrog disabled the standard plan is back.
+SET leapfrog.enabled = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Limit
+   ->  Index Scan Backward using lf_explain_cost_deleted_id on lf_explain_cost
+         Filter: (owner_id = 7)
+(3 rows)
+
+RESET leapfrog.enabled;
+DROP TABLE lf_explain_cost;
+SET leapfrog.force = on;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Limit (actual rows=10.00 loops=1)
+   ->  Custom Scan (Index Merge Intersect) on lf_explain (actual rows=10.00 loops=1)
+         Outer Index: lf_explain_owner_id
+         Inner Index: lf_explain_live_id
+         Outer Entries Read: 10
+         Inner Entries Read: 21
+         Matched TIDs: 10
+         Heap Fetches: 10
+         Peak Group Memory: 96 B
+(9 rows)
+
+-- Owner 1 has odd ids only, all of them live: LIMIT 10 reads 10 outer
+-- entries and about 20 inner ones, matches and fetches 10.
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
+      counter       |         value         
+--------------------+-----------------------
+ Outer Index        | "lf_explain_owner_id"
+ Inner Index        | "lf_explain_live_id"
+ Outer Entries Read | 10
+ Inner Entries Read | 21
+ Matched TIDs       | 10
+ Heap Fetches       | 10
+ Peak Group Memory  | 96
+ Actual Rows        | 10.00
+ Actual Loops       | 1
+(9 rows)
+
+-- Owner 0 has even ids only, none of them live: the whole owner is read,
+-- nothing matches, nothing is fetched.
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_explain WHERE owner_id = 0 AND deleted_at IS NULL ORDER BY id $$);
+      counter       |         value         
+--------------------+-----------------------
+ Outer Index        | "lf_explain_owner_id"
+ Inner Index        | "lf_explain_live_id"
+ Outer Entries Read | 2000
+ Inner Entries Read | 4000
+ Matched TIDs       | 0
+ Heap Fetches       | 0
+ Peak Group Memory  | 96
+ Actual Rows        | 0.00
+ Actual Loops       | 1
+(9 rows)
+
+-- A filter removes rows after the fetch.
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL AND payload LIKE '%5' ORDER BY id LIMIT 10 $$);
+        counter         |         value         
+------------------------+-----------------------
+ Outer Index            | "lf_explain_owner_id"
+ Inner Index            | "lf_explain_live_id"
+ Outer Entries Read     | 47
+ Inner Entries Read     | 94
+ Matched TIDs           | 47
+ Heap Fetches           | 47
+ Peak Group Memory      | 96
+ Actual Rows            | 10.00
+ Actual Loops           | 1
+ Rows Removed by Filter | 37
+(10 rows)
+
+-- JSON, YAML and XML formats carry the same properties.
+EXPLAIN (COSTS OFF, FORMAT JSON)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ [                                                         +
+   {                                                       +
+     "Plan": {                                             +
+       "Node Type": "Limit",                               +
+       "Parallel Aware": false,                            +
+       "Async Capable": false,                             +
+       "Disabled": false,                                  +
+       "Plans": [                                          +
+         {                                                 +
+           "Node Type": "Custom Scan",                     +
+           "Parent Relationship": "Outer",                 +
+           "Custom Plan Provider": "Index Merge Intersect",+
+           "Parallel Aware": false,                        +
+           "Async Capable": false,                         +
+           "Relation Name": "lf_explain",                  +
+           "Alias": "lf_explain",                          +
+           "Disabled": false,                              +
+           "Outer Index": "lf_explain_owner_id",           +
+           "Inner Index": "lf_explain_live_id"             +
+         }                                                 +
+       ]                                                   +
+     }                                                     +
+   }                                                       +
+ ]
+(1 row)
+
+EXPLAIN (COSTS OFF, FORMAT YAML)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ - Plan:                                              +
+     Node Type: "Limit"                               +
+     Parallel Aware: false                            +
+     Async Capable: false                             +
+     Disabled: false                                  +
+     Plans:                                           +
+       - Node Type: "Custom Scan"                     +
+         Parent Relationship: "Outer"                 +
+         Custom Plan Provider: "Index Merge Intersect"+
+         Parallel Aware: false                        +
+         Async Capable: false                         +
+         Relation Name: "lf_explain"                  +
+         Alias: "lf_explain"                          +
+         Disabled: false                              +
+         Outer Index: "lf_explain_owner_id"           +
+         Inner Index: "lf_explain_live_id"
+(1 row)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF, FORMAT XML)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ <explain xmlns="http://www.postgresql.org/2009/explain">                    +
+   <Query>                                                                   +
+     <Plan>                                                                  +
+       <Node-Type>Limit</Node-Type>                                          +
+       <Parallel-Aware>false</Parallel-Aware>                                +
+       <Async-Capable>false</Async-Capable>                                  +
+       <Actual-Rows>10.00</Actual-Rows>                                      +
+       <Actual-Loops>1</Actual-Loops>                                        +
+       <Disabled>false</Disabled>                                            +
+       <Plans>                                                               +
+         <Plan>                                                              +
+           <Node-Type>Custom Scan</Node-Type>                                +
+           <Parent-Relationship>Outer</Parent-Relationship>                  +
+           <Custom-Plan-Provider>Index Merge Intersect</Custom-Plan-Provider>+
+           <Parallel-Aware>false</Parallel-Aware>                            +
+           <Async-Capable>false</Async-Capable>                              +
+           <Relation-Name>lf_explain</Relation-Name>                         +
+           <Alias>lf_explain</Alias>                                         +
+           <Actual-Rows>10.00</Actual-Rows>                                  +
+           <Actual-Loops>1</Actual-Loops>                                    +
+           <Disabled>false</Disabled>                                        +
+           <Outer-Index>lf_explain_owner_id</Outer-Index>                    +
+           <Inner-Index>lf_explain_live_id</Inner-Index>                     +
+           <Outer-Entries-Read>10</Outer-Entries-Read>                       +
+           <Inner-Entries-Read>21</Inner-Entries-Read>                       +
+           <Matched-TIDs>10</Matched-TIDs>                                   +
+           <Heap-Fetches>10</Heap-Fetches>                                   +
+           <Peak-Group-Memory>96</Peak-Group-Memory>                         +
+         </Plan>                                                             +
+       </Plans>                                                              +
+     </Plan>                                                                 +
+     <Triggers>                                                              +
+     </Triggers>                                                             +
+   </Query>                                                                  +
+ </explain>
+(1 row)
+
+-- EXPLAIN without ANALYZE does not start the scans (EXEC_FLAG_EXPLAIN_ONLY)
+-- and reports no counters.
+EXPLAIN (COSTS OFF, FORMAT JSON)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 1;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ [                                                         +
+   {                                                       +
+     "Plan": {                                             +
+       "Node Type": "Limit",                               +
+       "Parallel Aware": false,                            +
+       "Async Capable": false,                             +
+       "Disabled": false,                                  +
+       "Plans": [                                          +
+         {                                                 +
+           "Node Type": "Custom Scan",                     +
+           "Parent Relationship": "Outer",                 +
+           "Custom Plan Provider": "Index Merge Intersect",+
+           "Parallel Aware": false,                        +
+           "Async Capable": false,                         +
+           "Relation Name": "lf_explain",                  +
+           "Alias": "lf_explain",                          +
+           "Disabled": false,                              +
+           "Outer Index": "lf_explain_owner_id",           +
+           "Inner Index": "lf_explain_live_id"             +
+         }                                                 +
+       ]                                                   +
+     }                                                     +
+   }                                                       +
+ ]
+(1 row)
+
+-- EXPLAIN ANALYZE of a query that returns nothing
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT * FROM lf_explain WHERE owner_id = 9 AND deleted_at IS NULL ORDER BY id LIMIT 1;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Limit (actual rows=0.00 loops=1)
+   ->  Custom Scan (Index Merge Intersect) on lf_explain (actual rows=0.00 loops=1)
+         Outer Index: lf_explain_owner_id
+         Inner Index: lf_explain_live_id
+         Outer Entries Read: 0
+         Inner Entries Read: 0
+         Matched TIDs: 0
+         Heap Fetches: 0
+         Peak Group Memory: 96 B
+(9 rows)
+
+RESET leapfrog.force;
+DROP TABLE lf_explain;

@@ -1,0 +1,173 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_begin_rr s2_versions s1_begin s1_v1 s1_v2 s1_v3 s1_commit s2_versions s2_versions_desc s2_unique s2_std s2_commit s2_versions s2_versions_desc s2_unique s2_std
+step s2_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2_versions: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v0     |   67
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_v1: UPDATE lf_iso SET payload = 'v1' WHERE owner_id = 2;
+step s1_v2: UPDATE lf_iso SET payload = 'v2' WHERE owner_id = 2 AND id % 2 = 0;
+step s1_v3: UPDATE lf_iso SET payload = 'v3' WHERE owner_id = 2 AND id % 4 = 0;
+step s1_commit: COMMIT;
+step s2_versions: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v0     |   67
+(1 row)
+
+step s2_versions_desc: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v0     |   20
+(1 row)
+
+step s2_unique: 
+	SELECT count(*) AS rows, count(DISTINCT id) AS distinct_ids FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+rows|distinct_ids
+----+------------
+  67|          67
+(1 row)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+	RESET leapfrog.enabled;
+
+payload|count
+-------+-----
+v0     |   67
+(1 row)
+
+step s2_commit: COMMIT;
+step s2_versions: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v2     |   67
+(1 row)
+
+step s2_versions_desc: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v2     |   20
+(1 row)
+
+step s2_unique: 
+	SELECT count(*) AS rows, count(DISTINCT id) AS distinct_ids FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+rows|distinct_ids
+----+------------
+  67|          67
+(1 row)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+	RESET leapfrog.enabled;
+
+payload|count
+-------+-----
+v2     |   67
+(1 row)
+
+
+starting permutation: s1_begin s1_v1 s1_hot_stats s1_commit
+step s1_begin: BEGIN;
+step s1_v1: UPDATE lf_iso SET payload = 'v1' WHERE owner_id = 2;
+step s1_hot_stats: 
+	SELECT n_tup_upd > 0 AS updated, n_tup_hot_upd > 0 AS hot
+	FROM pg_stat_xact_user_tables WHERE relname = 'lf_iso';
+
+updated|hot
+-------+---
+t      |t  
+(1 row)
+
+step s1_commit: COMMIT;
+
+starting permutation: s1_begin s1_v1 s2_versions s1_v2 s2_versions s1_commit s2_versions s2_unique s2_std
+step s1_begin: BEGIN;
+step s1_v1: UPDATE lf_iso SET payload = 'v1' WHERE owner_id = 2;
+step s2_versions: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v0     |   67
+(1 row)
+
+step s1_v2: UPDATE lf_iso SET payload = 'v2' WHERE owner_id = 2 AND id % 2 = 0;
+step s2_versions: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v0     |   67
+(1 row)
+
+step s1_commit: COMMIT;
+step s2_versions: 
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+
+payload|count
+-------+-----
+v2     |   67
+(1 row)
+
+step s2_unique: 
+	SELECT count(*) AS rows, count(DISTINCT id) AS distinct_ids FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+rows|distinct_ids
+----+------------
+  67|          67
+(1 row)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT payload, count(*) FROM (
+		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
+	GROUP BY payload ORDER BY payload;
+	RESET leapfrog.enabled;
+
+payload|count
+-------+-----
+v2     |   67
+(1 row)
+

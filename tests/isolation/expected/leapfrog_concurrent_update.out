@@ -1,0 +1,606 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_plan
+step s2_plan: 
+	EXPLAIN (COSTS OFF)
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+
+QUERY PLAN                                               
+---------------------------------------------------------
+Limit                                                    
+  ->  LockRows                                           
+        ->  Custom Scan (Index Merge Intersect) on lf_iso
+              Filter: (deleted_at IS NULL)               
+              Outer Index: lf_iso_owner_id               
+              Inner Index: lf_iso_live_id                
+(6 rows)
+
+
+starting permutation: s1_begin s1_move_owner s2_lock s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_move_owner: UPDATE lf_iso SET owner_id = 3 WHERE id = 14;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_move_owner s2_lock_std s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_move_owner: UPDATE lf_iso SET owner_id = 3 WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_soft_delete s2_lock s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso SET deleted_at = now() WHERE id = 14;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_soft_delete s2_lock_std s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso SET deleted_at = now() WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_restore s2_lock s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_restore: UPDATE lf_iso SET deleted_at = NULL WHERE id = 6;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s1_commit: COMMIT;
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+ 6|       2|          |p6     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+(5 rows)
+
+
+starting permutation: s1_begin s1_restore s2_lock_std s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_restore: UPDATE lf_iso SET deleted_at = NULL WHERE id = 6;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s1_commit: COMMIT;
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+ 6|       2|          |p6     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+(5 rows)
+
+
+starting permutation: s1_begin s1_hot s2_lock s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_hot: UPDATE lf_iso SET payload = 'changed' WHERE id = 14;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |changed
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |changed
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+
+starting permutation: s1_begin s1_hot s2_lock_std s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_hot: UPDATE lf_iso SET payload = 'changed' WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |changed
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |changed
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+
+starting permutation: s1_begin s1_delete s2_lock s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_delete: DELETE FROM lf_iso WHERE id = 14;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_delete s2_lock_std s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_delete: DELETE FROM lf_iso WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_move_id s2_lock s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_move_id: UPDATE lf_iso SET id = 1014 WHERE id = 14;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+  id|owner_id|deleted_at|payload
+----+--------+----------+-------
+   2|       2|          |p2     
+  10|       2|          |p10    
+1014|       2|          |p14    
+  22|       2|          |p22    
+  26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_move_id s2_lock_std s1_commit s2_std
+step s1_begin: BEGIN;
+step s1_move_id: UPDATE lf_iso SET id = 1014 WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+  id|owner_id|deleted_at|payload
+----+--------+----------+-------
+   2|       2|          |p2     
+  10|       2|          |p10    
+1014|       2|          |p14    
+  22|       2|          |p22    
+  26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+22|       2|          |p22    
+26|       2|          |p26    
+34|       2|          |p34    
+(5 rows)
+
+
+starting permutation: s1_begin s1_move_owner s2_lock s1_rollback s2_std
+step s1_begin: BEGIN;
+step s1_move_owner: UPDATE lf_iso SET owner_id = 3 WHERE id = 14;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ <waiting ...>
+step s1_rollback: ROLLBACK;
+step s2_lock: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+
+starting permutation: s1_begin s1_move_owner s2_lock_std s1_rollback s2_std
+step s1_begin: BEGIN;
+step s1_move_owner: UPDATE lf_iso SET owner_id = 3 WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_rollback: ROLLBACK;
+step s2_lock_std: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+
+starting permutation: s1_begin s1_soft_delete s2_lock s1_rollback s2_std
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso SET deleted_at = now() WHERE id = 14;
+step s2_lock: 
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ <waiting ...>
+step s1_rollback: ROLLBACK;
+step s2_lock: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+
+starting permutation: s1_begin s1_soft_delete s2_lock_std s1_rollback s2_std
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso SET deleted_at = now() WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_rollback: ROLLBACK;
+step s2_lock_std: <... completed>
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+step s2_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted_at|payload
+--+--------+----------+-------
+ 2|       2|          |p2     
+10|       2|          |p10    
+14|       2|          |p14    
+22|       2|          |p22    
+26|       2|          |p26    
+(5 rows)
+
+
+starting permutation: s1_begin s1_restore s2_lock_deleted s1_commit s2_std_deleted
+step s1_begin: BEGIN;
+step s1_restore: UPDATE lf_iso SET deleted_at = NULL WHERE id = 6;
+step s2_lock_deleted: 
+	SELECT id, owner_id, deleted_at IS NOT NULL AS deleted, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id LIMIT 3 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_deleted: <... completed>
+id|owner_id|deleted|payload
+--+--------+-------+-------
+18|       2|t      |p18    
+30|       2|t      |p30    
+42|       2|t      |p42    
+(3 rows)
+
+step s2_std_deleted: 
+	SET leapfrog.enabled = off;
+	SELECT id, owner_id, deleted_at IS NOT NULL AS deleted, payload FROM lf_iso
+	WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|owner_id|deleted|payload
+--+--------+-------+-------
+18|       2|t      |p18    
+30|       2|t      |p30    
+42|       2|t      |p42    
+(3 rows)
+

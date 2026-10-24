@@ -1,0 +1,420 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_begin_rr s2_count s2_first s1_begin s1_delete s1_commit s2_count s2_count_desc s2_first s2_std s2_commit s2_count s2_first s2_std s1_vacuum s2_count s2_count_desc s2_first s2_std
+step s2_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+step s2_first: 
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+
+id|owner_id
+--+--------
+ 2|       2
+10|       2
+14|       2
+22|       2
+(4 rows)
+
+step s1_begin: BEGIN;
+step s1_delete: DELETE FROM lf_iso WHERE owner_id = 2 AND id % 10 = 2;
+step s1_commit: COMMIT;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+step s2_count_desc: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+step s2_first: 
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+
+id|owner_id
+--+--------
+ 2|       2
+10|       2
+14|       2
+22|       2
+(4 rows)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+id|owner_id
+--+--------
+ 2|       2
+10|       2
+14|       2
+22|       2
+(4 rows)
+
+step s2_commit: COMMIT;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10778
+(1 row)
+
+step s2_first: 
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+
+id|owner_id
+--+--------
+10|       2
+14|       2
+26|       2
+34|       2
+(4 rows)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10778
+(1 row)
+
+id|owner_id
+--+--------
+10|       2
+14|       2
+26|       2
+34|       2
+(4 rows)
+
+step s1_vacuum: VACUUM lf_iso;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10778
+(1 row)
+
+step s2_count_desc: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10778
+(1 row)
+
+step s2_first: 
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+
+id|owner_id
+--+--------
+10|       2
+14|       2
+26|       2
+34|       2
+(4 rows)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10778
+(1 row)
+
+id|owner_id
+--+--------
+10|       2
+14|       2
+26|       2
+34|       2
+(4 rows)
+
+
+starting permutation: s2_begin_rr s2_count s1_begin s1_move_owner s1_adopt s1_commit s2_count s2_first s2_std s2_commit s2_count s2_count_desc s2_first s2_std s1_vacuum s2_count s2_first s2_std
+step s2_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_move_owner: UPDATE lf_iso SET owner_id = 3 WHERE owner_id = 2 AND id % 10 = 6;
+step s1_adopt: UPDATE lf_iso SET owner_id = 2 WHERE owner_id = 1 AND id % 10 = 1;
+step s1_commit: COMMIT;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+step s2_first: 
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+
+id|owner_id
+--+--------
+ 2|       2
+10|       2
+14|       2
+22|       2
+(4 rows)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+id|owner_id
+--+--------
+ 2|       2
+10|       2
+14|       2
+22|       2
+(4 rows)
+
+step s2_commit: COMMIT;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13261
+(1 row)
+
+step s2_count_desc: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13261
+(1 row)
+
+step s2_first: 
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+
+id|owner_id
+--+--------
+ 1|       2
+ 2|       2
+10|       2
+14|       2
+(4 rows)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13261
+(1 row)
+
+id|owner_id
+--+--------
+ 1|       2
+ 2|       2
+10|       2
+14|       2
+(4 rows)
+
+step s1_vacuum: VACUUM lf_iso;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13261
+(1 row)
+
+step s2_first: 
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+
+id|owner_id
+--+--------
+ 1|       2
+ 2|       2
+10|       2
+14|       2
+(4 rows)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13261
+(1 row)
+
+id|owner_id
+--+--------
+ 1|       2
+ 2|       2
+10|       2
+14|       2
+(4 rows)
+
+
+starting permutation: s2_begin_rr s2_count s1_begin s1_delete s1_move_owner s1_adopt s1_commit s2_count s2_std s2_commit s2_count s2_std s1_vacuum s2_count s2_std
+step s2_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_delete: DELETE FROM lf_iso WHERE owner_id = 2 AND id % 10 = 2;
+step s1_move_owner: UPDATE lf_iso SET owner_id = 3 WHERE owner_id = 2 AND id % 10 = 6;
+step s1_adopt: UPDATE lf_iso SET owner_id = 2 WHERE owner_id = 1 AND id % 10 = 1;
+step s1_commit: COMMIT;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   67|   67|13466
+(1 row)
+
+id|owner_id
+--+--------
+ 2|       2
+10|       2
+14|       2
+22|       2
+(4 rows)
+
+step s2_commit: COMMIT;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10573
+(1 row)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10573
+(1 row)
+
+id|owner_id
+--+--------
+ 1|       2
+10|       2
+14|       2
+34|       2
+(4 rows)
+
+step s1_vacuum: VACUUM lf_iso;
+step s2_count: 
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10573
+(1 row)
+
+step s2_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), count(DISTINCT id), sum(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
+	RESET leapfrog.enabled;
+
+count|count|  sum
+-----+-----+-----
+   53|   53|10573
+(1 row)
+
+id|owner_id
+--+--------
+ 1|       2
+10|       2
+14|       2
+34|       2
+(4 rows)
+

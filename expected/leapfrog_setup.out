@@ -1,0 +1,153 @@
+--
+-- leapfrog_setup
+--
+-- Shared helpers for the regression tests.  Runs first (see REGRESS in the
+-- Makefile); every other test depends on the functions created here.
+--
+-- The planner hook is installed when the library is loaded.  The test
+-- server may not preload it, so load it explicitly; LOAD is a no-op when
+-- shared_preload_libraries already did it.
+LOAD 'leapfrog';
+-- The extension itself is created by pg_regress --load-extension.
+SELECT extname, extversion FROM pg_extension WHERE extname = 'leapfrog';
+ extname  | extversion 
+----------+------------
+ leapfrog | 0.0.1
+(1 row)
+
+SELECT leapfrog_version(), leapfrog_is_loaded();
+ leapfrog_version | leapfrog_is_loaded 
+------------------+--------------------
+ 0.0.1            | t
+(1 row)
+
+-- The GUCs exist with their defaults.
+SHOW leapfrog.enabled;
+ leapfrog.enabled 
+------------------
+ on
+(1 row)
+
+SHOW leapfrog.force;
+ leapfrog.force 
+----------------
+ off
+(1 row)
+
+-- Deterministic plans.
+SET max_parallel_workers_per_gather = 0;
+--
+-- lf_plan(query): the plan of a query under leapfrog.force, as text.
+--
+CREATE FUNCTION lf_plan(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+	line text;
+BEGIN
+	PERFORM set_config('leapfrog.enabled', 'on', true);
+	PERFORM set_config('leapfrog.force', 'on', true);
+	FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query LOOP
+		RETURN NEXT line;
+	END LOOP;
+END
+$$;
+--
+-- lf_plan_costs(query): the plan with costs, numbers masked, so that the
+-- presence and shape of the estimates can be checked without depending on
+-- their exact values.
+--
+CREATE FUNCTION lf_plan_costs(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+	line text;
+BEGIN
+	PERFORM set_config('leapfrog.enabled', 'on', true);
+	PERFORM set_config('leapfrog.force', 'off', true);
+	FOR line IN EXECUTE 'EXPLAIN ' || query LOOP
+		RETURN NEXT regexp_replace(line, '\d+(\.\d+)?', 'N', 'g');
+	END LOOP;
+END
+$$;
+--
+-- lf_check(query, ordered): run the query with leapfrog disabled and again
+-- with leapfrog.force, and compare the results as multisets with EXCEPT ALL
+-- in both directions.  With ordered = true the output position of every row
+-- is compared as well, so the sort order must be deterministic (a unique
+-- sort key).  Reports whether the forced plan actually used the custom scan,
+-- so a test cannot pass by accident through a standard plan.
+--
+CREATE FUNCTION lf_check(query text, ordered boolean DEFAULT true)
+RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+	wrapped text;
+	plan text := '';
+	line text;
+	expected_rows bigint;
+	actual_rows bigint;
+	missing bigint;
+	extra bigint;
+BEGIN
+	IF ordered THEN
+		wrapped := 'SELECT row_number() OVER () AS lf_position, q.* FROM (' ||
+			query || ') q';
+	ELSE
+		wrapped := 'SELECT q.* FROM (' || query || ') q';
+	END IF;
+
+	PERFORM set_config('leapfrog.enabled', 'off', true);
+	PERFORM set_config('leapfrog.force', 'off', true);
+	EXECUTE 'CREATE TEMP TABLE lf_expected AS ' || wrapped;
+
+	PERFORM set_config('leapfrog.enabled', 'on', true);
+	PERFORM set_config('leapfrog.force', 'on', true);
+	EXECUTE 'CREATE TEMP TABLE lf_actual AS ' || wrapped;
+	FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query LOOP
+		plan := plan || line || E'\n';
+	END LOOP;
+
+	SELECT count(*) INTO expected_rows FROM lf_expected;
+	SELECT count(*) INTO actual_rows FROM lf_actual;
+	EXECUTE 'SELECT count(*) FROM (SELECT * FROM lf_expected EXCEPT ALL SELECT * FROM lf_actual) d'
+		INTO missing;
+	EXECUTE 'SELECT count(*) FROM (SELECT * FROM lf_actual EXCEPT ALL SELECT * FROM lf_expected) d'
+		INTO extra;
+
+	DROP TABLE lf_expected;
+	DROP TABLE lf_actual;
+
+	RETURN format('custom scan: %s, rows: %s/%s, missing: %s, extra: %s',
+		plan LIKE '%Custom Scan (Index Merge Intersect)%',
+		actual_rows, expected_rows, missing, extra);
+END
+$$;
+--
+-- lf_counters(query): the instrumentation of the custom scan node under
+-- leapfrog.force, from EXPLAIN ANALYZE in JSON format.
+--
+CREATE FUNCTION lf_counters(query text) RETURNS TABLE (counter text, value jsonb)
+LANGUAGE plpgsql AS $$
+DECLARE
+	plan jsonb;
+	node jsonb;
+BEGIN
+	PERFORM set_config('leapfrog.enabled', 'on', true);
+	PERFORM set_config('leapfrog.force', 'on', true);
+	EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) ' ||
+		query INTO plan;
+
+	FOR node IN
+		SELECT n FROM jsonb_path_query(plan, 'strict $[0].Plan.**') AS n
+		WHERE n->>'Custom Plan Provider' = 'Index Merge Intersect'
+	LOOP
+		RETURN QUERY
+			SELECT key, node->key FROM unnest(ARRAY[
+				'Outer Index', 'Inner Index',
+				'Outer Entries Read', 'Inner Entries Read', 'Matched TIDs',
+				'Heap Fetches', 'Rows Checked by Predicate', 'Group Overflows',
+				'Peak Group Memory', 'Actual Rows', 'Actual Loops',
+				'Rows Removed by Filter']) AS key
+			WHERE node ? key;
+	END LOOP;
+END
+$$;

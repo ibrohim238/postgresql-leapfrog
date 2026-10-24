@@ -1,0 +1,336 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_begin_rr s2_live s2_deleted s1_begin s1_soft_delete s1_commit s2_live s2_deleted s2_both_std s2_commit s2_live s2_deleted s2_both_std
+step s2_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso SET deleted_at = now() WHERE owner_id = 2 AND id < 100 AND deleted_at IS NULL;
+step s1_commit: COMMIT;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s2_both_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s2_commit: COMMIT;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   50|106|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   50|  2|390
+(1 row)
+
+step s2_both_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count|min|max
+-----+---+---
+   50|106|398
+(1 row)
+
+count|min|max
+-----+---+---
+   50|  2|390
+(1 row)
+
+
+starting permutation: s2_begin_rr s2_live s2_deleted s1_begin s1_restore s1_commit s2_live s2_deleted s2_both_std s2_commit s2_live s2_deleted s2_both_std
+step s2_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_restore: UPDATE lf_iso SET deleted_at = NULL WHERE owner_id = 2 AND deleted_at IS NOT NULL;
+step s1_commit: COMMIT;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s2_both_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s2_commit: COMMIT;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+  100|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+    0|   |   
+(1 row)
+
+step s2_both_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count|min|max
+-----+---+---
+  100|  2|398
+(1 row)
+
+count|min|max
+-----+---+---
+    0|   |   
+(1 row)
+
+
+starting permutation: s2_begin_rc s2_live s1_begin s1_soft_delete s2_live s2_deleted s1_commit s2_live s2_deleted s2_both_std s2_commit
+step s2_begin_rc: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso SET deleted_at = now() WHERE owner_id = 2 AND id < 100 AND deleted_at IS NULL;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s1_commit: COMMIT;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   50|106|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   50|  2|390
+(1 row)
+
+step s2_both_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count|min|max
+-----+---+---
+   50|106|398
+(1 row)
+
+count|min|max
+-----+---+---
+   50|  2|390
+(1 row)
+
+step s2_commit: COMMIT;
+
+starting permutation: s2_begin_rr s2_live s1_begin s1_soft_delete s1_restore s1_commit s2_live s2_deleted s2_both_std s2_commit s2_live s2_deleted
+step s2_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso SET deleted_at = now() WHERE owner_id = 2 AND id < 100 AND deleted_at IS NULL;
+step s1_restore: UPDATE lf_iso SET deleted_at = NULL WHERE owner_id = 2 AND deleted_at IS NOT NULL;
+step s1_commit: COMMIT;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s2_both_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count|min|max
+-----+---+---
+   67|  2|398
+(1 row)
+
+count|min|max
+-----+---+---
+   33|  6|390
+(1 row)
+
+step s2_commit: COMMIT;
+step s2_live: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+
+count|min|max
+-----+---+---
+  100|  2|398
+(1 row)
+
+step s2_deleted: 
+	SELECT count(*), min(id), max(id) FROM (
+		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
+
+count|min|max
+-----+---+---
+    0|   |   
+(1 row)
+

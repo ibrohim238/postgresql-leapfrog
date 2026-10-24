@@ -1,0 +1,82 @@
+# docker compose up -d --build --wait      PostgreSQL 18 with leapfrog preloaded
+# docker compose run --rm test             regression + isolation tests
+# docker compose --profile bench run --rm bench   benchmarks (see tests/performance)
+#
+# Environment: LEAPFROG_PORT (default 5433) is the host port of the server;
+# POSTGRES_PASSWORD defaults to "leapfrog".
+
+name: leapfrog
+
+services:
+  postgres:
+    build:
+      context: .
+      target: runtime
+    image: leapfrog:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-leapfrog}
+      POSTGRES_DB: leapfrog
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=leapfrog
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - jit=off
+      - -c
+      - shared_buffers=${LEAPFROG_SHARED_BUFFERS:-512MB}
+    ports:
+      - "${LEAPFROG_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d leapfrog && psql -U postgres -d leapfrog -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'\" | grep -q 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  test:
+    build:
+      context: .
+      target: test
+    image: leapfrog-test:18
+    profiles: [test]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:-leapfrog}
+      PGDATABASE: leapfrog
+    volumes:
+      - ./results:/src/leapfrog/results
+      - ./tests/isolation/results:/src/leapfrog/tests/isolation/results
+
+  bench:
+    build:
+      context: .
+      target: test
+    image: leapfrog-test:18
+    profiles: [bench]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:-leapfrog}
+      PGDATABASE: leapfrog
+      BENCH_SIZES: ${BENCH_SIZES:-100000 1000000}
+      BENCH_REPEATS: ${BENCH_REPEATS:-5}
+    entrypoint: ["bash", "tests/performance/run.sh"]
+    volumes:
+      - ./tests/performance/results:/src/leapfrog/tests/performance/results
+
+volumes:
+  pgdata:

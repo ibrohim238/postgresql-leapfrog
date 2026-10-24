@@ -1,0 +1,347 @@
+--
+-- leapfrog_mvcc
+--
+-- Row versions within one session: dead tuples, HOT chains, rows moving
+-- between the partial indexes, snapshots of a REPEATABLE READ transaction,
+-- the row marks of SELECT FOR UPDATE and the EvalPlanQual recheck path on
+-- the node's own tuple.  Concurrent sessions are covered by the isolation
+-- tests in tests/isolation.
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE lf_mvcc (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+) WITH (fillfactor = 70);
+INSERT INTO lf_mvcc (id, owner_id, deleted_at, payload)
+SELECT g, g % 5, CASE WHEN g % 3 = 0 THEN '2026-01-01'::timestamptz END, 'p' || g
+FROM generate_series(1, 10000) g;
+CREATE INDEX lf_mvcc_owner_id ON lf_mvcc (owner_id, id);
+CREATE INDEX lf_mvcc_live_id ON lf_mvcc (id) WHERE deleted_at IS NULL;
+CREATE INDEX lf_mvcc_deleted_id ON lf_mvcc (id) WHERE deleted_at IS NOT NULL;
+ANALYZE lf_mvcc;
+-- Baseline
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1334/1334, missing: 0, extra: 0
+(1 row)
+
+-- HOT updates of a column that is in no index: the index entries stay,
+-- the chain is followed to the visible version.
+UPDATE lf_mvcc SET payload = payload || '-hot' WHERE owner_id = 2;
+UPDATE lf_mvcc SET payload = payload || '-hot2' WHERE owner_id = 2 AND id % 2 = 0;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1334/1334, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 50 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 50/50, missing: 0, extra: 0
+(1 row)
+
+SELECT count(*) FILTER (WHERE payload LIKE '%-hot2') AS hot2,
+	count(*) FILTER (WHERE payload LIKE '%-hot') AS hot
+FROM (SELECT payload FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+ hot2 | hot 
+------+-----
+  667 | 667
+(1 row)
+
+-- Rows moving between the partial indexes: the old entries are dead in
+-- one index, new ones live in the other.
+UPDATE lf_mvcc SET deleted_at = now() WHERE owner_id = 2 AND id % 10 = 1;
+UPDATE lf_mvcc SET deleted_at = NULL WHERE owner_id = 2 AND id % 10 = 3;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1334/1334, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 666/666, missing: 0, extra: 0
+(1 row)
+
+-- The merge column changes: the row moves within both indexes.
+UPDATE lf_mvcc SET id = id + 100000 WHERE owner_id = 2 AND id % 10 = 5;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1334/1334, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+-- The equality column changes: rows leave and join the owner.
+UPDATE lf_mvcc SET owner_id = 3 WHERE owner_id = 2 AND id % 10 = 7;
+UPDATE lf_mvcc SET owner_id = 2 WHERE owner_id = 4 AND id % 10 = 9;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1333/1333, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 3 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 2000/2000, missing: 0, extra: 0
+(1 row)
+
+-- Deleted rows are dead in both indexes.
+DELETE FROM lf_mvcc WHERE owner_id = 2 AND id % 4 = 0;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1000/1000, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 500/500, missing: 0, extra: 0
+(1 row)
+
+-- Uncommitted changes of the own transaction are visible to it; after a
+-- rollback they are dead.
+BEGIN;
+UPDATE lf_mvcc SET deleted_at = NULL WHERE owner_id = 2;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1500/1500, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 0/0, missing: 0, extra: 0
+(1 row)
+
+ROLLBACK;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1000/1000, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 500/500, missing: 0, extra: 0
+(1 row)
+
+-- After VACUUM the dead entries are gone; the results are the same.
+VACUUM lf_mvcc;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1000/1000, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 500/500, missing: 0, extra: 0
+(1 row)
+
+-- REPEATABLE READ: changes made by the transaction itself are seen, the
+-- snapshot is kept across statements.
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM (SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
+ count 
+-------
+  1000
+(1 row)
+
+UPDATE lf_mvcc SET deleted_at = now() WHERE owner_id = 2 AND deleted_at IS NULL AND id < 1000;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 900/900, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 600/600, missing: 0, extra: 0
+(1 row)
+
+ROLLBACK;
+-- SELECT FOR UPDATE / FOR SHARE: a LockRows node above the scan, the
+-- clauses implied by the inner predicate stay in the plan for EPQ.
+SET leapfrog.force = on;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Limit
+   ->  LockRows
+         ->  Custom Scan (Index Merge Intersect) on lf_mvcc
+               Filter: (deleted_at IS NULL)
+               Outer Index: lf_mvcc_owner_id
+               Inner Index: lf_mvcc_live_id
+(6 rows)
+
+BEGIN;
+SELECT id, owner_id, deleted_at FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
+ id | owner_id | deleted_at 
+----+----------+------------
+  2 |        2 | 
+ 19 |        2 | 
+ 22 |        2 | 
+ 29 |        2 | 
+ 49 |        2 | 
+(5 rows)
+
+SELECT id, owner_id, deleted_at FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 5 FOR SHARE;
+  id  | owner_id | deleted_at 
+------+----------+------------
+ 9989 |        2 | 
+ 9982 |        2 | 
+ 9979 |        2 | 
+ 9962 |        2 | 
+ 9959 |        2 | 
+(5 rows)
+
+ROLLBACK;
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 50 FOR UPDATE $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 50/50, missing: 0, extra: 0
+(1 row)
+
+-- UPDATE and DELETE driven by the scan: the target relation keeps its
+-- quals, the rows are modified exactly once.
+EXPLAIN (COSTS OFF)
+UPDATE lf_mvcc SET payload = payload || '+' WHERE id IN (
+	SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 10);
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Update on lf_mvcc
+   ->  Nested Loop
+         ->  HashAggregate
+               Group Key: "ANY_subquery".id
+               ->  Subquery Scan on "ANY_subquery"
+                     ->  Limit
+                           ->  Custom Scan (Index Merge Intersect) on lf_mvcc lf_mvcc_1
+                                 Outer Index: lf_mvcc_owner_id
+                                 Inner Index: lf_mvcc_live_id
+         ->  Index Scan using lf_mvcc_pkey on lf_mvcc
+               Index Cond: (id = "ANY_subquery".id)
+(11 rows)
+
+UPDATE lf_mvcc SET payload = payload || '+' WHERE id IN (
+	SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 10);
+SELECT count(*) FROM lf_mvcc WHERE payload LIKE '%+';
+ count 
+-------
+    10
+(1 row)
+
+DELETE FROM lf_mvcc WHERE id IN (
+	SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10);
+SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1000/1000, missing: 0, extra: 0
+(1 row)
+
+RESET leapfrog.force;
+-- A cursor over the scan, fetched in pieces and moved backwards
+SET leapfrog.force = on;
+BEGIN;
+DECLARE lf_cur SCROLL CURSOR FOR
+	SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id;
+FETCH 3 FROM lf_cur;
+ id 
+----
+  2
+ 19
+ 22
+(3 rows)
+
+FETCH 3 FROM lf_cur;
+ id 
+----
+ 29
+ 49
+ 59
+(3 rows)
+
+FETCH BACKWARD 2 FROM lf_cur;
+ id 
+----
+ 49
+ 29
+(2 rows)
+
+MOVE FORWARD 100 FROM lf_cur;
+FETCH 2 FROM lf_cur;
+  id  
+------
+ 1042
+ 1049
+(2 rows)
+
+CLOSE lf_cur;
+ROLLBACK;
+RESET leapfrog.force;
+DROP TABLE lf_mvcc;
+-- Dead index entries with a NULL merge column.  The column was nullable,
+-- the NULL row got a value, then SET NOT NULL made the planner accept the
+-- column; until VACUUM both indexes still hold the dead entry with NULL.
+-- A backward scan reads it first (NULLs sort last in an ASC btree), so it
+-- must be skipped rather than taken for a value.
+CREATE TABLE lf_mvcc_null (
+	id bigint,
+	owner_id bigint NOT NULL,
+	deleted_at timestamptz
+) WITH (autovacuum_enabled = false);
+INSERT INTO lf_mvcc_null (id, owner_id)
+SELECT g, g % 100 FROM generate_series(1, 1000) g;
+INSERT INTO lf_mvcc_null (id, owner_id) VALUES (NULL, 7);
+CREATE INDEX lf_mvcc_null_owner_id ON lf_mvcc_null (owner_id, id);
+CREATE INDEX lf_mvcc_null_live_id ON lf_mvcc_null (id) WHERE deleted_at IS NULL;
+UPDATE lf_mvcc_null SET id = 5000 WHERE id IS NULL;
+ALTER TABLE lf_mvcc_null ALTER COLUMN id SET NOT NULL;
+ANALYZE lf_mvcc_null;
+SELECT * FROM lf_plan($$
+SELECT id FROM lf_mvcc_null WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
+                          lf_plan                          
+-----------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_mvcc_null
+         Outer Index: lf_mvcc_null_owner_id
+         Inner Index: lf_mvcc_null_live_id
+(4 rows)
+
+SELECT lf_check($$ SELECT id FROM lf_mvcc_null WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_mvcc_null WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id DESC $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 11/11, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_mvcc_null WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 11/11, missing: 0, extra: 0
+(1 row)
+
+DROP TABLE lf_mvcc_null;

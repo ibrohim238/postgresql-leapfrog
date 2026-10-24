@@ -1,0 +1,12 @@
+.git
+.github
+results
+regression.diffs
+regression.out
+tests/isolation/results
+tests/isolation/regression.diffs
+tests/isolation/regression.out
+tests/performance/results
+*.o
+*.so
+*.bc
