@@ -12,22 +12,24 @@ LOAD 'leapfrog';
 SELECT extname, extversion FROM pg_extension WHERE extname = 'leapfrog';
  extname  | extversion 
 ----------+------------
- leapfrog | 0.0.2
+ leapfrog | 0.0.3
 (1 row)
 
 SELECT leapfrog_version(), leapfrog_is_loaded();
  leapfrog_version | leapfrog_is_loaded 
 ------------------+--------------------
- 0.0.2            | t
+ 0.0.3            | t
 (1 row)
 
 -- An installation of the previous release can be updated in place.
 SELECT source, target, path FROM pg_extension_update_paths('leapfrog')
 WHERE path IS NOT NULL ORDER BY source, target;
- source | target |     path     
---------+--------+--------------
+ source | target |        path         
+--------+--------+---------------------
  0.0.1  | 0.0.2  | 0.0.1--0.0.2
-(1 row)
+ 0.0.1  | 0.0.3  | 0.0.1--0.0.2--0.0.3
+ 0.0.2  | 0.0.3  | 0.0.2--0.0.3
+(3 rows)
 
 -- The GUCs exist with their defaults.
 SHOW leapfrog.enabled;

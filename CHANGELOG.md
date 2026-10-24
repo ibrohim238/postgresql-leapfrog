@@ -5,6 +5,13 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.3] — 2026-10-25
+
+Still experimental. The shared library changes; the SQL functions do not:
+`ALTER EXTENSION leapfrog UPDATE` after installing the new files (the update
+script `leapfrog--0.0.2--0.0.3.sql` is empty). Reload or restart the backends
+so that they load the new library.
+
 ### Fixed
 
 - `make bench-smoke` checked the last directory under
@@ -41,6 +48,9 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Extension update script from 0.0.2; `leapfrog_setup` checks the update path.
+- `tests/performance/types_bench.sh` and `types_compare.sh`: equality types
+  on 1M rows per build, compared against 0.0.2 in BENCHMARKS.md.
 - Equality values computed from parameters, from the other side of a join
   or from `LATERAL` columns (`status = $1 || $2`,
   `t.status = lower(p.status)`): any non-volatile expression without the
@@ -334,6 +344,7 @@ output may still change.
   end of the `ExecScan` call. Replaced with `ExecQualAndReset`.
 - A shadowed variable declaration (`-Wshadow=compatible-local`).
 
-[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.2...HEAD
+[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.3...HEAD
+[0.0.3]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/ibrohim238/postgresql-leapfrog/releases/tag/v0.0.1

@@ -1,12 +1,12 @@
 # postgresql-leapfrog
 
 **Fewer indexes, cheaper writes, ordered reads by composition.** A PostgreSQL 18
-extension that lets the planner combine two general B-tree indexes at query time
+extension that lets the planner combine general B-tree indexes at query time
 — `(customer_id, id)` with `(product_id, id)`, or with a shared
 `(id) WHERE deleted_at IS NULL` — into one ordered stream, so that a table does
 not need a dedicated composite or partial index for every filter combination.
 
-Status: **experimental (0.0.2)**. The executor is covered by regression and
+Status: **experimental (0.0.3)**. The executor is covered by regression and
 isolation tests that compare every result with the stock plans
 (see [Tests](#tests)). The cost model is conservative: in the measured
 benchmarks it picked the node where it was slower only in `LIMIT 1` queries,
