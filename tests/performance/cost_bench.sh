@@ -31,7 +31,8 @@
 #           the cost per entry or page, not in the entries estimate.
 #
 # Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; ROWS (1000000),
-# REPEATS (5), RANDOM_PAGE_COST (4).
+# REPEATS (5), RANDOM_PAGE_COST (4), BENCH_OUT (a directory that must not
+# exist yet).
 # Output: tests/performance/results/cost-<timestamp>/cost.csv and a summary.
 set -euo pipefail
 
@@ -42,8 +43,12 @@ REPEATS=${REPEATS:-5}
 RANDOM_PAGE_COST=${RANDOM_PAGE_COST:-4}
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-out="results/cost-$stamp"
-mkdir -p "$out"
+out=${BENCH_OUT:-"results/cost-$stamp"}
+mkdir -p "$(dirname "$out")"
+if ! mkdir "$out"; then
+	echo "cost_bench.sh: output directory $out exists, refusing to mix two runs" >&2
+	exit 1
+fi
 export PGOPTIONS="-c client_min_messages=warning"
 PSQL="psql -X -q -v ON_ERROR_STOP=1"
 

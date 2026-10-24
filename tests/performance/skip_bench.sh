@@ -24,7 +24,8 @@
 # The script waits for the server (pg_isready) after the command.
 #
 # Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; ROWS (1000000), THRESHOLDS
-# ("0 128 256 512 1024 2048"), REPEATS (5), COLD_CMD (unset).
+# ("0 128 256 512 1024 2048"), REPEATS (5), COLD_CMD (unset), BENCH_OUT (a
+# directory that must not exist yet).
 # Output: tests/performance/results/skip-<timestamp>/skip.csv and a summary
 # on stdout.
 set -euo pipefail
@@ -37,8 +38,12 @@ REPEATS=${REPEATS:-5}
 COLD_CMD=${COLD_CMD:-}
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-out="results/skip-$stamp"
-mkdir -p "$out"
+out=${BENCH_OUT:-"results/skip-$stamp"}
+mkdir -p "$(dirname "$out")"
+if ! mkdir "$out"; then
+	echo "skip_bench.sh: output directory $out exists, refusing to mix two runs" >&2
+	exit 1
+fi
 export PGOPTIONS="-c client_min_messages=warning"
 PSQL="psql -X -q -v ON_ERROR_STOP=1"
 

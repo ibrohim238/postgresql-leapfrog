@@ -7,6 +7,15 @@ versions: [SemVer](https://semver.org/).
 
 ### Fixed
 
+- `make bench-smoke` checked the last directory under
+  `tests/performance/results` by name, so an earlier `write-…`, `skip-…` or
+  `cost-…` run, which sorts after the timestamps, made it fail; and every
+  benchmark script reused an existing output directory (`mkdir -p`), so
+  two runs started in the same second wrote into one. The scripts now take
+  `BENCH_OUT` and refuse an existing directory; `bench-smoke` runs in a
+  temporary directory of its own and checks that a second run into it is
+  refused and leaves the results unchanged (with `mkdir -p` restored it
+  fails).
 - A sort column relabeled in the `ORDER BY` equivalence class, as a domain
   column is to its base type, was never found: the search skipped every
   member that was not a bare `Var`, and `pathkey_is_column` cast the

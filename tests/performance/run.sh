@@ -27,6 +27,9 @@
 #   BENCH_REPEATS    5
 #   BENCH_SEED       0.42
 #   BENCH_FORCE      0|1   also run strategy B with leapfrog.force = on
+#   BENCH_OUT        output directory instead of results/<timestamp>; it
+#                    must not exist, so that a run never writes into the
+#                    results of another one
 #
 # The 10M and 100M profiles are not run by default:
 #   BENCH_SIZES="10000000" bash tests/performance/run.sh
@@ -47,8 +50,12 @@ SEED=${BENCH_SEED:-0.42}
 FORCE=${BENCH_FORCE:-1}
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-out="results/$stamp"
-mkdir -p "$out"
+out=${BENCH_OUT:-"results/$stamp"}
+mkdir -p "$(dirname "$out")"
+if ! mkdir "$out"; then
+	echo "run.sh: output directory $out exists, refusing to mix two runs" >&2
+	exit 1
+fi
 csv="$out/results.csv"
 plans="$out/plans.jsonl"
 

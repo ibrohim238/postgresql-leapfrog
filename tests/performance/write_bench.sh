@@ -27,9 +27,10 @@
 # top scan node and, for leapfrog, the number of indexes it combined.
 #
 # Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; NFILTERS (12), BASE_ROWS
-# (500000), BATCH_ROWS (100000), REPEATS (5).
-# Output: tests/performance/results/<timestamp>/write.csv, read.csv and a
-# summary on stdout.
+# (500000), BATCH_ROWS (100000), REPEATS (5), BENCH_OUT (a directory that
+# must not exist yet).
+# Output: tests/performance/results/write-<timestamp>/write.csv, read.csv
+# and a summary on stdout.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -41,8 +42,12 @@ REPEATS=${REPEATS:-5}
 QUARTER=$((BATCH_ROWS / 4))
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-out="results/write-$stamp"
-mkdir -p "$out"
+out=${BENCH_OUT:-"results/write-$stamp"}
+mkdir -p "$(dirname "$out")"
+if ! mkdir "$out"; then
+	echo "write_bench.sh: output directory $out exists, refusing to mix two runs" >&2
+	exit 1
+fi
 export PGOPTIONS="-c client_min_messages=warning"
 PSQL="psql -X -q -v ON_ERROR_STOP=1"
 

@@ -355,6 +355,11 @@ docker compose --profile bench run --rm bench
 # results: tests/performance/results/<timestamp>/
 ```
 
+Every benchmark script writes into a new directory, `results/<timestamp>/`
+or `results/<kind>-<timestamp>/`, or into `BENCH_OUT`, and refuses to run
+when that directory already exists rather than mix two runs. `make
+bench-smoke` writes into a temporary directory and removes it afterwards.
+
 Compose environment variables: `LEAPFROG_PORT` (5433), `POSTGRES_PASSWORD`
 (`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB), `BENCH_SIZES`,
 `BENCH_REPEATS`.
