@@ -168,8 +168,8 @@ init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
 	}
 	keys->nequal = i;
 	lf_init_key_procs(keys,
-					  TupleDescAttr(RelationGetDescr(index),
-									sort_attno - 1)->atttypid);
+					  getBaseType(TupleDescAttr(RelationGetDescr(index),
+												sort_attno - 1)->atttypid));
 }
 
 static Datum

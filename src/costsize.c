@@ -121,7 +121,8 @@ lf_outer_index_correlation(PlannerInfo *root, Index rti, IndexOptInfo *outer)
 /*
  * column_var
  *		A Var for column attno of relation rti, with the column's type,
- *		typmod and collation, as the selectivity functions expect it.
+ *		typmod and collation, as the selectivity functions expect it.  A
+ *		domain column gets its base type, which the operators are found for.
  */
 static Var *
 column_var(PlannerInfo *root, Index rti, AttrNumber attno)
@@ -133,7 +134,8 @@ column_var(PlannerInfo *root, Index rti, AttrNumber attno)
 	get_atttypetypmodcoll(planner_rt_fetch(rti, root)->relid, attno,
 						  &type, &typmod, &collation);
 
-	return makeVar(rti, attno, type, typmod, collation, 0);
+	return makeVar(rti, attno, getBaseTypeAndTypmod(type, &typmod), typmod,
+				   collation, 0);
 }
 
 /*
@@ -468,8 +470,8 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 													keys.nequal);
 		keys.nequal++;
 	}
-	sort_type = get_atttype(rte->relid,
-							candidate->index->indexkeys[candidate->sortpos]);
+	sort_type = getBaseType(get_atttype(rte->relid,
+										candidate->index->indexkeys[candidate->sortpos]));
 	lf_init_key_procs(&keys, sort_type);
 
 	/* the planner holds locks on the table and its indexes */

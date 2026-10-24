@@ -260,6 +260,57 @@ SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'c' AND kind = 0 O
 (1 row)
 
 DROP TABLE lf_types_sort;
+-- A sort column of a domain over an integer type.  The ORDER BY equivalence
+-- class holds the column relabeled to the base type, (id)::bigint, which
+-- the pathkey match has to look through to the Var.
+CREATE DOMAIN lf_types_id AS bigint;
+CREATE DOMAIN lf_types_small_id AS integer CHECK (VALUE > 0);
+CREATE TABLE lf_types_domain (
+	id lf_types_id NOT NULL,
+	id4 lf_types_small_id NOT NULL,
+	status text NOT NULL,
+	kind integer NOT NULL
+);
+INSERT INTO lf_types_domain
+SELECT g, g, (ARRAY['a', 'b', 'c'])[1 + abs(hashint8(g * 2)) % 3],
+	abs(hashint8(g * 2 + 1)) % 4
+FROM generate_series(1, 30000) g;
+CREATE INDEX ON lf_types_domain (status, id);
+CREATE INDEX ON lf_types_domain (kind, id);
+CREATE INDEX ON lf_types_domain (status, id4);
+CREATE INDEX ON lf_types_domain (kind, id4);
+ANALYZE lf_types_domain;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_types_domain WHERE status = 'b' AND kind = 2 ORDER BY id DESC LIMIT 20 $$);
+                           lf_plan                            
+--------------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_types_domain
+         Outer Index: lf_types_domain_status_id_idx
+         Inner Index: lf_types_domain_kind_id_idx
+(4 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_types_domain WHERE status = 'b' AND kind = 2 ORDER BY id $$);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 2484/2484, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_types_domain WHERE status = 'b' AND kind = 2 ORDER BY id DESC LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_types_domain WHERE status = 'c' AND kind = 1 ORDER BY id4 DESC LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+DROP TABLE lf_types_domain;
+DROP DOMAIN lf_types_id;
+DROP DOMAIN lf_types_small_id;
 -- An index sorted in another collation than the condition's is not used.
 CREATE TABLE lf_types_coll (id bigint NOT NULL, status text NOT NULL, kind integer NOT NULL);
 CREATE INDEX lf_types_coll_status_c ON lf_types_coll (status COLLATE "C", id);

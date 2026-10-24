@@ -7,6 +7,14 @@ versions: [SemVer](https://semver.org/).
 
 ### Fixed
 
+- A sort column relabeled in the `ORDER BY` equivalence class, as a domain
+  column is to its base type, was never found: the search skipped every
+  member that was not a bare `Var`, and `pathkey_is_column` cast the
+  member itself to `Var` after looking through the relabeling, reading
+  `varnullingrels` from a `RelabelType`. Both now look through to the
+  `Var`, and the sort column may be a domain over `smallint`, `integer` or
+  `bigint`. Test in `leapfrog_types`; with the old cast the node is not
+  chosen.
 - Redundant index sets. A stream was checked only for adding something to
   the inner streams, never to the outer one, and the existing streams were
   never checked against a new one. So `(membership_id, id)` paired with

@@ -117,21 +117,40 @@ make_float8_const(double value)
 }
 
 /*
+ * match_column_var
+ *		The Var of column attno of relation rti the node stands for, or NULL.
+ *		A binary-compatible relabeling is looked through: a varchar column
+ *		compared with texteq appears as (col)::text, and its text_ops index
+ *		serves the comparison as it is, as match_index_to_operand accepts it.
+ *		So does a domain column, relabeled to its base type in an
+ *		equivalence class.
+ */
+static Var *
+match_column_var(Node *node, Index rti, AttrNumber attno)
+{
+	Var		   *var;
+
+	while (node && IsA(node, RelabelType))
+		node = (Node *) ((RelabelType *) node)->arg;
+
+	if (node == NULL || !IsA(node, Var))
+		return NULL;
+
+	var = (Var *) node;
+	if (var->varno != rti || var->varattno != attno || var->varlevelsup != 0)
+		return NULL;
+
+	return var;
+}
+
+/*
  * is_column_var
- *		Is the node column attno of relation rti?  A binary-compatible
- *		relabeling is looked through: a varchar column compared with texteq
- *		appears as (col)::text, and its text_ops index serves the comparison
- *		as it is, as match_index_to_operand accepts it.
+ *		Is the node column attno of relation rti (see match_column_var)?
  */
 static bool
 is_column_var(Node *node, Index rti, AttrNumber attno)
 {
-	while (node && IsA(node, RelabelType))
-		node = (Node *) ((RelabelType *) node)->arg;
-
-	return node != NULL && IsA(node, Var) && ((Var *) node)->varno == rti &&
-		((Var *) node)->varattno == attno &&
-		((Var *) node)->varlevelsup == 0;
+	return match_column_var(node, rti, attno) != NULL;
 }
 
 /*
@@ -310,9 +329,9 @@ pathkey_is_column(PathKey *pathkey, Index rti, AttrNumber attno)
 	foreach(lc, pathkey->pk_eclass->ec_members)
 	{
 		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
+		Var		   *var = match_column_var((Node *) em->em_expr, rti, attno);
 
-		if (is_column_var((Node *) em->em_expr, rti, attno) &&
-			((Var *) em->em_expr)->varnullingrels == NULL)
+		if (var != NULL && var->varnullingrels == NULL)
 			return true;
 	}
 
@@ -322,7 +341,7 @@ pathkey_is_column(PathKey *pathkey, Index rti, AttrNumber attno)
 /*
  * is_integer_column
  *		The sort column is compared and skipped to as a 64-bit integer:
- *		smallint, integer or bigint.
+ *		smallint, integer or bigint, or a domain over one of them.
  */
 static bool
 is_integer_column(RangeTblEntry *rte, AttrNumber attno)
@@ -331,7 +350,7 @@ is_integer_column(RangeTblEntry *rte, AttrNumber attno)
 
 	if (attno <= 0)
 		return false;
-	type = get_atttype(rte->relid, attno);
+	type = getBaseType(get_atttype(rte->relid, attno));
 
 	return type == INT2OID || type == INT4OID || type == INT8OID;
 }
@@ -844,11 +863,14 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	foreach(lc, search.pathkey->pk_eclass->ec_members)
 	{
 		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
+		Node	   *expr = (Node *) em->em_expr;
 		AttrNumber	attno;
 
-		if (!IsA(em->em_expr, Var))
+		while (IsA(expr, RelabelType))
+			expr = (Node *) ((RelabelType *) expr)->arg;
+		if (!IsA(expr, Var))
 			continue;
-		attno = ((Var *) em->em_expr)->varattno;
+		attno = ((Var *) expr)->varattno;
 		if (attno > 0 && pathkey_is_column(search.pathkey, rti, attno) &&
 			is_integer_column(rte, attno) && is_notnull_column(rel, attno))
 		{
