@@ -38,72 +38,92 @@ hash, independent of each other and of `deleted_at`), one in five of the oldest
 40 % soft-deleted. Then, each after a `CHECKPOINT`: insert 100,000 rows,
 soft-delete 25,000, change one filter column of 25,000, delete 25,000.
 
-- **S, specialised (30 indexes)**: per column `(fK, id) WHERE deleted_at IS
-  NULL` and `(fK, id) WHERE deleted_at IS NOT NULL`; composite
-  `(fI, fJ, id) WHERE deleted_at IS NULL` for 6 pairs.
+- **S, specialised (33 indexes)**: per column `(fK, id) WHERE deleted_at IS
+  NULL` and `(fK, id) WHERE deleted_at IS NOT NULL`; composite indexes
+  `WHERE deleted_at IS NULL` for 6 pairs, 2 triples and 1 quadruple of
+  filter columns: `(f1, f2, id)`, `(f1, f2, f3, id)`, `(f1, f2, f3, f4, id)`
+  and so on.
 - **G, general (14 indexes)**: per column `(fK, id)`; `(id) WHERE deleted_at
   IS NULL`; `(id) WHERE deleted_at IS NOT NULL`. Read with stock PostgreSQL
-  (G) or with leapfrog (G+L).
+  (G) or with leapfrog (G+L), which combines 2–4 of them per query.
+
+Last run: N-way intersection, commit after `4eb4a7b`. The earlier run with
+30 indexes in S (pairs only) is in the git history of this file.
 
 ### Storage and WAL (deterministic)
 
 | | S | G |
 |---|---|---|
-| Indexes (excluding PK) | 30 | 14 |
-| Index size | 302 MB | 201 MB (−33 %) |
-| WAL, insert 100,000 rows | 354 MB | 159 MB (−55 %) |
+| Indexes (excluding PK) | 33 | 14 |
+| Index size | 375 MB | 201 MB (−46 %) |
+| WAL, insert 100,000 rows | 481 MB | 159 MB (−67 %) |
 | WAL, soft-delete 25,000 rows | 82 MB | 91 MB (+11 %) |
-| WAL, change a filter column of 25,000 rows | 205 MB | 73 MB (−64 %) |
+| WAL, change a filter column of 25,000 rows | 291 MB | 73 MB (−75 %) |
 | WAL, delete 25,000 rows | 18 MB | 18 MB |
 
 Soft delete writes slightly more WAL with G: a non-HOT update inserts into 12
 full `(fK, id)` indexes and one partial index, against 12 "deleted" partial
-indexes with S.
+indexes with S. Every composite index S adds for a combination of filters
+costs WAL on every insert and on every update of one of its columns; G's
+indexes do not grow with the number of combinations.
 
-### Write throughput (rows per second, four runs)
+### Write throughput (rows per second)
 
-| | S | G |
-|---|---|---|
-| insert | 7,968 · 8,741 · 10,298 · 8,752 | 14,576 · 21,553 · 17,555 · 33,327 |
-| soft delete | 26,234 · 24,965 · 11,331 · 24,885 | 13,437 · 17,474 · 8,600 · 16,795 |
-| change a filter column | 4,033 · 9,054 · 4,781 · 9,284 | 23,090 · 19,758 · 10,719 · 7,700 |
-| delete | 73,459 · 152,159 · 80,912 · 47,442 | 198,701 · 161,261 · 119,217 · 85,920 |
+| | S | G | G vs S |
+|---|---:|---:|---|
+| insert | 4,035 | 23,017 | 5.7× |
+| soft delete | 11,042 | 14,568 | 1.3× |
+| change a filter column | 2,658 | 12,684 | 4.8× |
+| delete | 76,390 | 92,670 | 1.2× |
 
-Inserts were faster with G in every run (1.7–3.8×), deletes too (1.1–2.7×),
-filter-column updates in three runs of four. Soft deletes were faster with S
-in every run (1.3–2×). The spread between runs is large; the WAL numbers above
-are the reliable part.
+One run; earlier runs varied up to 2× between runs on this laptop, the WAL
+numbers above are the reliable part.
 
-### Reads, `LIMIT 100`, median of 5 (last run, cost model of the group
-comparison fix)
+### Reads, `LIMIT 100`, median of 5
 
-| Query | S | G stock | G+L planner | G+L forced |
-|---|---|---|---|---|
+| Query | S | G stock | G+L planner (indexes) | G+L forced |
+|---|---:|---:|---|---:|
 | `random_page_cost = 4` | | | | |
-| one filter, live | 0.13 | 0.15 | 0.14 (Index Scan) | 1.03 |
-| one filter, deleted | 0.12 | 3.01 | 2.96 (Index Scan) | 1.09 |
-| pair with a composite in S | 0.07 | 3.50 | **1.17 (node)** | 1.15 |
-| pair without one | 7.17 | 2.12 | **1.15 (node)** | 1.21 |
+| one filter, live | 0.05 | 0.12 | 0.10 (Index Scan) | 0.51 |
+| one filter, deleted | 0.06 | 1.77 | 2.50 (Index Scan) | 0.53 |
+| 2 filters, composite in S | 0.06 | 1.72 | **0.90 (node, 2)** | 0.56 |
+| 2 filters, none in S | 2.97 | 1.73 | **0.93 (node, 2)** | 0.58 |
+| 3 filters, composite in S | 0.02 | 2.14 | 2.31 (Bitmap) | 0.58 |
+| 3 filters, none in S | 4.07 | 2.11 | **0.96 (node, 3)** | 0.57 |
+| 4 filters, composite in S | 0.02 | 2.06 | **0.98 (node, 3)** | 0.59 |
+| 4 filters, none in S | 4.78 | 1.98 | **0.96 (node, 3)** | 0.57 |
 | `random_page_cost = 1.1` | | | | |
-| one filter, live | 0.13 | 0.14 | 0.15 (Index Scan) | 1.03 |
-| one filter, deleted | 0.11 | 2.85 | **1.06 (node)** | 1.09 |
-| pair with a composite in S | 0.05 | 3.53 | **1.17 (node)** | 1.15 |
-| pair without one | 6.30 | 3.56 | **1.15 (node)** | 1.21 |
+| one filter, live | 0.06 | 0.06 | 0.07 (Index Scan) | 0.51 |
+| one filter, deleted | 0.13 | 1.35 | **0.57 (node, 2)** | 0.53 |
+| 2 filters, composite in S | 0.07 | 1.48 | **0.68 (node, 2)** | 0.56 |
+| 2 filters, none in S | 5.56 | 1.48 | **0.65 (node, 2)** | 0.58 |
+| 3 filters, composite in S | 0.02 | 1.49 | **0.62 (node, 2)** | 0.58 |
+| 3 filters, none in S | 5.98 | 1.48 | **0.62 (node, 2)** | 0.57 |
+| 4 filters, composite in S | 0.04 | 1.43 | **0.80 (node, 3)** | 0.59 |
+| 4 filters, none in S | 6.76 | 1.59 | **0.63 (node, 2)** | 0.57 |
 
-Milliseconds. Forced rows are with the default page costs; the forced node's
-work does not depend on them. This run was about 2× slower across the board
-than the earlier one (S's single-filter queries 0.12 ms instead of 0.05 ms);
-the ratios between plans are what carries.
+Milliseconds. The forced node is the cheapest set by its own estimate
+(here always a pair); its work does not depend on the page costs. The 3- and
+4-filter queries match no row: the filters have 100 values each, so all
+combinations are scanned to the end, the case that costs every plan the most.
 
-- S answers every query it has an index for in ~0.1 ms and pays 6–7 ms for
-  the pair it has none for.
-- With G, the planner picks the node for both pair queries at both page costs
-  (1.8–3× faster than the stock `BitmapAnd`), and for the deleted-rows query
-  at `random_page_cost = 1.1` (2.7× faster than stock). Before the group
-  comparison fix the pairs went to `BitmapAnd` at a 4 % cost margin.
-- For "one filter, live" the node is slower (1.03 forced vs 0.15) and the
-  planner correctly does not pick it. An earlier cost model did, at 0.9 ms;
-  that was fixed.
+- S answers every query it has an exact composite for in under 0.1 ms and
+  pays 3–7 ms for every combination it has none for: the composite index
+  helps only the query it was built for.
+- G+L answers every 2-, 3- and 4-filter query in 0.6–1.0 ms, chosen by the
+  planner in 15 of 16 cases, 1.5–3.5× faster than stock PostgreSQL on the
+  same indexes and 3–10× faster than S without a matching composite.
+- The planner takes a third index where the cost model sees it pay
+  (`random_page_cost = 4`: the third stream is read through instead of heap
+  fetches) and stays with a pair at 1.1, where heap fetches are cheap; the
+  measured times of the two choices differ by under 0.2 ms either way.
+- Two cases go to stock plans: "one filter, deleted" at the default page cost
+  (2.5 ms against the forced node's 0.53; the stock Index Scan on the
+  partial index is estimated too cheaply, see the README's Current
+  limitations) and "3 filters, composite in S" at the default page cost
+  (`BitmapAnd`, 2.3 ms against 0.58).
+- Planning: 0.25–0.57 ms with leapfrog against 0.09–0.12 ms stock (range
+  probe and the set search; see the README's planning table).
 
 ## Read benchmark, 1M rows
 

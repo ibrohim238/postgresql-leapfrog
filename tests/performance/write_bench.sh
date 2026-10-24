@@ -6,11 +6,12 @@
 #
 #   S    specialised indexes: per filter column (fK, id) WHERE deleted_at IS
 #        NULL and (fK, id) WHERE deleted_at IS NOT NULL, plus composite
-#        (fI, fJ, id) WHERE deleted_at IS NULL for the frequent filter pairs
-#        (2 * NFILTERS + pairs indexes);
+#        (fI, fJ, id), (fI, fJ, fK, id) and (fI, fJ, fK, fL, id) WHERE
+#        deleted_at IS NULL for the frequent filter combinations
+#        (2 * NFILTERS + combinations indexes);
 #   G+L  general indexes with leapfrog: per filter column (fK, id), plus
 #        (id) WHERE deleted_at IS NULL and (id) WHERE deleted_at IS NOT NULL
-#        (NFILTERS + 2 indexes);
+#        (NFILTERS + 2 indexes); leapfrog combines two or more of them;
 #   G    the same general indexes, stock PostgreSQL (leapfrog.enabled = off).
 #
 # For S and G (G+L shares G's indexes and writes) the script loads BASE_ROWS
@@ -20,9 +21,10 @@
 #   update2  change one filter column of BATCH_ROWS/4 rows
 #   delete   BATCH_ROWS/4 rows
 # as rows per second and WAL bytes; and the total index size.  Then a query
-# mix (single filter live/deleted, a pair with a composite index in S, a
-# pair without one) runs for S, G+L and G: median execution and planning
-# time over REPEATS runs after a warm-up, and the plan's top scan node.
+# mix (single filter live/deleted; two, three and four filters, each with a
+# composite index in S and without one) runs for S, G+L and G: median
+# execution and planning time over REPEATS runs after a warm-up, the plan's
+# top scan node and, for leapfrog, the number of indexes it combined.
 #
 # Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; NFILTERS (12), BASE_ROWS
 # (500000), BATCH_ROWS (100000), REPEATS (5).
@@ -70,8 +72,8 @@ insert_rows() {
 	FROM generate_series($from, $to) g;"
 }
 
-# frequent filter pairs that get a composite index in strategy S
-pairs="1:2 1:3 2:3 4:5 6:7 8:9"
+# frequent filter combinations that get a composite index in strategy S
+combinations="1:2 1:3 2:3 4:5 6:7 8:9 1:2:3 4:5:6 1:2:3:4"
 
 create_indexes() {
 	local strategy=$1
@@ -80,8 +82,8 @@ create_indexes() {
 			echo "CREATE INDEX ON orders (f$k, id) WHERE deleted_at IS NULL;"
 			echo "CREATE INDEX ON orders (f$k, id) WHERE deleted_at IS NOT NULL;"
 		done
-		for p in $pairs; do
-			echo "CREATE INDEX ON orders (f${p%%:*}, f${p##*:}, id) WHERE deleted_at IS NULL;"
+		for c in $combinations; do
+			echo "CREATE INDEX ON orders (f${c//:/, f}, id) WHERE deleted_at IS NULL;"
 		done
 	else
 		for k in $(seq 1 "$NFILTERS"); do
@@ -131,12 +133,17 @@ query() {
 		single_deleted) echo "SELECT * FROM orders WHERE f5 = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 100" ;;
 		pair_composite) echo "SELECT * FROM orders WHERE f1 = 7 AND f2 = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
 		pair_no_composite) echo "SELECT * FROM orders WHERE f10 = 7 AND f11 = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
+		triple_composite) echo "SELECT * FROM orders WHERE f1 = 7 AND f2 = 7 AND f3 = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
+		triple_no_composite) echo "SELECT * FROM orders WHERE f10 = 7 AND f11 = 7 AND f12 = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
+		quad_composite) echo "SELECT * FROM orders WHERE f1 = 7 AND f2 = 7 AND f3 = 7 AND f4 = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
+		quad_no_composite) echo "SELECT * FROM orders WHERE f9 = 7 AND f10 = 7 AND f11 = 7 AND f12 = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
 	esac
 }
 
 read_mix() {
 	local label=$1 settings=$2 q
-	for name in single_live single_deleted pair_composite pair_no_composite; do
+	for name in single_live single_deleted pair_composite pair_no_composite \
+		triple_composite triple_no_composite quad_composite quad_no_composite; do
 		q=$(query "$name")
 		$PSQL -tA -F, <<-SQL >> "$out/read.csv"
 			LOAD 'leapfrog';
@@ -144,7 +151,7 @@ read_mix() {
 			$settings
 			$q \g /dev/null
 			$q \g /dev/null
-			CREATE TEMP TABLE runs (exec_ms float8, plan_ms float8, node text, rows float8);
+			CREATE TEMP TABLE runs (exec_ms float8, plan_ms float8, node text, indexes int, rows float8);
 			DO \$\$
 			DECLARE j jsonb;
 			BEGIN
@@ -155,20 +162,24 @@ read_mix() {
 						(SELECT coalesce(n->>'Custom Plan Provider', n->>'Node Type')
 						 FROM jsonb_path_query(j, 'strict \$[0].Plan.**') n
 						 WHERE n ? 'Relation Name' LIMIT 1),
+						(SELECT count(*) FROM jsonb_path_query(j, 'strict \$[0].Plan.**') n,
+							jsonb_object_keys(n) k
+						 WHERE n->>'Custom Plan Provider' = 'Index Merge Intersect'
+							AND k ~ '^(Outer|Inner) Index'),
 						(j->0->'Plan'->>'Actual Rows')::float8;
 				END LOOP;
 			END \$\$;
 			SELECT '$label', '$name',
 				round(percentile_cont(0.5) WITHIN GROUP (ORDER BY exec_ms)::numeric, 3),
 				round(percentile_cont(0.5) WITHIN GROUP (ORDER BY plan_ms)::numeric, 3),
-				min(node), max(rows)
+				min(node), max(indexes), max(rows)
 			FROM runs;
 		SQL
 	done
 }
 
 echo "strategy,operation,rows,seconds,rows_per_sec,wal_bytes" > "$out/write.csv"
-echo "strategy,query,exec_ms,plan_ms,scan_node,rows" > "$out/read.csv"
+echo "strategy,query,exec_ms,plan_ms,scan_node,indexes,rows" > "$out/read.csv"
 echo "strategy,indexes,index_bytes" > "$out/size.csv"
 
 next=$((BASE_ROWS + 1))
