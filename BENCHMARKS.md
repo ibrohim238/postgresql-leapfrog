@@ -74,32 +74,35 @@ filter-column updates in three runs of four. Soft deletes were faster with S
 in every run (1.3–2×). The spread between runs is large; the WAL numbers above
 are the reliable part.
 
-### Reads, `LIMIT 100`, median of 5 (last run)
+### Reads, `LIMIT 100`, median of 5 (last run, cost model of the group
+comparison fix)
 
 | Query | S | G stock | G+L planner | G+L forced |
 |---|---|---|---|---|
 | `random_page_cost = 4` | | | | |
-| one filter, live | 0.05 | 0.06 | 0.12 (Index Scan) | 0.41 |
-| one filter, deleted | 0.05 | 1.41 | 1.28 (Index Scan) | 0.77 |
-| pair with a composite in S | 0.05 | 1.60 | 1.51 (Bitmap) | 0.50 |
-| pair without one | 3.11 | 1.58 | 1.52 (Bitmap) | 0.50 |
+| one filter, live | 0.13 | 0.15 | 0.14 (Index Scan) | 1.03 |
+| one filter, deleted | 0.12 | 3.01 | 2.96 (Index Scan) | 1.09 |
+| pair with a composite in S | 0.07 | 3.50 | **1.17 (node)** | 1.15 |
+| pair without one | 7.17 | 2.12 | **1.15 (node)** | 1.21 |
 | `random_page_cost = 1.1` | | | | |
-| one filter, live | 0.07 | 0.06 | 0.09 (Index Scan) | 0.41 |
-| one filter, deleted | 0.06 | 1.59 | **0.48 (node)** | 0.77 |
-| pair with a composite in S | 0.03 | 1.49 | 1.76 (Bitmap) | 0.50 |
-| pair without one | 3.01 | 1.50 | 1.57 (Bitmap) | 0.50 |
+| one filter, live | 0.13 | 0.14 | 0.15 (Index Scan) | 1.03 |
+| one filter, deleted | 0.11 | 2.85 | **1.06 (node)** | 1.09 |
+| pair with a composite in S | 0.05 | 3.53 | **1.17 (node)** | 1.15 |
+| pair without one | 6.30 | 3.56 | **1.15 (node)** | 1.21 |
 
 Milliseconds. Forced rows are with the default page costs; the forced node's
-work does not depend on them.
+work does not depend on them. This run was about 2× slower across the board
+than the earlier one (S's single-filter queries 0.12 ms instead of 0.05 ms);
+the ratios between plans are what carries.
 
-- S answers every query it has an index for in ~0.05 ms and pays 3 ms for the
-  pair it has none for.
-- With G, the planner picks the node for the deleted-rows query at
-  `random_page_cost = 1.1` (3.3× faster than stock). For the pairs the forced
-  node is 3× faster than the stock `BitmapAnd`, but the cost model does not
-  pick it.
-- For "one filter, live" the node is slower (0.41 forced vs 0.06) and the
-  planner correctly does not pick it. The previous cost model did, at 0.9 ms;
+- S answers every query it has an index for in ~0.1 ms and pays 6–7 ms for
+  the pair it has none for.
+- With G, the planner picks the node for both pair queries at both page costs
+  (1.8–3× faster than the stock `BitmapAnd`), and for the deleted-rows query
+  at `random_page_cost = 1.1` (2.7× faster than stock). Before the group
+  comparison fix the pairs went to `BitmapAnd` at a 4 % cost margin.
+- For "one filter, live" the node is slower (1.03 forced vs 0.15) and the
+  planner correctly does not pick it. An earlier cost model did, at 0.9 ms;
   that was fixed.
 
 ## Read benchmark, 1M rows

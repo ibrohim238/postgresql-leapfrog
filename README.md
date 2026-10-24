@@ -94,10 +94,10 @@ Reads, `LIMIT 100`, median time, `random_page_cost = 1.1` (data in memory):
 
 | Query | S | G stock | G+L (planner) | G+L forced |
 |---|---|---|---|---|
-| one filter, live rows | 0.07 ms | **0.06 ms** | 0.09 ms | 0.41 ms |
-| one filter, deleted rows | **0.06 ms** | 1.59 ms | **0.48 ms** (node) | 0.77 ms |
-| two filters with a composite index in S | **0.03 ms** | 1.49 ms | 1.76 ms | 0.50 ms |
-| two filters without one | 3.01 ms | 1.50 ms | 1.57 ms | **0.50 ms** |
+| one filter, live rows | **0.13 ms** | 0.14 ms | 0.15 ms | 1.03 ms |
+| one filter, deleted rows | **0.11 ms** | 2.85 ms | **1.06 ms** (node) | 1.09 ms |
+| two filters with a composite index in S | **0.05 ms** | 3.53 ms | **1.17 ms** (node) | 1.15 ms |
+| two filters without one | 6.30 ms | 3.56 ms | **1.15 ms** (node) | 1.21 ms |
 
 What this shows, plainly:
 
@@ -105,10 +105,11 @@ What this shows, plainly:
   WAL on inserts, and faster inserts in every run.
 - A dedicated index is still the fastest read for the exact query it was built
   for. Composition trades that for fewer indexes; the specialised scheme pays
-  instead whenever a combination has no index of its own (3 ms above).
-- With general indexes, leapfrog makes the trash query 3× faster than stock
-  PostgreSQL, chosen by the planner. For two filters the forced node is 3×
-  faster than the stock `BitmapAnd`, but the cost model does not pick it yet.
+  instead whenever a combination has no index of its own (6 ms above).
+- With general indexes, leapfrog makes the trash query 2.7× faster than stock
+  PostgreSQL and both two-filter queries 3×, chosen by the planner. The
+  specialised index set still wins where it has the exact index: 0.05 ms is
+  not 1.15 ms.
 
 ## How Index Merge Intersect works
 
@@ -534,7 +535,13 @@ total   = startup + run
   values, a cached plan with constants keeps this estimate until it is
   replanned.
 - **Group size**: inner entries / the number of distinct sortcol values in
-  the table (`get_variable_numdistinct`).
+  the table (`get_variable_numdistinct`). Each entry pays log2(group size)
+  TID comparisons at 0.1 × `cpu_operator_cost`, the rate
+  `cost_bitmap_tree_node` charges per TID of a bitmap: the comparisons are
+  inline, not operator calls. Measured on two ordinary indexes (15,000
+  entries, 118 buffers, the same as `BitmapAnd`): the node runs 3× faster
+  than `BitmapAnd`, and a full `cpu_operator_cost` per comparison had made it
+  the dearer plan by 4 %.
 - **Heap pages**: as `cost_index` charges them, interpolated by the squared
   correlation that `btcostestimate` uses for an Index Scan on the outer index
   (its leading column, ×0.75 for a multicolumn index). The node visits the
@@ -603,14 +610,13 @@ Verified against `src/` and the tests.
   27 and 21 queries where the node is more than 15 % faster than both the
   planner's choice and the stock plan on `(customer_id, id)`. Most of these
   are deleted rows (1 % uniform: 0.5 ms against 0.7–1.7 ms; skewed, `LIMIT
-  1000`: 1.1 ms against 2–8 ms). Three causes remain, all in how PostgreSQL
-  costs the competing plans rather than in the node's own estimate: the
-  stock plans' estimates assume the filter is spread evenly along `id` (a
+  1000`: 1.1 ms against 2–8 ms). `EXPLAIN (VERBOSE)` shows the entries the
+  model expected against the entries read; in these misses they agree within
+  a few percent, so the cause is in how PostgreSQL costs the competing
+  plans: their estimates assume the filter is spread evenly along `id` (a
   partial index scan filtering the customer is estimated at 4 for 2 ms of
-  work); `BitmapAnd` reading the same index entries is estimated cheaper
-  (241 against 291 for the node, which is 2–3× faster); and the heap
-  correlation of a multicolumn index is taken as its leading column's × 0.75,
-  as `btcostestimate` does.
+  work), and the heap correlation of a multicolumn index is taken as its
+  leading column's × 0.75, as `btcostestimate` does.
 - One relation per node; no partitioned tables, no parallel execution.
 
 **Executor and memory**
@@ -658,12 +664,19 @@ stream and costs only the overlap, with the matches estimated there and used
 as the path's row estimate. On `cost_bench.sh` (24 queries on skewed and
 correlated data) the misses went from 18 to 11 at `random_page_cost = 4` and
 from 16 to 9 at 1.1; on the 1M-row matrix from 32 to 27 and from 21 to 21.
+Then, with the estimated entries shown next to the entries read, the one
+component of the node's own cost that disagreed with the measurement was
+found and fixed: TID comparisons in a group were charged as operator calls,
+ten times the rate PostgreSQL charges the same work in a bitmap, which made
+the node dearer than `BitmapAnd` on identical page reads. On `cost_bench.sh`
+(32 queries, now with pairs of ordinary indexes) the misses went from 14 to 10
+at `random_page_cost = 4` and from 17 to 6 at 1.1.
 
 Not done, on purpose: estimating the density of the streams inside the
-overlap by more probes. In the measured misses the node's estimate is not
-the problem; the competing stock plans are estimated too cheaply (see
-Current limitations), and lowering the node's cost to match would be fitting
-the benchmark.
+overlap by more probes. In the remaining misses the entries estimate is within
+a few percent of the entries read; the competing stock plans are estimated
+too cheaply (see Current limitations), and lowering the node's cost further
+would be fitting the benchmark.
 
 #### Adaptive skip-ahead
 

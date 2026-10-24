@@ -15,6 +15,23 @@ versions: [SemVer](https://semver.org/).
 - `cost_bench.sh`: a second ordinary index `(product_id, id)` and two pair
   queries, with and without a third condition.
 
+### Changed
+
+- Cost model: a TID comparison in the group costs 0.1 × `cpu_operator_cost`,
+  as `cost_bitmap_tree_node` charges the per-TID work of a bitmap, instead of
+  a full `cpu_operator_cost` (the rate of an operator call through the
+  function manager). Calibrated with `cost_bench.sh`: on two ordinary indexes
+  the node and `BitmapAnd` touch the same 118 buffers and the entries
+  estimate is within 6 % of the entries read, yet the node was costed 4 %
+  above `BitmapAnd` while running 3× faster. Now the node is chosen for the
+  pair queries at both page costs; `cost_bench.sh` misses go from 14 to 10 of
+  32 queries at `random_page_cost = 4` and from 17 to 6 at 1.1, with no new
+  wrong choice. The 1M-row matrix (no pairs of ordinary indexes) is
+  unchanged within noise. In the read mix of `write_bench.sh` the planner
+  now picks the node for both pair queries at both page costs (1.2 ms
+  against 2.1–3.6 ms stock). Test in `leapfrog_explain`; it fails at the
+  old rate.
+
 ## [0.0.2] — 2026-10-24
 
 Still experimental. The shared library changes; the SQL functions do not:

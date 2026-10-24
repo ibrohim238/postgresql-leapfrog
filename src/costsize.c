@@ -209,12 +209,19 @@ heap_fetch_cost(PlannerInfo *root, RelOptInfo *rel, double rows,
 /*
  * group_cost
  *		Cost of sorting the inner entries of each value and looking the
- *		outer entries up in them: log2 of the group size per entry.
+ *		outer entries up in them: log2 of the group size comparisons per
+ *		entry.  The comparisons are inline ItemPointerCompare calls, not
+ *		operator calls through the function manager, and are charged as
+ *		cost_bitmap_tree_node charges the per-TID work of a bitmap: 0.1 *
+ *		cpu_operator_cost each.  Measured (cost_bench.sh, two ordinary
+ *		indexes, 15,000 entries, the same 118 buffers as BitmapAnd): the
+ *		node runs 3 times faster than BitmapAnd, while a full
+ *		cpu_operator_cost per comparison made it the dearer plan.
  */
 static Cost
 group_cost(double outer_entries, double inner_entries, double group_size)
 {
-	return (outer_entries + inner_entries) * cpu_operator_cost *
+	return (outer_entries + inner_entries) * 0.1 * cpu_operator_cost *
 		log2(group_size + 1);
 }
 
@@ -614,6 +621,6 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	cpath->path.rows = clamp_row_est(matches);
 	cpath->path.startup_cost = startup_cost;
 	cpath->path.total_cost = startup_cost + run_cost;
-}
 	*outer_read_p = outer_read;
 	*inner_read_p = inner_read;
+}

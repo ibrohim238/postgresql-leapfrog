@@ -232,6 +232,48 @@ SELECT lf_node_rows($$ SELECT * FROM lf_cost_range WHERE owner_id = 13 AND archi
 DROP FUNCTION lf_node_rows(text);
 RESET plan_cache_mode;
 DEALLOCATE lf_range;
+
+-- Two ordinary indexes against BitmapAnd on the same index entries: both
+-- plans read the same pages, the node skips the bitmaps and the sort.  The
+-- node's TID comparisons are charged at the bitmap's per-TID rate
+-- (0.1 * cpu_operator_cost); at a full cpu_operator_cost per comparison the
+-- node came out dearer than BitmapAnd here (99 against 96) while running
+-- 3 times faster on the benchmark data.  25,000 rows: ANALYZE samples
+-- every row, so the estimates do not depend on the sample.
+CREATE FUNCTION lf_stock_cost(query text) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+	plan jsonb;
+BEGIN
+	PERFORM set_config('leapfrog.enabled', 'off', true);
+	EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+	RETURN (plan -> 0 -> 'Plan' ->> 'Total Cost')::float8;
+END
+$$;
+CREATE TABLE lf_cost_pair (
+	id bigint PRIMARY KEY,
+	a bigint NOT NULL,
+	b bigint NOT NULL,
+	payload text
+);
+INSERT INTO lf_cost_pair
+SELECT g, abs(hashint8(g * 8 + 1)) % 20, abs(hashint8(g * 8 + 2)) % 20, repeat('x', 40)
+FROM generate_series(1, 25000) g;
+CREATE INDEX lf_cost_pair_a ON lf_cost_pair (a, id);
+CREATE INDEX lf_cost_pair_b ON lf_cost_pair (b, id);
+VACUUM ANALYZE lf_cost_pair;
+SET random_page_cost = 1.1;
+SET leapfrog.enabled = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM lf_cost_pair WHERE a = 7 AND b = 12 ORDER BY id;
+RESET leapfrog.enabled;
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_pair WHERE a = 7 AND b = 12 ORDER BY id $$)
+	 < lf_stock_cost($$ SELECT * FROM lf_cost_pair WHERE a = 7 AND b = 12 ORDER BY id $$)
+	AS pair_cheaper_than_bitmapand;
+SELECT lf_check($$ SELECT * FROM lf_cost_pair WHERE a = 7 AND b = 12 ORDER BY id $$);
+RESET random_page_cost;
+DROP TABLE lf_cost_pair;
+DROP FUNCTION lf_stock_cost(text);
 SELECT lf_check($$ SELECT * FROM lf_cost_range WHERE owner_id = 3 AND archived ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_cost_range WHERE owner_id = 13 AND archived ORDER BY id DESC $$);
 DROP TABLE lf_cost_range;
