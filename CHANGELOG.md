@@ -7,6 +7,16 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- `tests/performance/write_bench.sh`: storage, WAL, write throughput and a read
+  mix for 12 filter columns, specialised indexes (30) against general ones
+  (14), read with and without leapfrog at both page costs.
+- README opens with the problem (one index per query shape) and a "Why index
+  composition matters" section with the measured storage, write and read
+  numbers, including where the specialised indexes read faster; BENCHMARKS is
+  rewritten from the final runs. README documents that the installed library
+  must not be overwritten in place (verified: it crashes loaded backends, as
+  for any C extension).
+
 - Intersection of two ordinary B-tree indexes. The inner side is now any
   `(j1, …, jM, sortcol, …)` index with an equality on every `jI`, partial or
   not; an ordinary index needs at least one equality column the outer index

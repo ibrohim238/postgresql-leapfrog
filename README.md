@@ -1,75 +1,113 @@
 # postgresql-leapfrog
 
-A PostgreSQL 18 extension that adds an **Index Merge Intersect** plan node:
-an ordered intersection of two B-tree indexes, without materialising a bitmap
-and without sorting the result.
+**Fewer indexes, cheaper writes, ordered reads by composition.** A PostgreSQL 18
+extension that lets the planner combine two general B-tree indexes at query time
+— `(customer_id, id)` with `(product_id, id)`, or with a shared
+`(id) WHERE deleted_at IS NULL` — into one ordered stream, so that a table does
+not need a dedicated composite or partial index for every filter combination.
 
-```text
-Limit
-  └── Custom Scan (Index Merge Intersect) on orders
-        Outer Index: idx_orders_customer_id   -- (customer_id, id)
-        Inner Index: idx_orders_active_id     -- (id) WHERE deleted_at IS NULL
-```
-
-Status: **experimental**. The algorithm and the executor are covered by
-regression and isolation tests (see [Tests](#tests)); the cost model is
-explainable but has been calibrated on synthetic data only. Read
-[Known limitations](#known-limitations-and-planned-improvements) before using
-it in production.
+Status: **experimental (0.0.1)**. The executor is covered by regression and
+isolation tests that compare every result with the stock plans
+(see [Tests](#tests)). The cost model is conservative: in the measured
+benchmarks it never picked the node where it was slower, and it misses a part
+of the cases where the node is faster (see
+[Known limitations](#known-limitations-and-planned-improvements)).
 
 ## Contents
 
-1. [Purpose](#purpose)
-2. [How Index Merge Intersect works](#how-index-merge-intersect-works)
-3. [Example](#example)
-4. [Compared with Index Scan and BitmapAnd](#compared-with-index-scan-and-bitmapand)
-5. [Requirements](#requirements)
-6. [Installation](#installation)
-7. [Docker quick start](#docker-quick-start)
-8. [Loading the library](#loading-the-library)
-9. [Settings](#settings)
-10. [Reading EXPLAIN](#reading-explain)
-11. [Tests](#tests)
-12. [Benchmarks](#benchmarks)
-13. [Cost model](#cost-model)
-14. [Known limitations and planned improvements](#known-limitations-and-planned-improvements)
-15. [Known issues](#known-issues)
-16. [Operational safety](#operational-safety)
-17. [License](#license)
+1. [The problem: one index per query shape](#the-problem-one-index-per-query-shape)
+2. [Why index composition matters](#why-index-composition-matters)
+3. [How Index Merge Intersect works](#how-index-merge-intersect-works)
+4. [Example](#example)
+5. [Compared with Index Scan and BitmapAnd](#compared-with-index-scan-and-bitmapand)
+6. [Requirements](#requirements)
+7. [Installation](#installation)
+8. [Docker quick start](#docker-quick-start)
+9. [Loading the library](#loading-the-library)
+10. [Settings](#settings)
+11. [Reading EXPLAIN](#reading-explain)
+12. [Tests](#tests)
+13. [Benchmarks](#benchmarks)
+14. [Cost model](#cost-model)
+15. [Known limitations and planned improvements](#known-limitations-and-planned-improvements)
+16. [Known issues](#known-issues)
+17. [Operational safety](#operational-safety)
+18. [License](#license)
 
-## Purpose
+## The problem: one index per query shape
 
-A typical query: one page of a customer's rows ordered by `id`, live rows
-only (or deleted rows only):
+A typical application table has a few filter columns, soft deletes, and pages
+ordered by id:
 
 ```sql
-SELECT *
-FROM orders
-WHERE customer_id = 100
-  AND deleted_at IS NULL
-ORDER BY id DESC
-LIMIT 100;
+SELECT * FROM orders
+WHERE customer_id = $1 AND deleted_at IS NULL
+ORDER BY id DESC LIMIT 100;
 ```
 
-Stock PostgreSQL runs it in one of two ways:
+For every such query to be fast with stock PostgreSQL, the schema grows one
+index per query shape: `(customer_id, id) WHERE deleted_at IS NULL`, the same
+`WHERE deleted_at IS NOT NULL` for the trash view, then the same pair for
+`product_id`, for `warehouse_id`, and composite indexes for the filter pairs
+that are queried together. Each index takes disk space and buffer cache, and
+every `INSERT` and every non-HOT `UPDATE` writes into each of them and into the
+WAL.
 
-- an `Index Scan` on `(customer_id, id)` with `deleted_at IS NULL` as a filter
-  on every heap row: when matching rows are rare and far away, it reads
-  hundreds of thousands of rows to return a hundred;
-- an `Index Scan` on the partial `(id) WHERE deleted_at IS NULL` with
-  `customer_id = 100` as a filter: the same picture when the customer is rare.
+General indexes — one `(filter_column, id)` per filter plus two partial
+`(id)` indexes shared by the whole table — are fewer and smaller, but stock
+PostgreSQL cannot combine two of them and keep the `id` order: an `Index Scan`
+uses one index and filters the rest on the heap, and `BitmapAnd` reads both
+indexes completely, loses the order and sorts.
 
-`BitmapAnd` of the two indexes reads the partial index completely, loses the
-`id` order and needs a sort.
+leapfrog adds the missing plan node: an ordered intersection of two B-tree
+indexes that stops early at `LIMIT` and visits the heap only for rows that
+passed both.
 
-The schema-side alternative is a dedicated partial index
-`(customer_id, id) WHERE deleted_at IS NULL` for every filter column. On wide
-tables that doubles the number of indexes and the writes into them.
+## Why index composition matters
 
-Leapfrog offers a third way: one full index per filter column plus two
-partial indexes on `id` shared by the whole table, and a plan node that
-merges the two ordered index streams and visits the heap only for rows that
-survived the intersection.
+Measured with [`tests/performance/write_bench.sh`](tests/performance/write_bench.sh):
+500,000 rows, 12 filter columns of 100 values each, soft deletes, then writes
+of 100,000 rows; PostgreSQL 18.6 in Docker on a laptop
+(details and caveats in [BENCHMARKS.md](BENCHMARKS.md)).
+
+- **S, specialised**: per filter column `(fK, id) WHERE deleted_at IS NULL` and
+  `(fK, id) WHERE deleted_at IS NOT NULL`, plus 6 composite indexes for frequent
+  pairs — **30 indexes**.
+- **G, general**: per filter column `(fK, id)`, plus `(id) WHERE deleted_at IS
+  NULL` and `(id) WHERE deleted_at IS NOT NULL` — **14 indexes**; read with
+  stock PostgreSQL or with leapfrog (**G+L**).
+
+Storage and writes (index size and WAL are deterministic; rows per second vary
+between runs on this machine, so the range of four runs is given):
+
+| | S (30 indexes) | G (14 indexes) | G vs S |
+|---|---|---|---|
+| Index size, excluding PK | 302 MB | **201 MB** | −33 % |
+| `INSERT` 100,000 rows: WAL | 354 MB | **159 MB** | −55 % |
+| `INSERT`: rows per second | 8,000–10,300 | **14,600–33,300** | 1.7–3.8× faster |
+| `UPDATE` of a filter column: WAL | 205 MB | **73 MB** | −64 % |
+| `UPDATE` of `deleted_at` (soft delete): WAL | **82 MB** | 91 MB | +11 % |
+| `DELETE`: WAL | 18 MB | 18 MB | same |
+
+Reads, `LIMIT 100`, median time, `random_page_cost = 1.1` (data in memory):
+
+| Query | S | G stock | G+L (planner) | G+L forced |
+|---|---|---|---|---|
+| one filter, live rows | 0.07 ms | **0.06 ms** | 0.09 ms | 0.41 ms |
+| one filter, deleted rows | **0.06 ms** | 1.59 ms | **0.48 ms** (node) | 0.77 ms |
+| two filters with a composite index in S | **0.03 ms** | 1.49 ms | 1.76 ms | 0.50 ms |
+| two filters without one | 3.01 ms | 1.50 ms | 1.57 ms | **0.50 ms** |
+
+What this shows, plainly:
+
+- The write side is the reason to compose: a third less index storage, half the
+  WAL on inserts, and faster inserts in every run.
+- A dedicated index is still the fastest read for the exact query it was built
+  for. Composition trades that for fewer indexes; the specialised scheme pays
+  instead whenever a combination has no index of its own (3 ms above).
+- With general indexes, leapfrog makes the trash query 3× faster than stock
+  PostgreSQL, chosen by the planner. For two filters the forced node is 3×
+  faster than the stock `BitmapAnd`, but the cost model does not pick it yet.
 
 ## How Index Merge Intersect works
 
@@ -78,36 +116,38 @@ For every base relation of the query the planner looks for an index pair:
 - an **outer** B-tree `(k1, …, kN, sortcol)`: every `kI` is compared for
   equality with a constant, a parameter or a column of an outer relation, and
   the last column is the first sort key of the query;
-- an **inner** partial B-tree `(sortcol, …) WHERE predicate` whose predicate
-  is implied by the query's conditions.
+- an **inner** B-tree `(j1, …, jM, sortcol, …)` with an equality on every `jI`.
+  With `M = 0` it must be a partial index whose predicate is implied by the
+  query (`(id) WHERE deleted_at IS NULL`); an ordinary index must add an
+  equality column the outer index does not have (`(product_id, id)`).
 
-The executor reads both indexes as sorted streams in the `ORDER BY` direction
-(`ForwardScanDirection` or `BackwardScanDirection`), advances the side that
-lags behind until the `sortcol` values meet, and then matches the entries
-**by TID**: the inner entries of one value are collected into a sorted group
-and the outer entries are looked up in it by binary search. This is MySQL's
-index merge intersection (`RowIDIntersectionIterator`) adapted to nbtree:
-matching by TID keeps the merge correct for a non-unique `sortcol` and for
-dead row versions still present in the indexes.
+With every column before `sortcol` fixed, both scans return their entries in
+`sortcol` order. The executor reads both as sorted streams in the `ORDER BY`
+direction and advances the side that lags behind until the values meet. Once
+the lagging side has read 1,024 entries in a row without catching up, it
+descends its B-tree again straight to the other side's value (**skip-ahead**,
+`index_rescan` with `sortcol >= value`) instead of reading the gap.
 
-A matched entry is fetched from the heap with `index_fetch_heap`, following
-the HOT chain the way `index_getnext_slot` does. The TID group is bounded by
-`work_mem`: when a value has more entries than fit, the group is dropped,
-every outer entry of that value is fetched from the heap and the partial
-index predicate is checked on the row explicitly. The result is the same; for
-that value the cost is that of a plain index scan with a filter.
+When the values meet, the entries are matched **by heap TID**: the inner
+entries of the value are collected into a sorted group and the outer entries
+are looked up in it. This is MySQL's index merge intersection
+(`RowIDIntersectionIterator`) adapted to nbtree; matching by TID keeps the
+merge correct for a non-unique `sortcol` and for dead row versions still in
+the indexes. A matched row is fetched with `index_fetch_heap`, following the
+HOT chain as `index_getnext_slot` does.
 
-Under EvalPlanQual (a concurrent `UPDATE` during `SELECT … FOR UPDATE`) the
-node rechecks on the new row version what it guaranteed by construction —
-the equalities on the outer index columns and the inner index predicate —
-the way `Index Scan` rechecks `indexqualorig`.
+The TID group is bounded by `work_mem`. When a value has more inner entries,
+the group is dropped, every outer row of that value is fetched and the inner
+index's conditions — its equalities and its predicate — are checked on the
+row. Under EvalPlanQual the node rechecks the same conditions on the new row
+version, as `Index Scan` rechecks `indexqualorig`.
 
 ## Example
 
-One million orders of 200 customers. Recent orders are live; deleted orders
-are old ones, every fifth among the first 400,000 ids. The data is
-deterministic, so the counters below are exactly what you get; this example is
-also the regression test `leapfrog_example`.
+One million orders of 200 customers; recent orders are live, one in five of the
+oldest 400,000 is deleted. The data is deterministic, so the counters below are
+exactly what you get; this example runs as the regression test
+`leapfrog_example`.
 
 ```sql
 CREATE EXTENSION leapfrog;   -- SQL wrapper
@@ -120,21 +160,18 @@ CREATE TABLE orders (
     payload     text
 );
 INSERT INTO orders
-SELECT g, g % 200,
-       CASE WHEN g <= 400000 AND g % 5 = 0 THEN '2026-01-01'::timestamptz END,
+SELECT g, abs(hashint8(g)) % 200,
+       CASE WHEN g <= 400000 AND abs(hashint8(g * 7 + 3)) % 5 = 0
+            THEN '2026-01-01'::timestamptz END,
        repeat('x', 100)
-FROM generate_series(1, 1000000) g;
+FROM generate_series(1, 1000000::bigint) g;
 
 CREATE INDEX idx_orders_customer_id ON orders (customer_id, id);
 CREATE INDEX idx_orders_active_id   ON orders (id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_orders_deleted_id  ON orders (id) WHERE deleted_at IS NOT NULL;
 VACUUM ANALYZE orders;
-```
 
-The latest 100 deleted orders of one customer. The planner picks the node by
-cost, without `leapfrog.force`:
-
-```sql
+SET random_page_cost = 1.1;   -- the usual value for SSDs and data in memory
 EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
 SELECT * FROM orders
 WHERE customer_id = 100 AND deleted_at IS NOT NULL
@@ -142,84 +179,64 @@ ORDER BY id DESC LIMIT 100;
 ```
 
 ```text
- Limit (actual time=0.235..0.559 rows=100.00 loops=1)
-   Buffers: shared hit=128
-   ->  Custom Scan (Index Merge Intersect) on orders (actual time=0.234..0.546 rows=100.00 loops=1)
+ Limit (actual time=0.193..2.090 rows=100.00 loops=1)
+   Buffers: shared hit=165
+   ->  Custom Scan (Index Merge Intersect) on orders (actual time=0.192..2.072 rows=100.00 loops=1)
          Outer Index: idx_orders_customer_id
          Inner Index: idx_orders_deleted_id
-         Outer Entries Read: 3100
-         Inner Entries Read: 3982
+         Outer Entries Read: 1545
+         Inner Entries Read: 20305
          Matched TIDs: 100
          Heap Fetches: 100
          Peak Group Memory: 96 B
-         Buffers: shared hit=128
- Planning Time: 0.084 ms
- Execution Time: 0.591 ms
+         Skips: 1
+         Buffers: shared hit=165
+ Planning Time: 0.150 ms
+ Execution Time: 2.142 ms
 ```
 
-The node walks both indexes from the newest `id` down. The outer side skips
-the customer's 3,000 recent live orders by reading index entries only; then
-the two streams meet, and exactly the 100 rows returned are fetched from the
-heap.
+The customer's ~1,500 recent orders are live; the outer side reads past them
+and then skips once, straight to the deleted range. Exactly the 100 returned
+rows are fetched from the heap.
 
-The same query with `BitmapAnd` (`SET leapfrog.enabled = off; SET
+With the default `random_page_cost = 4` the planner keeps the stock plan, an
+`Index Scan` on the partial index that filters the customer on every deleted
+row. The same query with `BitmapAnd` (`SET leapfrog.enabled = off; SET
 enable_indexscan = off;`):
 
 ```text
- Limit (actual time=8.407..8.427 rows=100.00 loops=1)
-   Buffers: shared hit=2242
-   ->  Sort (actual time=8.406..8.414 rows=100.00 loops=1)
+ Limit (actual time=10.434..10.462 rows=100.00 loops=1)
+   Buffers: shared hit=621
+   ->  Sort (actual time=10.432..10.444 rows=100.00 loops=1)
          Sort Key: id DESC
          Sort Method: top-N heapsort  Memory: 76kB
-         Buffers: shared hit=2242
-         ->  Bitmap Heap Scan on orders (actual time=6.312..7.942 rows=2000.00 loops=1)
+         ->  Bitmap Heap Scan on orders (actual time=9.812..10.271 rows=393.00 loops=1)
                Recheck Cond: ((customer_id = 100) AND (deleted_at IS NOT NULL))
-               Heap Blocks: exact=2000
-               Buffers: shared hit=2242
-               ->  BitmapAnd (actual time=5.954..5.955 rows=0.00 loops=1)
-                     Buffers: shared hit=242
-                     ->  Bitmap Index Scan on idx_orders_customer_id (actual time=0.993..0.993 rows=5000.00 loops=1)
+               Heap Blocks: exact=379
+               ->  BitmapAnd (actual time=9.666..9.668 rows=0.00 loops=1)
+                     ->  Bitmap Index Scan on idx_orders_customer_id (actual time=1.583..1.583 rows=5054.00 loops=1)
                            Index Cond: (customer_id = 100)
-                           Index Searches: 1
-                           Buffers: shared hit=22
-                     ->  Bitmap Index Scan on idx_orders_deleted_id (actual time=4.688..4.688 rows=80000.00 loops=1)
-                           Index Searches: 1
-                           Buffers: shared hit=220
- Planning Time: 0.102 ms
- Execution Time: 8.642 ms
+                     ->  Bitmap Index Scan on idx_orders_deleted_id (actual time=7.681..7.681 rows=80120.00 loops=1)
+ Execution Time: 10.815 ms
 ```
 
-`BitmapAnd` cannot stop at 100 rows: it reads all 80,000 entries of the
-partial index, fetches all 2,000 matching rows and sorts them.
+`BitmapAnd` cannot stop at 100 rows: it reads all 80,120 entries of the partial
+index, fetches all 393 matching rows and sorts them.
 
-All four plans for this query (warm cache, median of three runs on a laptop;
-the counters are exact, the timings are indicative):
+All four plans for this query (warm cache; the counters are exact, the timings
+are from a laptop and vary up to 2× between runs):
 
-| Plan | Time | Buffers | Index entries read | Heap rows fetched | Sort |
-|---|---|---|---|---|---|
-| **Index Merge Intersect** (planner's choice) | **0.58 ms** | **128** | 3,100 + 3,982 | **100** | no |
-| Index Scan on `(id) WHERE deleted_at IS NOT NULL` + filter (stock planner's choice) | 0.68 ms | 383 | 3,981 | 3,981 | no |
-| Index Scan on `(customer_id, id)` + filter | 1.58 ms | 3,115 | 3,100 | 3,100 | no |
-| BitmapAnd + Bitmap Heap Scan | 9.6 ms | 2,242 | 5,000 + 80,000 | 2,000 | top-N |
+| Plan | Time | Buffers | Heap rows fetched | Sort |
+|---|---|---|---|---|
+| **Index Merge Intersect** (planner's choice at `random_page_cost = 1.1`) | **2.1 ms** | **165** | **100** | no |
+| Index Scan on `(id) WHERE deleted_at IS NOT NULL` + filter (choice at the default `4`) | 4.3–8.1 ms | 1,957 | 20,304 | no |
+| Index Scan on `(customer_id, id)` + filter | 2.5 ms | 3,133 | 3,554 | no |
+| BitmapAnd + Bitmap Heap Scan | 10.8 ms | 621 | 393 | top-N |
 
-Where the node does **not** win, said plainly:
-
-- Without `LIMIT` the whole result is needed, and both plans fetch all 2,000
-  rows with the same 2,242 buffers: `BitmapAnd` + Sort 8.8 ms, the node
-  7.2 ms. Their estimates are within about 10 % of each other, so the planner
-  picks one or the other depending on the `ANALYZE` sample.
-- With 1,000 customers instead of 200 (1,000 orders each) the planner chooses
-  `BitmapAnd` (3.0 ms, 626 buffers) even for `LIMIT 100`, although the node
-  under `force` takes 1.55 ms and 162 buffers: the cost model misses this one
-  (see Known issues).
-- The stock planner is already decent in this example (0.68 ms). The gap grows
-  when the matches are farther away; see [BENCHMARKS.md](BENCHMARKS.md) for
-  35–166× cases.
-
-To see the node where it loses on cost:
+To see the node where the planner does not pick it:
 
 ```sql
-SET leapfrog.force = on;   -- diagnostics only, not for production
+SET leapfrog.force = on;   -- diagnostics, not for production
 ```
 
 ## Compared with Index Scan and BitmapAnd
@@ -229,8 +246,9 @@ SET leapfrog.force = on;   -- diagnostics only, not for production
 | `ORDER BY` order | kept | lost, needs a Sort | kept |
 | Early exit on `LIMIT` | yes | no: both indexes are read completely | yes |
 | Heap visits | every row of one index | intersection only | intersection only |
+| Index entries read | the rows of one index | all entries of both | both streams up to the limit, gaps skipped |
 | Memory | O(1) | bitmaps of both indexes | TID group of one value, ≤ `work_mem` |
-| Wins when | matches are frequent | the whole result is needed, indexes are small | matches are rare and far away, there is a `LIMIT` |
+| Wins when | matches are frequent | the whole result is needed | matches are sparse and there is a `LIMIT` |
 
 ## Requirements
 
@@ -326,17 +344,26 @@ until the session ends, and `DROP EXTENSION` does not remove it. To switch it
 off use `SET leapfrog.enabled = off` (or `postgresql.conf`, or
 `ALTER DATABASE … SET`).
 
+Upgrade the library with `make install` (or a package manager), never by
+copying over the installed `leapfrog.so`: overwriting a shared library in place
+crashes every backend that has it loaded, as for any C extension. `install`
+replaces the file instead of rewriting it.
+
 ## Settings
 
 | Setting | Default | Context | Meaning |
 |---|---|---|---|
 | `leapfrog.enabled` | `on` | `USERSET` | The planner offers the Index Merge Intersect node and picks it by cost. `off` disables the hook completely. |
-| `leapfrog.force` | `off` | `USERSET` | The node's paths get zero cost; whenever a suitable index pair exists the node is chosen (the counterpart of MySQL's `INDEX_MERGE` hint). The plan-time check of the group estimate against `work_mem` is skipped as well. **Diagnostic setting**: it can make a query many times slower. |
+| `leapfrog.force` | `off` | `USERSET` | The node is preferred over every other plan whenever a suitable index pair exists (the counterpart of MySQL's `INDEX_MERGE` hint); among several index pairs the cheapest still wins. The plan-time check of the group estimate against `work_mem` is skipped as well. **Diagnostic setting**: it can make a query many times slower. |
 
-Also relevant: `work_mem` (TID group limit; when the estimate exceeds it at
-plan time the path is not offered), `random_page_cost`, `seq_page_cost`,
-`cpu_*_cost`, `effective_cache_size` (through `index_pages_fetched`), and the
-`enable_*` settings of the other nodes.
+The node is costed with PostgreSQL's own page and CPU costs, so the usual
+tuning applies. In particular, with the default `random_page_cost = 4` (spinning
+disks) the planner prefers reading many heap rows sequentially to reading a few
+at random, and rarely picks the node; with `random_page_cost = 1.1`, the usual
+value for SSDs and data in memory, it picks the node where it reads far fewer
+rows. Also relevant: `work_mem` (TID group limit), `seq_page_cost`,
+`cpu_*_cost`, `effective_cache_size` and the `enable_*` settings of other
+nodes.
 
 ## Reading EXPLAIN
 
@@ -344,12 +371,13 @@ plan time the path is not offered), `random_page_cost`, `seq_page_cost`,
 Custom Scan (Index Merge Intersect) on orders
   Filter: (payload <> 'x'::text)
   Outer Index: idx_orders_customer_id
-  Inner Index: idx_orders_active_id
-  Outer Entries Read: 1610423
-  Inner Entries Read: 251007
-  Matched TIDs: 1000
-  Heap Fetches: 1000
+  Inner Index: idx_orders_deleted_id
+  Outer Entries Read: 1545
+  Inner Entries Read: 20305
+  Matched TIDs: 100
+  Heap Fetches: 100
   Peak Group Memory: 96 B
+  Skips: 1                  -- shown only when non-zero
   Group Overflows: 0        -- shown only when non-zero
   Rows Checked by Predicate: 0
 ```
@@ -357,24 +385,19 @@ Custom Scan (Index Merge Intersect) on orders
 | Field | Meaning |
 |---|---|
 | `Outer Index` / `Inner Index` | the chosen pair; separate properties in `FORMAT JSON/YAML/XML`. |
-| `Filter` | conditions the node checks on the row. Equalities of the outer index and conditions implied by the inner predicate are not in `Filter` (like `Index Cond` of an Index Scan); the exception is the target relation of `UPDATE/DELETE/SELECT FOR UPDATE`, where they are kept for EvalPlanQual. |
-| `Outer Entries Read` | entries read from the outer index. |
-| `Inner Entries Read` | entries read from the inner index. |
+| `Filter` | conditions the node checks on the row. The equalities of both indexes and conditions implied by the inner predicate are not in `Filter` (like `Index Cond` of an Index Scan); the exception is the target relation of `UPDATE/DELETE/SELECT FOR UPDATE`, where predicate-implied conditions are kept for EvalPlanQual. |
+| `Outer Entries Read` / `Inner Entries Read` | entries read from each index, including dead entries with a NULL sort value that are skipped. |
 | `Matched TIDs` | entries found by TID in both indexes. |
 | `Heap Fetches` | `index_fetch_heap` calls (including HOT chain continuations). |
 | `Rows Removed by Filter` | the standard counter of rows dropped by `Filter`. |
 | `Peak Group Memory` | largest capacity of the TID group array, bytes. |
-| `Group Overflows` | how many times a value's group exceeded `work_mem` and the node fell back to the predicate check. |
-| `Rows Checked by Predicate` | outer entries of overflowed groups fetched from the heap and checked against the inner index predicate. |
+| `Skips` | re-descents of a lagging scan to the other side's value. |
+| `Group Overflows` | how many times a value's group exceeded `work_mem` and the node fell back to checking the inner conditions on the row. |
+| `Rows Checked by Predicate` | outer rows of overflowed groups fetched and checked that way. |
 
 Counters are summed over all rescans of the node (inside a Nested Loop they
 are the total over iterations; `loops` shows their number). Without
-`ANALYZE` the node does not open its scans (`EXEC_FLAG_EXPLAIN_ONLY`) and
-prints no counters.
-
-The ratio of `Outer Entries Read + Inner Entries Read` to `Heap Fetches`
-shows where the node wins: index entries are cheap, heap visits are
-expensive.
+`ANALYZE` the node does not open its scans and prints no counters.
 
 ## Tests
 
@@ -390,61 +413,55 @@ make bench-smoke           # tiny run of the benchmark harness
 ```
 
 The regression tests need a superuser (as `pg_regress` normally runs):
-`leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` changes
-the page cost of `pg_default` for one check and resets it.
+`leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` changes the
+page cost of `pg_default` for one check and resets it.
 
 Regression tests (`sql/`):
 
 | File | What it checks |
 |---|---|
-| `leapfrog_setup` | `CREATE EXTENSION`, GUCs, the helper functions `lf_check`, `lf_plan`, `lf_counters` |
-| `leapfrog_basic` | ASC/DESC, `LIMIT 1/100`, no `LIMIT`, empty and full intersection, several equality columns, a predicate with several conditions, cases where the node **must not** be offered (DESC index, nullable and `int4` columns, `IN`, range, no pair, partitioned table, `NOT NULL … NOT VALID`) |
-| `leapfrog_duplicates` | non-unique sort column, matching by TID, key monotonicity, dead entries after `UPDATE/DELETE` without `VACUUM` |
-| `leapfrog_overflow` | `work_mem = 64kB`: the path is not offered by estimate; under `force` — `Group Overflows`, predicate fallback without losing or duplicating rows |
-| `leapfrog_parameters` | generic prepared statement (`$1`), `LATERAL` with one and two nestloop parameters, join through an equivalence class, `NULL` parameter, repeated ReScan, InitPlan, plan cache invalidation on `DROP INDEX`, no node on the nullable side of an outer join |
-| `leapfrog_mvcc` | HOT chains, rows moving between partial indexes, changes of the merge column and of an equality column, `REPEATABLE READ`, `FOR UPDATE/SHARE`, `UPDATE/DELETE` driven by the node, scrollable cursor, dead index entries with a NULL merge column |
-| `leapfrog_memory` | peak backend memory of the predicate fallback (Linux, reads `/proc/self/status`) |
-| `leapfrog_example` | the README example verbatim: the planner's choice, the stock Index Scan and `BitmapAnd` plans with their counters |
-| `leapfrog_explain` | every `EXPLAIN` format, `ANALYZE` counters, the node chosen **by cost** without `force`, back to the stock plan with `enabled = off`, each cost model input (heap correlation, filter cost, tablespace page cost, loop count) moving the estimate in the right direction |
+| `leapfrog_setup` | `CREATE EXTENSION`, GUCs, the helpers `lf_check`, `lf_plan`, `lf_counters` |
+| `leapfrog_basic` | ASC/DESC, `LIMIT`, empty and full intersection, several equality columns, a predicate with several conditions, cases where the node must not be offered (DESC index, nullable and `int4` columns, `IN`, range, no pair, partitioned table, `NOT NULL … NOT VALID`) |
+| `leapfrog_duplicates` | non-unique sort column, matching by TID, key monotonicity, dead entries |
+| `leapfrog_overflow` | `work_mem = 64kB`: no path by estimate; under `force`, the fallback without losing or duplicating rows |
+| `leapfrog_parameters` | prepared statements, `LATERAL` with one and two nestloop parameters, joins through an equivalence class, `NULL` parameter, ReScan, InitPlan, plan cache invalidation, no node on the nullable side of an outer join |
+| `leapfrog_mvcc` | HOT chains, rows moving between partial indexes, changes of the merge and equality columns, `REPEATABLE READ`, `FOR UPDATE/SHARE`, cursors, dead index entries with a NULL merge column |
+| `leapfrog_memory` | peak backend memory of the overflow fallback (Linux) |
+| `leapfrog_explain` | every `EXPLAIN` format, `ANALYZE` counters, each cost model input moving the estimate in the right direction |
+| `leapfrog_example` | the example above verbatim, with the planner's choice at both page costs |
+| `leapfrog_btree_pair` | two ordinary indexes `(customer_id, id)` and `(product_id, id)`: both directions, parameters on either side, partial index with an equality prefix, pairs that must not be formed, the overflow fallback checking the inner equality |
+| `leapfrog_skip` | skip-ahead on both sides, both directions, non-unique sort column, rescans, dead entries |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
 (and row positions when the sort key is unique) and reports whether the plan
-contained the `Custom Scan` — a test cannot pass by accident through a plain
-Index Scan.
+contained the `Custom Scan`, so a test cannot pass by accident through a plain
+Index Scan. Every fix and feature has a test that fails without it; the
+reverted variants were built and run.
 
 Isolation tests (`tests/isolation/specs/`):
 
 | File | Scenarios |
 |---|---|
-| `leapfrog_concurrent_update` | EvalPlanQual under `READ COMMITTED`: `customer_id` change, `deleted_at` in both directions, HOT update, `DELETE`, `id` change, rollback. Every permutation runs both with the node and with the stock plan under the same interleaving. |
-| `leapfrog_predicate_flip` | a row moves between the partial indexes under `REPEATABLE READ` and `READ COMMITTED` |
-| `leapfrog_hot_update` | three HOT updates in a row, a reader with an old snapshot, `pg_stat_xact_user_tables.n_tup_hot_upd` |
-| `leapfrog_delete` | `DELETE` and owner change, old/new snapshot, `VACUUM` |
-| `leapfrog_repeatable_read` | stable repeated reads, `SERIALIZABLE`, `FOR UPDATE` on a changed row → `could not serialize access` |
+| `leapfrog_concurrent_update` | EvalPlanQual under `READ COMMITTED`: changes of the equality column, `deleted_at` in both directions, HOT update, `DELETE`, the sort column, rollback; each with the node and with the stock plan |
+| `leapfrog_btree_pair` | EvalPlanQual for two ordinary indexes: the inner equality and the outer equality failing on the new version |
+| `leapfrog_predicate_flip` | a row moving between the partial indexes under `REPEATABLE READ` and `READ COMMITTED` |
+| `leapfrog_hot_update` | three HOT updates in a row, a reader with an old snapshot |
+| `leapfrog_delete` | `DELETE` and owner change, old and new snapshots, `VACUUM` |
+| `leapfrog_repeatable_read` | stable repeated reads, `SERIALIZABLE`, `FOR UPDATE` on a changed row |
 
 ## Benchmarks
 
 ```bash
-bash tests/performance/run.sh                    # 100k and 1M rows, uniform and skewed, 1/10/50/90 % deleted
+bash tests/performance/write_bench.sh            # storage, writes and reads for 12 filter columns
+bash tests/performance/run.sh                    # reads: 3 strategies, uniform and skewed, 1/10/50/90 % deleted
+BENCH_RANDOM_PAGE_COST=1.1 bash tests/performance/run.sh
 BENCH_SIZES="10000000" bash tests/performance/run.sh
-BENCH_SIZES="100000000" BENCH_DELETED="10" bash tests/performance/run.sh   # heavy profile, manual
 ```
 
-Three strategies on the same table (indexes are rebuilt between strategies):
-
-- **A** stock PostgreSQL: `(customer_id, id)`;
-- **B** PostgreSQL + leapfrog: `(customer_id, id)` + `(id) WHERE deleted_at IS NULL` + `(id) WHERE deleted_at IS NOT NULL`; `B` is the planner's choice, `B*` is `leapfrog.force = on`;
-- **C** dedicated partial indexes `(customer_id, id) WHERE deleted_at IS [NOT] NULL`.
-
-For each: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` after a warm-up,
-`BENCH_REPEATS` repetitions (5 by default), fixed `setseed`. Measured:
-execution and planning time, shared hit/read, index entries read and
-`Heap Fetches` of the node, rows returned, index size. Queries: three
-customers (largest, median, smallest) × live/deleted × `LIMIT 1/100/1000/none`.
-Results go to `results.csv` and `plans.jsonl`; `summarize.sh` prints a summary.
-
-Measured results: [BENCHMARKS.md](BENCHMARKS.md).
+Both scripts record `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` after a warm-up,
+with a fixed seed, into CSV files; `summarize.sh` prints a summary. Results:
+[BENCHMARKS.md](BENCHMARKS.md).
 
 ## Cost model
 
@@ -452,8 +469,7 @@ The structure follows MySQL's `ROR_intersect_plan::add`; the components are
 PostgreSQL cost functions:
 
 ```text
-run     = index_read_cost(outer, entries matching the equalities)
-        + index_read_cost(inner, all entries of the partial index)
+run     = merge_read_cost(outer entries, inner entries)
         + group_cost(outer + inner, log2(group size))
         + heap_fetch_cost(rows)
         + rows × (cpu_tuple_cost + qual cost + tlist cost)
@@ -463,184 +479,117 @@ startup = descent into both B-trees (as in btcostestimate)
 total   = startup + run
 ```
 
-- Index pages: `random_page_cost` of the index's tablespace per page; for a
-  parameterized path inside a Nested Loop, the Mackert–Lohman estimate
-  (`index_pages_fetched`) divided by the number of repetitions, as in
-  `genericcostestimate`.
-- Heap pages: interpolation between the perfectly correlated and the
-  uncorrelated case by the squared correlation of the sort column
-  (`pg_statistic`, `STATISTIC_KIND_CORRELATION`), as in `cost_index`. Rows are
-  fetched in `sortcol` order, so the correlation of that column decides how
-  scattered the heap visits are.
-- `LIMIT` is handled by the planner the usual way:
-  `startup + (total − startup) × fraction`; the model is linear.
+- **Index entries**: each side's entries are estimated from its equalities
+  (`clauselist_selectivity`); a partial index without equalities is read in
+  full. `merge_read_cost` charges the denser stream at most 1,024 entries per
+  entry of the sparser one plus a re-descent when the gap is longer
+  (skip-ahead), with index pages as in `genericcostestimate`
+  (`random_page_cost` of the index's tablespace, Mackert–Lohman for repeated
+  scans in a Nested Loop).
+- **Heap pages**: as `cost_index` charges them, interpolated by the squared
+  correlation that `btcostestimate` uses for an Index Scan on the outer index
+  (its leading column, ×0.75 for a multicolumn index). The node visits the
+  same heap rows in the same order as that Index Scan, so both are charged
+  alike; the node wins only by fetching fewer rows.
+- `LIMIT` is applied by the planner: `startup + (total − startup) × fraction`.
 
-**Documented assumptions** (not derived from statistics): matches are spread
-evenly along both indexes; a TID group has the average size
-(`inner.tuples / ndistinct(sortcol)`). With strong skew (a customer's deleted
-rows only among old `id`s) one side reads far more than predicted; the stock
-model makes the same assumption for `Index Scan + Filter`, so neither side
-has a systematic advantage. Refining the estimate with MCV statistics is
-postponed (see [Roadmap](#roadmap)).
+**Documented assumptions**: matches are spread evenly along both indexes, and
+a TID group has the average size (`inner entries / ndistinct(sortcol)`). Real
+data is often skewed — deleted rows only among old ids — and then the model
+underestimates how much skip-ahead saves; see Known limitations.
 
 ## Known limitations and planned improvements
 
-The goal of the project is to replace many specialised composite indexes
-with fewer general ones — one `(filter_column, id)` index per filter plus a
-few partial indexes shared by the table — so that writes maintain fewer
-indexes and less storage, while ordered, `LIMIT`-ed reads stay fast because
-the planner composes those indexes at query time. Version 0.0.1 covers one
-shape of that composition. This section lists, as of the current code, what
-it does not do yet and what is planned; nothing below the "Current
-limitations" list is implemented.
-
 ### Current limitations
 
-Verified against `src/leapfrog.c` and the test suites.
+Verified against `src/leapfrog.c` and the tests.
 
 **Index pairs**
 
-- Exactly two streams. The outer index is `(k1, …, kN, sortcol)` with an
-  equality on every `kI` (`find_outer_candidate`); the inner index must be a
-  **partial** index whose first column is `sortcol` (`is_inner_index`
-  requires `indpred != NIL`). Two ordinary composite indexes such as
-  `(customer_id, id)` and `(product_id, id)` cannot be intersected.
-- The outer index has at least two key columns and `sortcol` is its last key
-  column; expression columns are not accepted.
+- Exactly two streams; a third condition is checked as a `Filter` on the heap
+  row.
+- The outer index ends with `sortcol` and has at least one equality column; the
+  inner one starts with equality columns, then `sortcol`, and must narrow the
+  outer stream down (be partial, or add an equality column).
 
 **Data types and conditions**
 
 - `bigint` columns only, `integer_ops` operator family only
-  (`is_usable_btree`): the scan keys are built with `int8` operators
-  (`intersect_start`). `int2`/`int4` constants and parameters are accepted
-  (`is_int8_equality`), `int4`, `uuid` and other column types are not.
-- Equality (`=`) only on the outer columns. `IN (…)`, ranges and `IS NULL`
+  (`is_usable_btree`). `int2`/`int4` constants and parameters are accepted, but
+  `int4`, `uuid` and other column types are not.
+- Equality (`=`) only on the equality columns; `IN (…)`, ranges and `IS NULL`
   are not supported.
 - The sort column must be `NOT NULL` according to the planner
-  (`RelOptInfo.notnullattnums`); a constraint added `NOT VALID` does not count
-  until `VALIDATE CONSTRAINT`.
-- Both indexes: nbtree v4, `ASC` columns, the operator family of the query's
-  sort key. `ORDER BY … DESC` is served by a backward scan.
+  (`RelOptInfo.notnullattnums`); dead index entries with NULL are skipped.
+- Both indexes: nbtree v4, `ASC` columns. `ORDER BY … DESC` is a backward scan.
 
-**Planner**
+**Planner and cost model**
 
-- Candidates are generated for every ordered pair of the relation's indexes
-  (two nested loops in `intersect_set_rel_pathlist`), and every pair that
-  passes the cheap checks runs `estimate_num_groups`, a `pg_statistic`
-  lookup and `_bt_metaversion` (which opens the index). The cost grows with
-  the square of the number of indexes; planning time has not been measured
-  on tables with many indexes.
-- Only the first key of the query's `ORDER BY` (`root->query_pathkeys`) is
-  considered; orders that would help a merge join, a window or an ordered
-  aggregate are not.
-- For a parameterized path the first suitable equality per column is used
-  (`find_equality_clause`); alternatives through other members of an
-  equivalence class are not offered as separate paths.
-- One relation per node; partitioned tables, inheritance children and
-  materialized views are rejected (`relkind = 'r'`, `RELOPT_BASEREL`). No
-  parallel execution (`parallel_safe = false`).
+- Candidates are every ordered pair of the relation's indexes; each pair that
+  passes the cheap checks runs `estimate_num_groups`, a statistics lookup and
+  `_bt_metaversion`. Planning time grows with the square of the number of
+  indexes; in the write benchmark (14 indexes) planning took 0.07–0.17 ms with
+  the extension and 0.06–0.10 ms without it. Tables with many more indexes
+  were not measured.
+- Only the first key of the query's `ORDER BY` is considered.
+- The cost model is conservative. On the 1M-row benchmark (192 queries) it
+  never picked the node where it was slower, at either page cost — and it did
+  not pick it at all: in 38–48 queries the forced node was more than 15 %
+  faster than the planner's choice. In the largest of these misses the stock
+  planner itself chose a poor `BitmapAnd` (12 ms where another stock plan on the
+  same indexes takes 1.6 ms); the node's own clear misses are 1.5–3× on
+  deleted rows of skewed data and on two ordinary indexes.
+- One relation per node; no partitioned tables, no parallel execution.
 
 **Executor and memory**
 
-- The lagging stream is always read sequentially (`intersect_next`). When
-  the matches are far apart, both indexes are read over the whole gap; in the
-  benchmark one `LIMIT 1` query read 30,026 outer entries to return one row.
-- The inner entries of a value are materialised (`collect_group`): an array
-  of 6-byte TIDs that doubles up to `work_mem`, sorted with `qsort`, then
-  probed with `bsearch` for every outer entry of the value. The array keeps
-  its peak size until the end of the scan.
-- A group larger than `work_mem` falls back to fetching every outer row of
-  the value and checking the inner predicate on it (`Group Overflows`):
-  correct (tests `leapfrog_overflow`, `leapfrog_memory`), but every outer row
-  of that value costs a heap fetch.
-
-**Cost model**
-
-- Matches are assumed to be spread evenly along both indexes, and a `LIMIT`
-  is served by a proportional fraction of the total cost. Extended statistics
-  and the distribution of matches along `sortcol` are not used.
-- Measured effect: in the 1M-row benchmark the model never picked the node
-  where it was clearly slower, but it missed 14 of 192 queries where the
-  forced node was clearly faster, and it misses the 1,000-customer variant of
-  the README example (see [BENCHMARKS.md](BENCHMARKS.md)).
+- The inner entries of a value are materialised (`collect_group`): 6-byte TIDs,
+  doubling up to `work_mem`, `qsort` and `bsearch`. A group larger than
+  `work_mem` falls back to fetching every outer row of the value.
+- The skip threshold (1,024 entries) is fixed; it was chosen from buffer counts
+  on 1M-row tables, where 32 read 2–3× more buffers than not skipping.
 
 **Tests and benchmarks**
 
-- Concurrency is covered for `UPDATE` of every relevant column, `DELETE`,
-  HOT updates, `VACUUM` between statements, `READ COMMITTED`, `REPEATABLE
-  READ`, `SERIALIZABLE` and EvalPlanQual. Not covered yet: concurrent
-  `INSERT` under `READ COMMITTED`, EvalPlanQual on a row that came through the
-  overflow fallback, concurrent changes inside large duplicate groups, and
-  `VACUUM` running while a scan is in progress.
-- The benchmark measures index size and `SELECT` only. Write throughput,
-  WAL volume and planning time — the other half of the project's goal — are
-  not measured yet.
-
-**Other**
-
-- No instrumentation outside `EXPLAIN ANALYZE`.
-- The library is never unloaded; switch it off with `leapfrog.enabled = off`.
+- Not covered yet: concurrent `INSERT` under `READ COMMITTED`, EvalPlanQual
+  through the overflow fallback, `VACUUM` while a scan is in progress, and an
+  assert-enabled (`--enable-cassert`) server build.
+- Benchmarks ran on one laptop with data in memory; timings vary up to 2×
+  between runs. Cold-cache and 10M+ row runs have not been made.
 
 ### Roadmap
 
-The items below are plans. The examples use a neutral schema: `orders` with
-`customer_id`, `product_id` and `deleted_at`.
+The examples use a neutral schema: `orders` with `customer_id`, `product_id`
+and `deleted_at`.
 
-#### P1. Intersection of two ordinary B-tree indexes
+| Priority | Improvement | Status |
+|---|---|---|
+| P1 | Two ordinary B-tree indexes | **done** (unreleased): `(customer_id, id)` ∩ `(product_id, id)` |
+| P1 | Adaptive skip-ahead | **done** with a fixed threshold; per-query adaptive threshold open |
+| P1 | Cost model | partly: correlation as for the outer Index Scan, skip-aware reads; distribution of matches along `sortcol` open |
+| P2 | N-way intersection | open |
+| P2 | Planner search | open |
+| P2 | Memory of non-unique keys | open |
+| P2 | Concurrency tests | partly (EPQ for both pair kinds); items above open |
+| P2 | Write and storage benchmarks | **done**: `write_bench.sh` |
+| P3 | More types and conditions | open |
 
-Today the inner side must be a partial index starting with the sort column.
-The target is two independent composite indexes:
+#### Cost model: distribution of matches along the sort column
 
-```sql
-CREATE INDEX idx_orders_customer ON orders (customer_id, id);
-CREATE INDEX idx_orders_product  ON orders (product_id, id);
+The main reason for the misses above. Estimate how many entries each stream
+reads before `LIMIT N` matches from where the conditions' rows lie along
+`sortcol` — histograms of `sortcol` per condition, MCV lists, extended
+statistics (`CREATE STATISTICS … (dependencies, mcv)`) — instead of an even
+spread, and cost skip-ahead on the real gaps. Acceptance: on the benchmark
+matrix, at both page costs, no case where the node is chosen and is clearly
+slower, and fewer missed cases than the 38–48 of 192 today.
 
-SELECT * FROM orders
-WHERE customer_id = 100 AND product_id = 200
-ORDER BY id DESC LIMIT 100;
-```
+#### Adaptive skip-ahead
 
-With an equality on its leading column, each scan returns its entries in
-`id` order, so the existing merge applies. Needed: equality scan keys on the
-inner side (today it is opened with none), the inner equalities in the
-EvalPlanQual recheck and in the qual stripping (`intersect_scan_qual`), and
-costing of the inner side as a selective scan rather than a full read of a
-partial index. Matching by TID, both scan directions and non-unique `id`
-values must work as they do now. This is the main step towards fewer
-specialised composite indexes.
+Choose the threshold per scan from the index's tree height and entries per
+leaf page, and stop skipping on a scan where skips did not save entries.
 
-#### P1. Cost model
-
-- Estimate how many entries of each stream must be read to produce
-  `LIMIT N`, from the distribution of each condition along `sortcol` rather
-  than an even spread: histograms of `sortcol` per condition, MCV lists, and
-  extended statistics (`CREATE STATISTICS … (dependencies, mcv)`) between the
-  filter columns and the predicate columns.
-- Separate the startup cost (entries read before the first match) from the
-  total cost, so that `LIMIT` is costed on the real shape of the gap.
-- Acceptance: on the benchmark matrix, including data where the filters are
-  correlated or anti-correlated with `sortcol`, the node is never chosen where
-  a stock plan is clearly cheaper, and the number of missed cases (14 of 192
-  today) goes down.
-
-#### P1. Adaptive skip-ahead
-
-When one stream is far behind, re-position it instead of reading the gap:
-
-```text
-outer: 1, 2, 3, 4, … 900000
-inner: 900000, 900001, 900002
-```
-
-The mechanism available to an extension is `index_rescan` with an extra
-scan key `sortcol >= value` (`<=` for a backward scan); it costs one descent
-of the B-tree, about `tree_height` page reads. Plan: read sequentially by
-default, and switch to a re-descent once the lagging side has read more than
-about a leaf page of entries without meeting the other side; record the
-number of re-descents in `EXPLAIN ANALYZE`. This is also what makes the name
-"leapfrog" accurate.
-
-#### P2. N-way intersection
+#### N-way intersection
 
 ```sql
 -- (customer_id, id), (product_id, id), (id) WHERE deleted_at IS NULL
@@ -649,70 +598,28 @@ WHERE customer_id = 100 AND product_id = 200 AND deleted_at IS NULL
 ORDER BY id DESC LIMIT 100;
 ```
 
-Generalise the merge to k sorted streams (advance the minimum, match by TID
-across all of them). In the planner, bound the combinations: a maximum
-number of streams, and streams added greedily by selectivity rather than all
-subsets.
+Generalise the merge to k streams (advance the minimum, match by TID across
+all of them), with the planner adding streams greedily by selectivity and a
+bound on their number.
 
-#### P2. Planner search
+#### Planner search
 
-Pre-filter indexes once per relation (leading column, operator family,
-`ASC`, NOT NULL), cache the group size, correlation and nbtree version per
-relation instead of per pair, consider useful pathkeys beyond the query's
-`ORDER BY`, and measure planning time on tables with 10, 20 and 50 indexes.
+Pre-filter indexes once per relation, cache group size, correlation and nbtree
+version per relation, consider useful pathkeys beyond the query's `ORDER BY`,
+and measure planning time with 10, 20 and 50 indexes.
 
-#### P2. Memory of non-unique keys
+#### Memory of non-unique keys
 
-Research a streaming match without materialising the group: when both
-streams return the TIDs of one value in TID order, a two-pointer merge needs
-no array. This holds for a forward scan of an index whose remaining key
-columns are all fixed by equality; whether it holds for backward scans and
-posting lists has to be verified against nbtree before relying on it. Also
-release the group array after an unusually large group.
+A streaming match without materialising the group when both streams return the
+TIDs of a value in TID order (a forward scan with all other key columns fixed;
+backward scans and posting lists to be verified against nbtree first).
 
-#### P2. Concurrency tests
+#### More types and conditions
 
-Add the cases listed above as not covered: concurrent `INSERT` under `READ
-COMMITTED`, EvalPlanQual through the overflow fallback, concurrent changes
-inside large duplicate groups, `VACUUM` during a scan, and dead entries with
-`NULL` under concurrency. Criterion: for the same snapshot the node returns
-exactly the rows of the stock plans.
-
-#### P2. Write and storage benchmarks
-
-Compare on the same data and equivalent queries:
-
-1. many specialised composite indexes;
-2. fewer general indexes + leapfrog;
-3. the same general indexes, stock PostgreSQL.
-
-Measure total index size, `INSERT`/`UPDATE`/`DELETE` rows per second, WAL
-generated, `SELECT` latency, planning time and heap fetches. This is the
-evidence for the write-side half of the project's goal.
-
-#### P3. More types and conditions
-
-`int4`, `uuid` and other B-tree operator families through operators looked
-up from the index's operator family instead of fixed `int8` operators;
-`IN (…)` on an equality column as several outer scans merged in `sortcol`
-order; composite sort keys. A range on a leading outer column breaks the
-`sortcol` order of the outer stream, so it can only be supported as several
-per-value scans. Each item lands only with tests that compare it with the
-stock plans.
-
-### Priorities
-
-| Priority | Improvement | Main benefit |
-|---|---|---|
-| P1 | Two ordinary B-tree indexes | Fewer specialised composite indexes |
-| P1 | Better cost model | More reliable plan choice |
-| P1 | Adaptive skip-ahead | Faster reads on sparse intersections |
-| P2 | N-way intersection | More index reuse |
-| P2 | Planner search | Lower planning overhead |
-| P2 | Memory of non-unique keys | Predictable memory use |
-| P2 | Concurrency tests | Correctness evidence |
-| P2 | Write and storage benchmarks | Evidence for smaller indexes and faster writes |
-| P3 | More types and conditions | Broader applicability |
+`int4`, `uuid` and other B-tree operator families through operators looked up
+from the index's operator family; `IN (…)` as several outer scans merged in
+`sortcol` order; composite sort keys. A range on a leading column breaks the
+`sortcol` order and can only be supported as several per-value scans.
 
 ## Known issues
 
@@ -720,40 +627,30 @@ stock plans.
   the sort column of a row that `SELECT … FOR UPDATE` has already matched,
   PostgreSQL rechecks the search condition on the new version but not the
   order: the row is returned at its old position with the new `id`. Every
-  PostgreSQL plan behaves this way (`Index Scan` included); the isolation test
-  `leapfrog_concurrent_update` records identical output for the node and the
-  stock plan.
-- **Estimates under skew.** When a customer's deleted rows are concentrated
-  at one end of the `id` index, the model underestimates the entries read on
-  one side. `EXPLAIN ANALYZE` shows a large `Outer Entries Read` with a small
-  `Heap Fetches`; the node is correct but may be no faster than the stock plan.
-- **Missed opportunities.** In the 1M-row benchmark the model did not pick the
-  node in 14 of 192 queries where the forced node was clearly faster; see
-  [BENCHMARKS.md](BENCHMARKS.md).
-- `leapfrog.force` does not guarantee the node is chosen: the path may be
-  dropped for reasons other than cost (for example a parameterization the
-  join order cannot provide).
+  PostgreSQL plan behaves this way; `leapfrog_concurrent_update` records
+  identical output for the node and the stock plan.
+- **Misses of the cost model**, see above. `leapfrog.force` shows what the node
+  would do; it does not guarantee the node is chosen (a parameterization the
+  join order cannot provide, for example).
 
 ## Operational safety
 
 - Planner: the hook only adds paths through `add_path`; stock paths are never
   removed or changed. With `leapfrog.enabled = off` the hook returns
   immediately.
-- Executor: index scans are opened with the standard `index_beginscan` /
-  `index_rescan` / `index_getnext_tid` / `index_fetch_heap` and the query's
-  `es_snapshot`; visibility, HOT chains and `kill_prior_tuple` work as for
-  `Index Scan`.
-- Memory: the TID group array grows by doubling up to the `work_mem` limit and
-  never beyond; it is reused on `ReScan` and freed on `EndCustomScan`. Long
-  merges without matches call `CHECK_FOR_INTERRUPTS()` every 1024
-  iterations — `statement_timeout` and query cancellation work.
-- Plan cache: as for an `Index Scan`, creating or dropping either index
-  invalidates cached plans through its table (test `leapfrog_parameters`).
+- Executor: index scans use the standard `index_beginscan` / `index_rescan` /
+  `index_getnext_tid` / `index_fetch_heap` with the query's snapshot;
+  visibility, HOT chains and `kill_prior_tuple` work as for `Index Scan`.
+- Memory: the TID group array grows by doubling up to `work_mem` and never
+  beyond; the per-row context is reset after every check in the fallback
+  (`leapfrog_memory`). Long merges call `CHECK_FOR_INTERRUPTS()` every 1,024
+  iterations, so `statement_timeout` and cancellation work.
+- Plan cache: creating or dropping either index invalidates cached plans
+  through its table, as for an `Index Scan` (`leapfrog_parameters`).
 - The extension creates no tables, writes nothing to the catalog and needs no
-  superuser rights to be used (`CREATE EXTENSION` needs the right to create C
-  functions, as for any C extension).
-- `leapfrog.force` is `USERSET`: any user can slow down their own query; other
-  sessions are not affected.
+  superuser rights to be used.
+- Never overwrite the installed `leapfrog.so` in place; see
+  [Loading the library](#loading-the-library).
 
 ## License
 
