@@ -204,9 +204,10 @@ the counters are exact, the timings are indicative):
 
 Where the node does **not** win, said plainly:
 
-- Without `LIMIT` the whole result is needed. Here the planner keeps
-  `BitmapAnd` (8.8 ms); the node under `leapfrog.force` is close (7.2 ms) with
-  the same 2,242 buffers, since both fetch all 2,000 rows.
+- Without `LIMIT` the whole result is needed, and both plans fetch all 2,000
+  rows with the same 2,242 buffers: `BitmapAnd` + Sort 8.8 ms, the node
+  7.2 ms. Their estimates are within about 10 % of each other, so the planner
+  picks one or the other depending on the `ANALYZE` sample.
 - With 1,000 customers instead of 200 (1,000 orders each) the planner chooses
   `BitmapAnd` (3.0 ms, 626 buffers) even for `LIMIT 100`, although the node
   under `force` takes 1.55 ms and 162 buffers: the cost model misses this one

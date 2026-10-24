@@ -74,10 +74,9 @@ ORDER BY id DESC LIMIT 100 $$);
 ROLLBACK;
 RESET leapfrog.enabled;
 
--- Without LIMIT the whole result is needed and the planner keeps BitmapAnd.
-SELECT * FROM lf_plan_costs($$
-SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
-ORDER BY id DESC $$);
+-- Without LIMIT the whole result is needed.  The node and BitmapAnd + Sort
+-- are estimated within about 10 % of each other, so which one the planner
+-- picks depends on the ANALYZE sample and is not checked; the node's work is.
 SELECT * FROM lf_counters($$
 SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NOT NULL
 ORDER BY id DESC $$);
