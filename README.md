@@ -128,9 +128,15 @@ more indexes to intersect, called streams:
   the last column is the first sort key of the query;
 - one or more **inner** B-trees `(j1, …, jM, sortcol, …)` with an equality on
   every `jI`. With `M = 0` it must be a partial index whose predicate is
-  implied by the query (`(id) WHERE deleted_at IS NULL`); an ordinary index
-  must add an equality column no stream of the set has (`(product_id, id)`),
-  and a partial one a predicate no stream already implies.
+  implied by the query (`(id) WHERE deleted_at IS NULL`).
+
+Every stream of a set, the outer one included, must add a restriction the
+others do not enforce: an equality column no other stream has
+(`(product_id, id)` next to `(customer_id, id)`), or a predicate that the other
+streams' equalities and predicates together do not imply. So
+`(membership_id, id)` and `(membership_id, id) WHERE deleted_at IS NULL` never
+form a set — the partial index alone is the plan — and neither do `(kind, id)`
+with `kind = 2` and `(id) WHERE kind = 2`. A plain `(id)` never joins a set.
 
 The planner offers every pair of an outer and an inner candidate, then from
 the cheapest pair adds one stream at a time — the one that lowers the
@@ -592,9 +598,11 @@ Verified against `src/` and the tests.
   greedily: from the cheapest pair, the stream that lowers the cost the most,
   while one does. A set the greedy order never reaches is not considered.
 - The outer index ends with `sortcol` and has at least one equality column;
-  every inner one starts with equality columns, then `sortcol`, and must
-  narrow the set down (be partial with a predicate no stream implies, or add
-  an equality column no stream has).
+  every inner one starts with equality columns, then `sortcol`. Every stream
+  must add an equality column or a predicate the other streams do not
+  enforce; implication is proved with `predicate_implied_by`, so an
+  equivalent condition the prover cannot see through keeps a redundant
+  stream (it is then only costed, not wrong).
 - The stream conditions are assumed independent of each other inside the
   overlap of their sort ranges, as PostgreSQL assumes for `BitmapAnd`.
 

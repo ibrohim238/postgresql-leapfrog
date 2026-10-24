@@ -200,3 +200,53 @@ SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 
 RESET leapfrog.min_indexes;
 
 DROP TABLE lf_nway;
+
+-- Every stream of a set must add a restriction the others do not enforce:
+-- an equality column no other stream has, or a predicate the other streams'
+-- equalities and predicates do not imply.  Under leapfrog.force any set the
+-- planner may form shows up, so a redundant one would be visible here.
+CREATE TABLE lf_nway_red (
+	id bigint PRIMARY KEY,
+	membership_id bigint NOT NULL,
+	campaign_id bigint NOT NULL,
+	kind bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_nway_red
+SELECT g, g % 50, g % 7, g % 3, CASE WHEN g % 5 = 0 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 20000) g;
+CREATE INDEX lf_nway_red_membership ON lf_nway_red (membership_id, id);
+CREATE INDEX lf_nway_red_campaign ON lf_nway_red (campaign_id, id);
+CREATE INDEX lf_nway_red_kind ON lf_nway_red (kind, id);
+CREATE INDEX lf_nway_red_membership_live ON lf_nway_red (membership_id, id) WHERE deleted_at IS NULL;
+CREATE INDEX lf_nway_red_live ON lf_nway_red (id) WHERE deleted_at IS NULL;
+CREATE INDEX lf_nway_red_kind2 ON lf_nway_red (id) WHERE kind = 2;
+ANALYZE lf_nway_red;
+-- One condition: neither the primary key (id) nor (campaign_id, id), which
+-- has no equality, nor anything else narrows (membership_id, id) down.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_nway_red WHERE membership_id = 3 ORDER BY id DESC LIMIT 100 $$);
+-- (membership_id, id) WHERE deleted_at IS NULL alone enforces both
+-- conditions: (membership_id, id) adds nothing to it, nor does
+-- (id) WHERE deleted_at IS NULL, whose predicate it implies.  The pair that
+-- remains is (membership_id, id) and (id) WHERE deleted_at IS NULL, each
+-- adding one condition.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
+SELECT lf_check($$ SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
+-- The same with the pair gone: the partial index on both columns is the plan.
+BEGIN;
+DROP INDEX lf_nway_red_live;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
+ROLLBACK;
+-- A predicate implied by an equality: (id) WHERE kind = 2 adds nothing to
+-- (kind, id) with kind = 2, so the two are never in one set, at any size.
+SET leapfrog.max_indexes = 4;
+SET leapfrog.min_indexes = 3;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_nway_red WHERE membership_id = 3 AND kind = 2 ORDER BY id DESC LIMIT 100 $$);
+RESET leapfrog.min_indexes;
+RESET leapfrog.max_indexes;
+SELECT lf_check($$ SELECT * FROM lf_nway_red WHERE membership_id = 3 AND kind = 2 ORDER BY id DESC LIMIT 100 $$);
+DROP TABLE lf_nway_red;

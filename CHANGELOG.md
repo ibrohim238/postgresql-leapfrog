@@ -5,6 +5,23 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Redundant index sets. A stream was checked only for adding something to
+  the inner streams, never to the outer one, and the existing streams were
+  never checked against a new one. So `(membership_id, id)` paired with
+  `(membership_id, id) WHERE deleted_at IS NULL`, where the partial index
+  alone enforces both conditions, and `(id) WHERE deleted_at IS NULL` could
+  join an outer index with the same predicate. Now every stream of a set,
+  the outer one included, must add an equality column no other stream has
+  or a predicate the other streams' equalities and predicates do not imply
+  together (`predicate_implied_by`; `kind = 2` implies `WHERE kind = 2`).
+  Plans change where a pair was redundant: `(owner_id, id)` ×
+  `(owner_id, kind_id, id)` becomes `(owner_id, kind_id, id)` × the live
+  index, which enforces `deleted_at` instead of filtering it. Tests in
+  `leapfrog_nway`, `leapfrog_btree_pair`, `leapfrog_basic`,
+  `leapfrog_parameters`; checking only the new stream fails all four.
+
 ### Added
 
 - N-way intersection: a node combines up to `leapfrog.max_indexes` (default

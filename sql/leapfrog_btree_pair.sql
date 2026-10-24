@@ -97,9 +97,10 @@ DROP INDEX lf_pair_product_id;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id LIMIT 20 $$);
 ROLLBACK;
--- An ordinary inner index whose equality columns all appear in the outer
--- index adds nothing either: (customer_id, product_id, id) may be the
--- outer side of (customer_id, id), but not the other way round.
+-- An index whose equality columns all appear in another stream adds
+-- nothing either: (customer_id, product_id, id) enforces both equalities
+-- alone, so it forms no pair with (customer_id, id) in either role, and an
+-- Index Scan on it is the plan.
 BEGIN;
 DROP INDEX lf_pair_product_id;
 CREATE INDEX lf_pair_customer_product_id ON lf_pair (customer_id, product_id, id);

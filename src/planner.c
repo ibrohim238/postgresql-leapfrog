@@ -449,16 +449,19 @@ is_outer_candidate(IndexCandidate *candidate)
 
 /*
  * equality_column_in_set
- *		Is attno an equality column of some stream of the set?
+ *		Is attno an equality column of some stream of the set other than
+ *		skip?
  */
 static bool
 equality_column_in_set(IndexCandidate **streams, int nstreams,
-					   AttrNumber attno)
+					   IndexCandidate *skip, AttrNumber attno)
 {
 	for (int i = 0; i < nstreams; i++)
 	{
 		IndexOptInfo *index = streams[i]->index;
 
+		if (streams[i] == skip)
+			continue;
 		for (int j = 0; j < streams[i]->sortpos; j++)
 		{
 			if (index->indexkeys[j] == attno)
@@ -471,10 +474,19 @@ equality_column_in_set(IndexCandidate **streams, int nstreams,
 
 /*
  * adds_restriction
- *		Does the index narrow the set's rows down?  A partial index does
- *		through its predicate, unless a stream of the set already enforces
- *		one that implies it; an ordinary one only through an equality column
- *		no stream of the set has.
+ *		Does the candidate narrow the rows of the set's other streams down?
+ *		Every stream of the set restricts the rows it returns by the
+ *		equalities on its leading columns and, for a partial index, by its
+ *		predicate; the outer index as much as the inner ones.  A candidate
+ *		adds a restriction through an equality column no other stream has,
+ *		or through a predicate that the other streams' equalities and
+ *		predicates together do not imply (predicate_implied_by: a predicate
+ *		kind = 2 is implied by an equality kind = 2 with a constant, and
+ *		deleted_at IS NULL by the same predicate of another partial index).
+ *		A stream that adds nothing only makes the merge read more.
+ *
+ * candidate may itself be one of streams: it is then compared with the
+ * others.
  */
 static bool
 adds_restriction(IndexCandidate **streams, int nstreams,
@@ -482,24 +494,25 @@ adds_restriction(IndexCandidate **streams, int nstreams,
 {
 	IndexOptInfo *index = candidate->index;
 
-	if (index->indpred != NIL)
+	for (int i = 0; i < candidate->sortpos; i++)
 	{
-		bool		implied = false;
-
-		for (int i = 1; i < nstreams && !implied; i++)
-		{
-			List	   *pred = streams[i]->index->indpred;
-
-			if (pred != NIL && predicate_implied_by(index->indpred, pred, false))
-				implied = true;
-		}
-		if (!implied)
+		if (!equality_column_in_set(streams, nstreams, candidate,
+									index->indexkeys[i]))
 			return true;
 	}
 
-	for (int i = 0; i < candidate->sortpos; i++)
+	if (index->indpred != NIL)
 	{
-		if (!equality_column_in_set(streams, nstreams, index->indexkeys[i]))
+		List	   *enforced = NIL;
+
+		for (int i = 0; i < nstreams; i++)
+		{
+			if (streams[i] == candidate)
+				continue;
+			enforced = list_concat_copy(enforced, streams[i]->clauses);
+			enforced = list_concat_copy(enforced, streams[i]->index->indpred);
+		}
+		if (!predicate_implied_by(index->indpred, enforced, false))
 			return true;
 	}
 
@@ -509,22 +522,35 @@ adds_restriction(IndexCandidate **streams, int nstreams,
 /*
  * is_inner_candidate
  *		Can the index join the set as an inner stream: (j1, ..., jM, sortcol,
- *		...) with equalities on every jI, not in the set yet, and adding a
- *		restriction of its own?
+ *		...) with equalities on every jI, not in the set yet, adding a
+ *		restriction of its own, and leaving every stream already in the set
+ *		with one of its own?  A pair of (membership_id, id) and (membership_id,
+ *		id) WHERE deleted_at IS NULL is not a set: the partial index alone
+ *		enforces what the other does, and an Index Scan on it is the plan.
  */
 static bool
 is_inner_candidate(IndexCandidate **streams, int nstreams,
 				   IndexCandidate *candidate)
 {
+	IndexCandidate *set[INTERSECT_MAX_STREAMS];
+
 	if (!candidate->usable)
 		return false;
 	for (int i = 0; i < nstreams; i++)
 	{
 		if (streams[i] == candidate)
 			return false;
+		set[i] = streams[i];
+	}
+	set[nstreams] = candidate;
+
+	for (int i = 0; i <= nstreams; i++)
+	{
+		if (!adds_restriction(set, nstreams + 1, set[i]))
+			return false;
 	}
 
-	return adds_restriction(streams, nstreams, candidate);
+	return true;
 }
 
 /*
