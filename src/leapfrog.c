@@ -248,16 +248,22 @@ typedef struct IntersectScanState
 } IntersectScanState;
 
 /*
- * Index candidate for one side of the intersection: equality clauses of the
- * columns before sortcol, the value expressions compared against, the outer
- * rels they refer to, and the position of sortcol among the key columns.
+ * Index candidate for either side of the intersection: equality clauses of
+ * the columns before sortcol, the value expressions compared against, the
+ * outer rels they refer to, and the position of sortcol among the key
+ * columns.  Built once per index while the relation's paths are planned and
+ * shared by every pair the index takes part in; heapkeyspace is looked up on
+ * first use (-1 until then) because it opens the index.
  */
 typedef struct IndexCandidate
 {
+	IndexOptInfo *index;
+	bool		usable;
 	List	   *clauses;
 	List	   *exprs;
 	Relids		required_outer;
 	int			sortpos;
+	int			heapkeyspace;
 } IndexCandidate;
 
 /*
@@ -565,16 +571,21 @@ is_notnull_column(RelOptInfo *rel, AttrNumber attno)
  *		in the version 4 format; older pg_upgraded indexes need a REINDEX.
  */
 static bool
-is_heapkeyspace(Oid indexoid)
+is_heapkeyspace(IndexCandidate *candidate)
 {
-	Relation	index = index_open(indexoid, AccessShareLock);
-	bool		heapkeyspace;
-	bool		allequalimage;
+	if (candidate->heapkeyspace < 0)
+	{
+		Relation	index = index_open(candidate->index->indexoid,
+									   AccessShareLock);
+		bool		heapkeyspace;
+		bool		allequalimage;
 
-	_bt_metaversion(index, &heapkeyspace, &allequalimage);
-	index_close(index, AccessShareLock);
+		_bt_metaversion(index, &heapkeyspace, &allequalimage);
+		index_close(index, AccessShareLock);
+		candidate->heapkeyspace = heapkeyspace ? 1 : 0;
+	}
 
-	return heapkeyspace;
+	return candidate->heapkeyspace == 1;
 }
 
 /*
@@ -615,9 +626,11 @@ find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 {
 	int			sortpos = -1;
 
+	candidate->index = index;
 	candidate->clauses = NIL;
 	candidate->exprs = NIL;
 	candidate->required_outer = NULL;
+	candidate->heapkeyspace = -1;
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{
@@ -659,21 +672,16 @@ find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 }
 
 /*
- * find_outer_candidate
- *		Check whether index can be the outer side of the intersection: at
- *		least one equality column, then sort_attno as the last key column.
+ * is_outer_candidate
+ *		Can the index be the outer side of the intersection: at least one
+ *		equality column, then sortcol as the last key column?
  */
 static bool
-find_outer_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
-					 RangeTblEntry *rte, IndexOptInfo *index,
-					 AttrNumber sort_attno, PathKey *pathkey,
-					 IndexCandidate *candidate)
+is_outer_candidate(IndexCandidate *candidate)
 {
-	return index->nkeycolumns >= 2 &&
-		index->indexkeys[index->nkeycolumns - 1] == sort_attno &&
-		find_index_candidate(root, rel, rti, rte, index, sort_attno, pathkey,
-							 candidate) &&
-		candidate->sortpos == index->nkeycolumns - 1;
+	return candidate->usable &&
+		candidate->index->nkeycolumns >= 2 &&
+		candidate->sortpos == candidate->index->nkeycolumns - 1;
 }
 
 /*
@@ -705,21 +713,16 @@ adds_restriction(IndexOptInfo *outer, IndexOptInfo *inner, int inner_sortpos)
 }
 
 /*
- * find_inner_candidate
- *		Check whether index can be the inner side of the intersection for
- *		the given outer index: (j1, ..., jM, sort_attno, ...) with equalities
- *		on every jI, partial or adding an equality column of its own.
+ * is_inner_candidate
+ *		Can the index be the inner side of the intersection for the given
+ *		outer index: (j1, ..., jM, sortcol, ...) with equalities on every jI,
+ *		partial or adding an equality column of its own?
  */
 static bool
-find_inner_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
-					 RangeTblEntry *rte, IndexOptInfo *outer,
-					 IndexOptInfo *index, AttrNumber sort_attno,
-					 PathKey *pathkey, IndexCandidate *candidate)
+is_inner_candidate(IndexCandidate *outer, IndexCandidate *inner)
 {
-	return index != outer &&
-		find_index_candidate(root, rel, rti, rte, index, sort_attno, pathkey,
-							 candidate) &&
-		adds_restriction(outer, index, candidate->sortpos);
+	return inner->usable && inner != outer &&
+		adds_restriction(outer->index, inner->index, inner->sortpos);
 }
 
 /*
@@ -999,21 +1002,18 @@ merge_read_cost(PlannerInfo *root, IndexOptInfo *outer, IndexOptInfo *inner,
 }
 
 /*
- * estimate_group_size
- *		Expected number of inner entries per sortcol value, given the number
- *		of inner entries the scan reads.
+ * sortcol_ndistinct
+ *		Number of distinct sortcol values in the relation, which divides the
+ *		inner entries into TID groups.
  */
 static double
-estimate_group_size(PlannerInfo *root, RelOptInfo *rel, Index rti,
-					AttrNumber sort_attno, double inner_entries)
+sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
+				  AttrNumber sort_attno)
 {
 	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
-	double		ndistinct;
 
-	ndistinct = estimate_num_groups(root, list_make1(var), rel->tuples,
-									NULL, NULL);
-
-	return Max(1.0, inner_entries / Max(ndistinct, 1.0));
+	return Max(estimate_num_groups(root, list_make1(var), rel->tuples,
+								   NULL, NULL), 1.0);
 }
 
 /*
@@ -1037,15 +1037,18 @@ index_entries(PlannerInfo *root, Index rti, IndexOptInfo *index,
 /*
  * add_intersect_path
  *		Build and cost the Index Merge Intersect path for one index pair and
- *		offer it to add_path.
+ *		offer it to add_path.  ndistinct is sortcol_ndistinct and correlation
+ *		outer_index_correlation of the outer index, both computed once by the
+ *		caller.
  */
 static void
 add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
-				   AttrNumber sort_attno, PathKey *pathkey,
-				   IndexOptInfo *outer, IndexOptInfo *inner,
-				   IndexCandidate *outer_candidate,
-				   IndexCandidate *inner_candidate)
+				   PathKey *pathkey, IndexCandidate *outer_candidate,
+				   IndexCandidate *inner_candidate, double ndistinct,
+				   double correlation)
 {
+	IndexOptInfo *outer = outer_candidate->index;
+	IndexOptInfo *inner = inner_candidate->index;
 	CustomPath *cpath;
 	ParamPathInfo *param_info = NULL;
 	Relids		required_outer;
@@ -1054,7 +1057,6 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	double		outer_entries;
 	double		inner_entries;
 	double		group_size;
-	double		correlation;
 	QualCost	qpqual_cost;
 	Cost		run_cost;
 	Cost		startup_cost;
@@ -1067,14 +1069,13 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * an estimate over the average value; the executor enforces the limit
 	 * itself, so under leapfrog.force the estimate is ignored.
 	 */
-	group_size = estimate_group_size(root, rel, rti, sort_attno,
-									 inner_entries);
+	group_size = Max(1.0, inner_entries / ndistinct);
 	if (!intersect_force &&
 		group_size * sizeof(ItemPointerData) > work_mem * 1024.0)
 		return;
 
 	/* duplicates must be ordered by TID on both sides */
-	if (!is_heapkeyspace(outer->indexoid) || !is_heapkeyspace(inner->indexoid))
+	if (!is_heapkeyspace(outer_candidate) || !is_heapkeyspace(inner_candidate))
 		return;
 
 	/* a LATERAL reference makes the path parameterized by those rels */
@@ -1086,7 +1087,6 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	rows = param_info ? param_info->ppi_rows : rel->rows;
 	loop_count = loop_count_for(root, required_outer);
-	correlation = outer_index_correlation(root, rti, outer);
 	restriction_qual_cost(root, rel, param_info, &qpqual_cost);
 
 	cpath = makeNode(CustomPath);
@@ -1172,6 +1172,9 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 {
 	PathKey    *pathkey;
 	AttrNumber	sort_attno = InvalidAttrNumber;
+	IndexCandidate *candidates;
+	int			ncandidates = 0;
+	double		ndistinct = -1.0;
 	ListCell   *lc;
 
 	if (prev_set_rel_pathlist_hook)
@@ -1204,28 +1207,52 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (sort_attno == InvalidAttrNumber)
 		return;
 
+	/*
+	 * Each index is checked once; the pairs are then formed from the indexes
+	 * that can produce sortcol in order, usually a few of the relation's.
+	 */
+	candidates = palloc(list_length(rel->indexlist) * sizeof(IndexCandidate));
 	foreach(lc, rel->indexlist)
 	{
-		IndexOptInfo *outer = lfirst_node(IndexOptInfo, lc);
-		IndexCandidate outer_candidate;
-		ListCell   *lc2;
+		IndexCandidate *candidate = &candidates[ncandidates];
 
-		if (!find_outer_candidate(root, rel, rti, rte, outer, sort_attno,
-								  pathkey, &outer_candidate))
+		candidate->usable = find_index_candidate(root, rel, rti, rte,
+												 lfirst_node(IndexOptInfo, lc),
+												 sort_attno, pathkey,
+												 candidate);
+		if (candidate->usable)
+			ncandidates++;
+	}
+
+	for (int i = 0; i < ncandidates; i++)
+	{
+		IndexCandidate *outer = &candidates[i];
+		double		correlation = 0.0;
+		bool		has_correlation = false;
+
+		if (!is_outer_candidate(outer))
 			continue;
 
-		foreach(lc2, rel->indexlist)
+		for (int j = 0; j < ncandidates; j++)
 		{
-			IndexOptInfo *inner = lfirst_node(IndexOptInfo, lc2);
-			IndexCandidate inner_candidate;
+			IndexCandidate *inner = &candidates[j];
 
-			if (find_inner_candidate(root, rel, rti, rte, outer, inner,
-									 sort_attno, pathkey, &inner_candidate))
-				add_intersect_path(root, rel, rti, sort_attno, pathkey,
-								   outer, inner, &outer_candidate,
-								   &inner_candidate);
+			if (!is_inner_candidate(outer, inner))
+				continue;
+
+			if (ndistinct < 0)
+				ndistinct = sortcol_ndistinct(root, rel, rti, sort_attno);
+			if (!has_correlation)
+			{
+				correlation = outer_index_correlation(root, rti, outer->index);
+				has_correlation = true;
+			}
+			add_intersect_path(root, rel, rti, pathkey, outer, inner,
+							   ndistinct, correlation);
 		}
 	}
+
+	pfree(candidates);
 }
 
 /*

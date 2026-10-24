@@ -67,6 +67,16 @@ versions: [SemVer](https://semver.org/).
 - `docker/cassert.Dockerfile` and a CI job: PostgreSQL 18 built from source
   with `--enable-cassert`, both suites run against it; the job fails on an
   assertion failure or a crashed backend in the server log.
+- `tests/performance/planning_bench.sh`: planning time with 10, 20 and 50
+  indexes, with and without the extension.
+
+### Changed
+
+- Planner search: each index is checked once per relation instead of once
+  per pair, and the `ndistinct` of the sort column, the outer index
+  correlation and the nbtree version (`_bt_metaversion`, which opens the
+  index) are looked up once. With 50 indexes and 6 matching equalities the
+  planning overhead went from 0.13 ms to 0.02 ms.
 
 ### Fixed
 

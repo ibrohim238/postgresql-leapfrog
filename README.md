@@ -538,12 +538,24 @@ Verified against `src/leapfrog.c` and the tests.
 
 **Planner and cost model**
 
-- Candidates are every ordered pair of the relation's indexes; each pair that
-  passes the cheap checks runs `estimate_num_groups`, a statistics lookup and
-  `_bt_metaversion`. Planning time grows with the square of the number of
-  indexes; in the write benchmark (14 indexes) planning took 0.07–0.17 ms with
-  the extension and 0.06–0.10 ms without it. Tables with many more indexes
-  were not measured.
+- Each index is checked once per planned relation; pairs are formed only from
+  the indexes that can return the sort column in order with their equalities
+  fixed, and the `ndistinct` of the sort column, the outer correlation and the
+  nbtree version are looked up once. Measured with
+  `tests/performance/planning_bench.sh` (median of 200 plans, 20,000 rows,
+  laptop):
+
+  | Indexes | Equalities | Without, ms | With, ms | Before the cache, with, ms |
+  |---:|---:|---:|---:|---:|
+  | 10 | 1 | 0.067 | 0.074 | 0.093 |
+  | 10 | 6 | 0.096 | 0.160 | 0.227 |
+  | 20 | 6 | 0.104 | 0.138 | 0.193 |
+  | 50 | 2 | 0.184 | 0.181 | 0.151 |
+  | 50 | 6 | 0.226 | 0.248 | 0.298 |
+
+  The cost still grows with the square of the number of indexes that match
+  the query's equalities (6 in the last rows), not of all indexes; differences
+  under 0.03 ms are within the noise of these runs.
 - Only the first key of the query's `ORDER BY` is considered.
 - The cost model is conservative. On the 1M-row benchmark (192 queries) it
   never picked the node where it was slower, at either page cost — and it did
@@ -581,7 +593,7 @@ and `deleted_at`.
 | P1 | Adaptive skip-ahead | **done** with a fixed threshold; per-query adaptive threshold open |
 | P1 | Cost model | partly: correlation as for the outer Index Scan, skip-aware reads; distribution of matches along `sortcol` open |
 | P2 | N-way intersection | open |
-| P2 | Planner search | open |
+| P2 | Planner search | **done**: per-index checks and lookups cached per relation, measured with 10/20/50 indexes; pathkeys beyond `ORDER BY` open |
 | P2 | Memory of non-unique keys | open |
 | P2 | Concurrency tests | **done**: EPQ for both pair kinds, partial outer index, overflow fallback; `INSERT`, `VACUUM` |
 | P2 | Write and storage benchmarks | **done**: `write_bench.sh` |
@@ -617,9 +629,9 @@ bound on their number.
 
 #### Planner search
 
-Pre-filter indexes once per relation, cache group size, correlation and nbtree
-version per relation, consider useful pathkeys beyond the query's `ORDER BY`,
-and measure planning time with 10, 20 and 50 indexes.
+Done: indexes are checked once per relation, `ndistinct`, correlation and
+nbtree version are cached, planning time is measured with 10, 20 and 50
+indexes. Open: consider useful pathkeys beyond the query's `ORDER BY`.
 
 #### Memory of non-unique keys
 
