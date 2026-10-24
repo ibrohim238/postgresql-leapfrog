@@ -1,0 +1,167 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_plan
+step s2_plan: 
+	EXPLAIN (COSTS OFF)
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+
+QUERY PLAN                                                    
+--------------------------------------------------------------
+Limit                                                         
+  ->  LockRows                                                
+        ->  Custom Scan (Index Merge Intersect) on lf_iso_pair
+              Outer Index: lf_iso_pair_product_id             
+              Inner Index: lf_iso_pair_customer_id            
+(5 rows)
+
+
+starting permutation: s1_begin s1_move_product s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_move_product: UPDATE lf_iso_pair SET product_id = 0 WHERE id = 22;
+step s2_lock: 
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+34|          2|         1|p34    
+46|          2|         1|p46    
+58|          2|         1|p58    
+(4 rows)
+
+
+starting permutation: s1_begin s1_move_product s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_move_product: UPDATE lf_iso_pair SET product_id = 0 WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+34|          2|         1|p34    
+46|          2|         1|p46    
+58|          2|         1|p58    
+(4 rows)
+
+
+starting permutation: s1_begin s1_move_customer s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_move_customer: UPDATE lf_iso_pair SET customer_id = 3 WHERE id = 22;
+step s2_lock: 
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+34|          2|         1|p34    
+46|          2|         1|p46    
+58|          2|         1|p58    
+(4 rows)
+
+
+starting permutation: s1_begin s1_move_customer s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_move_customer: UPDATE lf_iso_pair SET customer_id = 3 WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+34|          2|         1|p34    
+46|          2|         1|p46    
+58|          2|         1|p58    
+(4 rows)
+
+
+starting permutation: s1_begin s1_join_product s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_join_product: UPDATE lf_iso_pair SET product_id = 1 WHERE id = 14;
+step s2_lock: 
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+22|          2|         1|p22    
+34|          2|         1|p34    
+46|          2|         1|p46    
+(4 rows)
+
+step s1_commit: COMMIT;
+
+starting permutation: s1_begin s1_join_product s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_join_product: UPDATE lf_iso_pair SET product_id = 1 WHERE id = 14;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+22|          2|         1|p22    
+34|          2|         1|p34    
+46|          2|         1|p46    
+(4 rows)
+
+step s1_commit: COMMIT;
+
+starting permutation: s1_begin s1_payload s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_payload: UPDATE lf_iso_pair SET payload = 'changed' WHERE id = 22;
+step s2_lock: 
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+22|          2|         1|changed
+34|          2|         1|p34    
+46|          2|         1|p46    
+(4 rows)
+
+
+starting permutation: s1_begin s1_payload s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_payload: UPDATE lf_iso_pair SET payload = 'changed' WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
+	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|customer_id|product_id|payload
+--+-----------+----------+-------
+10|          2|         1|p10    
+22|          2|         1|changed
+34|          2|         1|p34    
+46|          2|         1|p46    
+(4 rows)
+

@@ -12,12 +12,16 @@
  *	  equality with a value known at execution time (a constant, a query
  *	  parameter or a column of an outer relation), and its last column is
  *	  the first sort key of the query;
- *	- the inner index is a partial index (sortcol, ...) WHERE predicate:
- *	  it starts with the same column and its predicate is implied by the
- *	  query's restrictions.
+ *	- the inner index (j1, ..., jM, sortcol, ...), M >= 0: every jI is
+ *	  compared for equality in the same way, and if the index is partial its
+ *	  predicate is implied by the query's restrictions.  With M = 0 it must
+ *	  be partial, or it would not narrow anything down; an ordinary index
+ *	  whose equality columns all appear in the outer index is not used
+ *	  either.  Typical inner sides: (sortcol) WHERE deleted_at IS NULL, or
+ *	  another (filter_column, sortcol).
  *
- * The outer index ends with the column the inner index starts with; only
- * then do both produce sortcol values in the same order.
+ * With every column before sortcol fixed by equality, both scans produce
+ * sortcol values in the same order.
  *
  * Execution follows RowIDIntersectionIterator::DoRead: both indexes are
  * read sequentially in the same direction and the side that lags behind is
@@ -31,8 +35,9 @@
  * estimated number of inner entries per value fits into work_mem, and at
  * execution time a group that outgrows work_mem is abandoned for that value.
  * The outer entries of such a value are all fetched from the heap and
- * checked against the inner index predicate explicitly, before the node's
- * qual sees them, so the fallback does not depend on what the qual holds.
+ * checked against the inner index conditions explicitly (its equalities and
+ * its predicate), before the node's qual sees them, so the fallback does not
+ * depend on what the qual holds.
  * The heap is otherwise visited only for matches, walking HOT chains the
  * way index_getnext_slot does.
  *
@@ -43,8 +48,8 @@
  * Costing follows ROR_intersect_plan::add, with every component expressed
  * through the planner's own cost functions:
  *
- *	  run = index_read_cost(outer, rows matching the equalities)
- *		   + index_read_cost(inner, all entries of the partial index)
+ *	  run = index_read_cost(outer, entries matching its equalities)
+ *		   + index_read_cost(inner, entries matching its equalities)
  *		   + cost of grouping the entries of one value
  *		   + cost of fetching the result rows from the heap
  *		   + cost of the node's qual and target list per result row
@@ -66,12 +71,13 @@
  *
  * leapfrog.force is the counterpart of MySQL's INDEX_MERGE hint
  * (ignore_cost in ROR_intersect_plan::add): the intersection is chosen
- * whenever a suitable index pair exists, regardless of cost.  It is a
+ * whenever a suitable index pair exists, regardless of the cost of the
+ * other plans.  Among several pairs the cheapest one still wins.  It is a
  * diagnostic knob and can make a query far slower.
  *
  * Under EvalPlanQual the scan rechecks what it guaranteed by construction,
- * as an index scan rechecks indexqualorig: the equalities on the outer
- * index columns and the predicate of the inner index.
+ * as an index scan rechecks indexqualorig: the equalities on the columns of
+ * both indexes and the predicate of the inner index.
  *
  * Limitations: key columns must be bigint and the scan covers a single
  * relation only.
@@ -130,6 +136,29 @@ PG_MODULE_MAGIC_EXT(
 
 #define INTERSECT_NAME "Index Merge Intersect"
 
+/*
+ * Under leapfrog.force the paths keep their relative costs, scaled down so
+ * far that no other path can be cheaper: add_path compares costs by ratio,
+ * so the cheapest index pair still wins among the pairs.
+ */
+#define INTERSECT_FORCE_SCALE 1e-12
+
+/*
+ * Layout of CustomPath.custom_private.  The plan keeps the first
+ * PRIVATE_COUNT entries in custom_private; the expression lists move to
+ * custom_exprs at the EXPRS_* positions.
+ */
+#define PRIVATE_OUTER_INDEX		0
+#define PRIVATE_INNER_INDEX		1
+#define PRIVATE_DESCENDING		2
+#define PRIVATE_INNER_SORTPOS	3
+#define PRIVATE_COUNT			4
+#define EXPRS_OUTER_KEYS		0	/* value expressions of the outer
+									 * equalities */
+#define EXPRS_INNER_PRED		1	/* predicate of the inner index, or NIL */
+#define EXPRS_INNER_KEYS		2	/* value expressions of the inner
+									 * equalities */
+
 /* GUC variables */
 static bool intersect_enabled = true;
 static bool intersect_force = false;
@@ -141,23 +170,35 @@ static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
 static bool intersect_hook_installed = false;
 
 /*
+ * The equality conditions on the leading columns of one index: the value
+ * expressions, their values for the current (re)scan, and the heap columns
+ * they apply to (for the EvalPlanQual recheck and the overflow fallback).
+ */
+typedef struct EqualityKeys
+{
+	int			nequal;
+	ExprState  *exprs[INDEX_MAX_KEYS];
+	Oid			types[INDEX_MAX_KEYS];
+	int64		values[INDEX_MAX_KEYS];
+	AttrNumber	attnos[INDEX_MAX_KEYS];
+} EqualityKeys;
+
+/*
  * Execution state of an Index Merge Intersect scan.
  */
 typedef struct IntersectScanState
 {
 	CustomScanState css;
 	Relation	outer_index;	/* (k1, ..., kN, sortcol) */
-	Relation	inner_index;	/* partial (sortcol, ...) */
+	Relation	inner_index;	/* (j1, ..., jM, sortcol, ...) */
 	IndexScanDesc outer_scan;
 	IndexScanDesc inner_scan;
-	int			nequal;			/* number of equality columns of outer */
-	ExprState  *equal_exprs[INDEX_MAX_KEYS];
-	Oid			equal_types[INDEX_MAX_KEYS];
-	int64		equal_values[INDEX_MAX_KEYS];
-	AttrNumber	equal_attnos[INDEX_MAX_KEYS];	/* heap columns, for EPQ */
-	bool		values_ready;	/* equal_values are evaluated */
+	EqualityKeys outer_keys;	/* k1 ... kN */
+	EqualityKeys inner_keys;	/* j1 ... jM */
+	int			inner_sortpos;	/* position of sortcol in the inner index */
+	bool		values_ready;	/* key values are evaluated */
 	bool		values_null;	/* some equality value is NULL */
-	ExprState  *inner_pred;		/* predicate of the inner partial index */
+	ExprState  *inner_pred;		/* predicate of the inner index, if partial */
 	bool		descending;
 	bool		started;
 	bool		done;
@@ -190,15 +231,17 @@ typedef struct IntersectScanState
 } IntersectScanState;
 
 /*
- * Outer index candidate: equality clauses of its leading columns, the
- * value expressions compared against, and the outer rels they refer to.
+ * Index candidate for one side of the intersection: equality clauses of the
+ * columns before sortcol, the value expressions compared against, the outer
+ * rels they refer to, and the position of sortcol among the key columns.
  */
-typedef struct OuterCandidate
+typedef struct IndexCandidate
 {
 	List	   *clauses;
 	List	   *exprs;
 	Relids		required_outer;
-} OuterCandidate;
+	int			sortpos;
+} IndexCandidate;
 
 /*
  * Argument of ec_member_is_column, the callback of
@@ -539,29 +582,40 @@ is_usable_btree(IndexOptInfo *index, int pos, PathKey *pathkey)
 }
 
 /*
- * find_outer_candidate
- *		Check whether index can be the outer side of the intersection.
+ * find_index_candidate
+ *		Check whether index can produce sort_attno in order once the key
+ *		columns before it are fixed by equalities.
  *
- * Every key column but the last must be compared for equality with a value
- * known at execution time, and the last key column must be sort_attno.
+ * Every key column before sort_attno must be compared for equality with a
+ * value known at execution time.  Returns false when sort_attno is not a
+ * key column or a column before it has no usable equality.
  */
 static bool
-find_outer_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
+find_index_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 					 RangeTblEntry *rte, IndexOptInfo *index,
 					 AttrNumber sort_attno, PathKey *pathkey,
-					 OuterCandidate *candidate)
+					 IndexCandidate *candidate)
 {
-	int			last = index->nkeycolumns - 1;
+	int			sortpos = -1;
 
 	candidate->clauses = NIL;
 	candidate->exprs = NIL;
 	candidate->required_outer = NULL;
 
-	if (index->nkeycolumns < 2 || index->indexkeys[last] != sort_attno ||
-		!is_usable_btree(index, last, pathkey))
+	for (int i = 0; i < index->nkeycolumns; i++)
+	{
+		if (index->indexkeys[i] == sort_attno)
+		{
+			sortpos = i;
+			break;
+		}
+	}
+	candidate->sortpos = sortpos;
+
+	if (sortpos < 0 || !is_usable_btree(index, sortpos, pathkey))
 		return false;
 
-	for (int i = 0; i < last; i++)
+	for (int i = 0; i < sortpos; i++)
 	{
 		AttrNumber	attno = index->indexkeys[i];
 		RestrictInfo *clause;
@@ -588,17 +642,67 @@ find_outer_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
 }
 
 /*
- * is_inner_index
- *		Check whether index can be the inner side of the intersection.
- *
- * It must be a partial index starting with sort_attno whose predicate is
- * implied by the query's restrictions.
+ * find_outer_candidate
+ *		Check whether index can be the outer side of the intersection: at
+ *		least one equality column, then sort_attno as the last key column.
  */
 static bool
-is_inner_index(IndexOptInfo *index, AttrNumber sort_attno, PathKey *pathkey)
+find_outer_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
+					 RangeTblEntry *rte, IndexOptInfo *index,
+					 AttrNumber sort_attno, PathKey *pathkey,
+					 IndexCandidate *candidate)
 {
-	return index->indpred != NIL && index->indexkeys[0] == sort_attno &&
-		is_usable_btree(index, 0, pathkey);
+	return index->nkeycolumns >= 2 &&
+		index->indexkeys[index->nkeycolumns - 1] == sort_attno &&
+		find_index_candidate(root, rel, rti, rte, index, sort_attno, pathkey,
+							 candidate) &&
+		candidate->sortpos == index->nkeycolumns - 1;
+}
+
+/*
+ * adds_restriction
+ *		Does the inner index narrow the outer stream down?  A partial index
+ *		does through its predicate; an ordinary one only through an equality
+ *		column the outer index does not have.
+ */
+static bool
+adds_restriction(IndexOptInfo *outer, IndexOptInfo *inner, int inner_sortpos)
+{
+	if (inner->indpred != NIL)
+		return true;
+
+	for (int i = 0; i < inner_sortpos; i++)
+	{
+		bool		in_outer = false;
+
+		for (int j = 0; j < outer->nkeycolumns - 1; j++)
+		{
+			if (outer->indexkeys[j] == inner->indexkeys[i])
+				in_outer = true;
+		}
+		if (!in_outer)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * find_inner_candidate
+ *		Check whether index can be the inner side of the intersection for
+ *		the given outer index: (j1, ..., jM, sort_attno, ...) with equalities
+ *		on every jI, partial or adding an equality column of its own.
+ */
+static bool
+find_inner_candidate(PlannerInfo *root, RelOptInfo *rel, Index rti,
+					 RangeTblEntry *rte, IndexOptInfo *outer,
+					 IndexOptInfo *index, AttrNumber sort_attno,
+					 PathKey *pathkey, IndexCandidate *candidate)
+{
+	return index != outer &&
+		find_index_candidate(root, rel, rti, rte, index, sort_attno, pathkey,
+							 candidate) &&
+		adds_restriction(outer, index, candidate->sortpos);
 }
 
 /*
@@ -638,12 +742,12 @@ index_read_cost(PlannerInfo *root, IndexOptInfo *index, double entries,
 /*
  * sort_column_correlation
  *		Correlation of the sort column with the heap order, from the same
- *		pg_statistic slot btcostestimate reads for the leading index column.
- *		Zero (no correlation) when there are no statistics.
+ *		pg_statistic slot btcostestimate reads for the leading index column,
+ *		for the "<" operator of the integer family the sort column belongs
+ *		to.  Zero (no correlation) when there are no statistics.
  */
 static double
-sort_column_correlation(PlannerInfo *root, Index rti, AttrNumber sort_attno,
-						IndexOptInfo *inner)
+sort_column_correlation(PlannerInfo *root, Index rti, AttrNumber sort_attno)
 {
 	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
 	VariableStatData vardata;
@@ -658,8 +762,8 @@ sort_column_correlation(PlannerInfo *root, Index rti, AttrNumber sort_attno,
 		return 0.0;
 	}
 
-	sortop = get_opfamily_member(inner->opfamily[0], inner->opcintype[0],
-								 inner->opcintype[0], BTLessStrategyNumber);
+	sortop = get_opfamily_member(INTEGER_BTREE_FAM_OID, INT8OID, INT8OID,
+								 BTLessStrategyNumber);
 	if (OidIsValid(sortop) &&
 		get_attstatsslot(&sslot, vardata.statsTuple,
 						 STATISTIC_KIND_CORRELATION, sortop,
@@ -812,11 +916,12 @@ descent_cost(IndexOptInfo *index)
 
 /*
  * estimate_group_size
- *		Expected number of inner entries per sortcol value.
+ *		Expected number of inner entries per sortcol value, given the number
+ *		of inner entries the scan reads.
  */
 static double
 estimate_group_size(PlannerInfo *root, RelOptInfo *rel, Index rti,
-					AttrNumber sort_attno, IndexOptInfo *inner)
+					AttrNumber sort_attno, double inner_entries)
 {
 	Var		   *var = makeVar(rti, sort_attno, INT8OID, -1, InvalidOid, 0);
 	double		ndistinct;
@@ -824,7 +929,25 @@ estimate_group_size(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	ndistinct = estimate_num_groups(root, list_make1(var), rel->tuples,
 									NULL, NULL);
 
-	return Max(1.0, inner->tuples / Max(ndistinct, 1.0));
+	return Max(1.0, inner_entries / Max(ndistinct, 1.0));
+}
+
+/*
+ * index_entries
+ *		Entries of an index matching the equalities on its leading columns.
+ *		A partial index holds index->tuples entries to begin with.
+ */
+static double
+index_entries(PlannerInfo *root, Index rti, IndexOptInfo *index,
+			  IndexCandidate *candidate)
+{
+	double		entries = index->tuples;
+
+	if (candidate->clauses != NIL)
+		entries *= clauselist_selectivity(root, candidate->clauses, rti,
+										  JOIN_INNER, NULL);
+
+	return clamp_row_est(entries);
 }
 
 /*
@@ -836,7 +959,8 @@ static void
 add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				   AttrNumber sort_attno, PathKey *pathkey,
 				   IndexOptInfo *outer, IndexOptInfo *inner,
-				   OuterCandidate *candidate)
+				   IndexCandidate *outer_candidate,
+				   IndexCandidate *inner_candidate)
 {
 	CustomPath *cpath;
 	ParamPathInfo *param_info = NULL;
@@ -851,12 +975,16 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	Cost		run_cost;
 	Cost		startup_cost;
 
+	outer_entries = index_entries(root, rti, outer, outer_candidate);
+	inner_entries = index_entries(root, rti, inner, inner_candidate);
+
 	/*
 	 * The TID group of one value is expected to fit into work_mem.  This is
 	 * an estimate over the average value; the executor enforces the limit
-	 * itself, so under leapfrog.force the estimate is ignored like the cost.
+	 * itself, so under leapfrog.force the estimate is ignored.
 	 */
-	group_size = estimate_group_size(root, rel, rti, sort_attno, inner);
+	group_size = estimate_group_size(root, rel, rti, sort_attno,
+									 inner_entries);
 	if (!intersect_force &&
 		group_size * sizeof(ItemPointerData) > work_mem * 1024.0)
 		return;
@@ -866,20 +994,15 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		return;
 
 	/* a LATERAL reference makes the path parameterized by those rels */
-	required_outer = bms_union(candidate->required_outer,
-							   rel->lateral_relids);
+	required_outer = bms_union(outer_candidate->required_outer,
+							   inner_candidate->required_outer);
+	required_outer = bms_add_members(required_outer, rel->lateral_relids);
 	if (!bms_is_empty(required_outer))
 		param_info = get_baserel_parampathinfo(root, rel, required_outer);
 
 	rows = param_info ? param_info->ppi_rows : rel->rows;
 	loop_count = loop_count_for(root, required_outer);
-	outer_entries = clamp_row_est(rel->tuples *
-								  clauselist_selectivity(root,
-														 candidate->clauses,
-														 rti, JOIN_INNER,
-														 NULL));
-	inner_entries = clamp_row_est(inner->tuples);
-	correlation = sort_column_correlation(root, rti, sort_attno, inner);
+	correlation = sort_column_correlation(root, rti, sort_attno);
 	restriction_qual_cost(root, rel, param_info, &qpqual_cost);
 
 	cpath = makeNode(CustomPath);
@@ -901,14 +1024,21 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * index predicate travel in custom_private and become the plan's
 	 * custom_exprs in intersect_plan_path, where createplan.c turns
 	 * outer-relation Vars into nestloop params and setrefs.c fixes up the
-	 * rest.
+	 * rest.  The layout is the PRIVATE_* and EXPRS_* positions.
 	 */
 	cpath->custom_private =
-		list_make5(make_oid_const(outer->indexoid),
+		list_make4(make_oid_const(outer->indexoid),
 				   make_oid_const(inner->indexoid),
 				   makeBoolConst(pathkey->pk_cmptype == COMPARE_GT, false),
-				   copyObject(candidate->exprs),
-				   copyObject(inner->indpred));
+				   makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+							 Int32GetDatum(inner_candidate->sortpos),
+							 false, true));
+	cpath->custom_private = lappend(cpath->custom_private,
+									copyObject(outer_candidate->exprs));
+	cpath->custom_private = lappend(cpath->custom_private,
+									copyObject(inner->indpred));
+	cpath->custom_private = lappend(cpath->custom_private,
+									copyObject(inner_candidate->exprs));
 
 	/*
 	 * Reading both indexes, grouping the entries of each value, fetching the
@@ -930,21 +1060,19 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		run_cost / (rows + 1);
 
 	/*
-	 * With leapfrog.force the cost check is skipped, like MySQL does for the
-	 * INDEX_MERGE hint: a zero-cost path does not lose on cost.  It can still
-	 * be passed over for reasons other than cost, such as disabled_nodes or a
-	 * parameterization the join order cannot provide.
+	 * With leapfrog.force the competition with the other plans is skipped,
+	 * like MySQL does for the INDEX_MERGE hint, but the pairs still compete
+	 * among themselves.  The path can still be passed over for reasons other
+	 * than cost, such as disabled_nodes or a parameterization the join order
+	 * cannot provide.
 	 */
 	if (intersect_force)
 	{
-		cpath->path.startup_cost = 0;
-		cpath->path.total_cost = 0;
+		startup_cost *= INTERSECT_FORCE_SCALE;
+		run_cost *= INTERSECT_FORCE_SCALE;
 	}
-	else
-	{
-		cpath->path.startup_cost = startup_cost;
-		cpath->path.total_cost = startup_cost + run_cost;
-	}
+	cpath->path.startup_cost = startup_cost;
+	cpath->path.total_cost = startup_cost + run_cost;
 
 	add_path(rel, &cpath->path);
 }
@@ -971,13 +1099,16 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		IS_DUMMY_REL(rel) || rel->indexlist == NIL)
 		return;
 
-	/* the sort column must be the leading column of some index */
+	/* the sort column: a bigint NOT NULL column of this relation */
 	pathkey = linitial_node(PathKey, root->query_pathkeys);
-	foreach(lc, rel->indexlist)
+	foreach(lc, pathkey->pk_eclass->ec_members)
 	{
-		IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
-		AttrNumber	attno = index->indexkeys[0];
+		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
+		AttrNumber	attno;
 
+		if (!IsA(em->em_expr, Var))
+			continue;
+		attno = ((Var *) em->em_expr)->varattno;
 		if (attno > 0 && pathkey_is_column(pathkey, rti, attno) &&
 			is_int8_column(rte, attno) && is_notnull_column(rel, attno))
 		{
@@ -992,20 +1123,23 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	foreach(lc, rel->indexlist)
 	{
 		IndexOptInfo *outer = lfirst_node(IndexOptInfo, lc);
-		OuterCandidate candidate;
+		IndexCandidate outer_candidate;
 		ListCell   *lc2;
 
 		if (!find_outer_candidate(root, rel, rti, rte, outer, sort_attno,
-								  pathkey, &candidate))
+								  pathkey, &outer_candidate))
 			continue;
 
 		foreach(lc2, rel->indexlist)
 		{
 			IndexOptInfo *inner = lfirst_node(IndexOptInfo, lc2);
+			IndexCandidate inner_candidate;
 
-			if (inner != outer && is_inner_index(inner, sort_attno, pathkey))
+			if (find_inner_candidate(root, rel, rti, rte, outer, inner,
+									 sort_attno, pathkey, &inner_candidate))
 				add_intersect_path(root, rel, rti, sort_attno, pathkey,
-								   outer, inner, &candidate);
+								   outer, inner, &outer_candidate,
+								   &inner_candidate);
 		}
 	}
 }
@@ -1016,7 +1150,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		i of the index compared with the i-th value expression?
  */
 static bool
-is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *outer,
+is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
 					  List *exprs)
 {
 	int			i = 0;
@@ -1026,7 +1160,7 @@ is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *outer,
 	{
 		Node	   *other;
 
-		if (is_int8_equality(rinfo, rti, outer->indexkeys[i], &other) &&
+		if (is_int8_equality(rinfo, rti, index->indexkeys[i], &other) &&
 			equal(other, lfirst(lc)))
 			return true;
 		i++;
@@ -1036,9 +1170,41 @@ is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *outer,
 }
 
 /*
+ * find_index_info
+ *		The IndexOptInfo of the relation's index with the given OID.
+ */
+static IndexOptInfo *
+find_index_info(RelOptInfo *rel, Oid indexoid)
+{
+	ListCell   *lc;
+
+	foreach(lc, rel->indexlist)
+	{
+		IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
+
+		if (index->indexoid == indexoid)
+			return index;
+	}
+
+	elog(ERROR, "index %u is not an index of the relation", indexoid);
+	return NULL;				/* keep compiler quiet */
+}
+
+/*
+ * path_private_oid
+ *		An index OID stored in the path's custom_private.
+ */
+static Oid
+path_private_oid(CustomPath *best_path, int pos)
+{
+	return DatumGetObjectId(list_nth_node(Const, best_path->custom_private,
+										  pos)->constvalue);
+}
+
+/*
  * intersect_scan_qual
  *		The quals the node still has to evaluate, as create_indexscan_plan
- *		computes qpqual: the equalities on the outer index columns are
+ *		computes qpqual: the equalities on the columns of both indexes are
  *		enforced by the scan keys and rechecked under EvalPlanQual by
  *		intersect_recheck, so they are dropped.  Clauses implied by the inner
  *		index predicate are dropped as well, except for a target relation of
@@ -1047,23 +1213,24 @@ is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *outer,
  */
 static List *
 intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
-					List *clauses, Oid outer_indexoid)
+					List *clauses)
 {
-	List	   *exprs = lfourth(best_path->custom_private);
-	List	   *indpred = list_nth(best_path->custom_private, 4);
-	IndexOptInfo *outer = NULL;
+	List	   *outer_exprs = list_nth(best_path->custom_private,
+									   PRIVATE_COUNT + EXPRS_OUTER_KEYS);
+	List	   *indpred = list_nth(best_path->custom_private,
+								   PRIVATE_COUNT + EXPRS_INNER_PRED);
+	List	   *inner_exprs = list_nth(best_path->custom_private,
+									   PRIVATE_COUNT + EXPRS_INNER_KEYS);
+	IndexOptInfo *outer;
+	IndexOptInfo *inner;
 	bool		is_target_rel;
 	List	   *qpqual = NIL;
 	ListCell   *lc;
 
-	foreach(lc, rel->indexlist)
-	{
-		IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
-
-		if (index->indexoid == outer_indexoid)
-			outer = index;
-	}
-	Assert(outer != NULL);
+	outer = find_index_info(rel, path_private_oid(best_path,
+												  PRIVATE_OUTER_INDEX));
+	inner = find_index_info(rel, path_private_oid(best_path,
+												  PRIVATE_INNER_INDEX));
 
 	is_target_rel = (bms_is_member(rel->relid, root->all_result_relids) ||
 					 get_plan_rowmark(root->rowMarks, rel->relid) != NULL);
@@ -1074,9 +1241,10 @@ intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 
 		if (rinfo->pseudoconstant)
 			continue;
-		if (is_candidate_equality(rinfo, rel->relid, outer, exprs))
+		if (is_candidate_equality(rinfo, rel->relid, outer, outer_exprs) ||
+			is_candidate_equality(rinfo, rel->relid, inner, inner_exprs))
 			continue;
-		if (!is_target_rel &&
+		if (!is_target_rel && indpred != NIL &&
 			!contain_mutable_functions((Node *) rinfo->clause) &&
 			predicate_implied_by(list_make1(rinfo->clause), indpred, false))
 			continue;
@@ -1089,31 +1257,27 @@ intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 /*
  * intersect_plan_path
  *		PlanCustomPath callback: turn the path into a CustomScan plan node.
+ *
+ * The index OIDs need no entry in the plan's relationOids: as for an
+ * IndexScan, creating or dropping an index sends a relcache invalidation for
+ * its table, which the plan already depends on.
  */
 static Plan *
 intersect_plan_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 					List *tlist, List *clauses, List *custom_plans)
 {
 	CustomScan *cscan = makeNode(CustomScan);
-	Oid			outer_indexoid;
-
-	/*
-	 * The index OIDs need no entry in the plan's relationOids: as for an
-	 * IndexScan, creating or dropping an index sends a relcache invalidation
-	 * for its table, which the plan already depends on.
-	 */
-	outer_indexoid = DatumGetObjectId(linitial_node(Const,
-													best_path->custom_private)->constvalue);
+	List	   *private = best_path->custom_private;
 
 	cscan->scan.plan.targetlist = tlist;
-	cscan->scan.plan.qual = intersect_scan_qual(root, rel, best_path,
-												clauses, outer_indexoid);
+	cscan->scan.plan.qual = intersect_scan_qual(root, rel, best_path, clauses);
 	cscan->scan.scanrelid = rel->relid;
 	cscan->flags = best_path->flags;
-	cscan->custom_private = list_truncate(list_copy(best_path->custom_private),
-										  3);
-	cscan->custom_exprs = list_make2(lfourth(best_path->custom_private),
-									 list_nth(best_path->custom_private, 4));
+	cscan->custom_private = list_truncate(list_copy(private), PRIVATE_COUNT);
+	cscan->custom_exprs =
+		list_make3(list_nth(private, PRIVATE_COUNT + EXPRS_OUTER_KEYS),
+				   list_nth(private, PRIVATE_COUNT + EXPRS_INNER_PRED),
+				   list_nth(private, PRIVATE_COUNT + EXPRS_INNER_KEYS));
 	cscan->custom_scan_tlist = NIL;
 	cscan->methods = &intersect_scan_methods;
 
@@ -1134,6 +1298,36 @@ intersect_create_scan_state(CustomScan *cscan)
 	return (Node *) state;
 }
 
+/*
+ * init_equality_keys
+ *		Prepare the equality value expressions of one index side; the i-th
+ *		expression is compared with the i-th key column of the index.
+ */
+static void
+init_equality_keys(EqualityKeys *keys, List *exprs, Relation index,
+				   PlanState *parent)
+{
+	ListCell   *lc;
+	int			i = 0;
+
+	foreach(lc, exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+
+		keys->exprs[i] = ExecInitExpr(expr, parent);
+		keys->types[i] = exprType((Node *) expr);
+		keys->attnos[i] = index->rd_index->indkey.values[i];
+		i++;
+	}
+	keys->nequal = i;
+}
+
+static Datum
+private_datum(List *private, int pos)
+{
+	return list_nth_node(Const, private, pos)->constvalue;
+}
+
 static void
 intersect_begin(CustomScanState *node, EState *estate, int eflags)
 {
@@ -1141,39 +1335,37 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	heap = node->ss.ss_currentRelation;
 	List	   *private = cscan->custom_private;
-	ListCell   *lc;
-	int			i = 0;
 
 	state->outer_index =
-		index_open(DatumGetObjectId(linitial_node(Const, private)->constvalue),
+		index_open(DatumGetObjectId(private_datum(private, PRIVATE_OUTER_INDEX)),
 				   AccessShareLock);
 	state->inner_index =
-		index_open(DatumGetObjectId(lsecond_node(Const, private)->constvalue),
+		index_open(DatumGetObjectId(private_datum(private, PRIVATE_INNER_INDEX)),
 				   AccessShareLock);
 	state->descending =
-		DatumGetBool(lthird_node(Const, private)->constvalue);
+		DatumGetBool(private_datum(private, PRIVATE_DESCENDING));
+	state->inner_sortpos =
+		DatumGetInt32(private_datum(private, PRIVATE_INNER_SORTPOS));
 
-	foreach(lc, linitial_node(List, cscan->custom_exprs))
-	{
-		Expr	   *expr = (Expr *) lfirst(lc);
-
-		state->equal_exprs[i] = ExecInitExpr(expr, &node->ss.ps);
-		state->equal_types[i] = exprType((Node *) expr);
-		state->equal_attnos[i] = state->outer_index->rd_index->indkey.values[i];
-		i++;
-	}
-	state->nequal = i;
-	state->inner_pred = ExecInitQual(lsecond_node(List, cscan->custom_exprs),
-									 &node->ss.ps);
+	init_equality_keys(&state->outer_keys,
+					   list_nth_node(List, cscan->custom_exprs, EXPRS_OUTER_KEYS),
+					   state->outer_index, &node->ss.ps);
+	init_equality_keys(&state->inner_keys,
+					   list_nth_node(List, cscan->custom_exprs, EXPRS_INNER_KEYS),
+					   state->inner_index, &node->ss.ps);
+	state->inner_pred =
+		ExecInitQual(list_nth_node(List, cscan->custom_exprs, EXPRS_INNER_PRED),
+					 &node->ss.ps);
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
 	state->outer_scan = index_beginscan(heap, state->outer_index,
 										estate->es_snapshot, NULL,
-										state->nequal, 0);
+										state->outer_keys.nequal, 0);
 	state->inner_scan = index_beginscan(heap, state->inner_index,
-										estate->es_snapshot, NULL, 0, 0);
+										estate->es_snapshot, NULL,
+										state->inner_keys.nequal, 0);
 	state->outer_scan->xs_want_itup = true;
 	state->inner_scan->xs_want_itup = true;
 
@@ -1194,10 +1386,33 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 }
 
 /*
+ * evaluate_keys
+ *		Evaluate the equality values of one side.  Returns false when a
+ *		value is NULL.
+ */
+static bool
+evaluate_keys(EqualityKeys *keys, ExprContext *econtext)
+{
+	for (int i = 0; i < keys->nequal; i++)
+	{
+		Datum		value;
+		bool		isnull;
+
+		value = ExecEvalExprSwitchContext(keys->exprs[i], econtext, &isnull);
+		if (isnull)
+			return false;
+
+		keys->values[i] = datum_get_int64(value, keys->types[i]);
+	}
+
+	return true;
+}
+
+/*
  * evaluate_equal_values
- *		Evaluate the equality values once per (re)scan.  Also used by the
- *		EvalPlanQual recheck, which runs on a planstate copy whose scan was
- *		never started.  Returns false when a value is NULL.
+ *		Evaluate the equality values of both sides once per (re)scan.  Also
+ *		used by the EvalPlanQual recheck, which runs on a planstate copy
+ *		whose scan was never started.  Returns false when a value is NULL.
  */
 static bool
 evaluate_equal_values(IntersectScanState *state)
@@ -1208,25 +1423,26 @@ evaluate_equal_values(IntersectScanState *state)
 		return !state->values_null;
 
 	state->values_ready = true;
-	state->values_null = false;
+	state->values_null = !evaluate_keys(&state->outer_keys, econtext) ||
+		!evaluate_keys(&state->inner_keys, econtext);
 
-	for (int i = 0; i < state->nequal; i++)
-	{
-		Datum		value;
-		bool		isnull;
+	return !state->values_null;
+}
 
-		value = ExecEvalExprSwitchContext(state->equal_exprs[i], econtext,
-										  &isnull);
-		if (isnull)
-		{
-			state->values_null = true;
-			return false;
-		}
+/*
+ * rescan_with_keys
+ *		Position an index scan on the current equality values of one side.
+ */
+static void
+rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys)
+{
+	ScanKeyData scankeys[INDEX_MAX_KEYS];
 
-		state->equal_values[i] = datum_get_int64(value, state->equal_types[i]);
-	}
+	for (int i = 0; i < keys->nequal; i++)
+		ScanKeyInit(&scankeys[i], i + 1, BTEqualStrategyNumber, F_INT8EQ,
+					Int64GetDatum(keys->values[i]));
 
-	return true;
+	index_rescan(scan, scankeys, keys->nequal, NULL, 0);
 }
 
 /*
@@ -1237,19 +1453,52 @@ evaluate_equal_values(IntersectScanState *state)
 static bool
 intersect_start(IntersectScanState *state)
 {
-	ScanKeyData keys[INDEX_MAX_KEYS];
-
 	if (!evaluate_equal_values(state))
 		return false;
 
-	for (int i = 0; i < state->nequal; i++)
-		ScanKeyInit(&keys[i], i + 1, BTEqualStrategyNumber, F_INT8EQ,
-					Int64GetDatum(state->equal_values[i]));
-
-	index_rescan(state->outer_scan, keys, state->nequal, NULL, 0);
-	index_rescan(state->inner_scan, NULL, 0, NULL, 0);
+	rescan_with_keys(state->outer_scan, &state->outer_keys);
+	rescan_with_keys(state->inner_scan, &state->inner_keys);
 
 	return true;
+}
+
+/*
+ * row_matches_keys
+ *		Do the heap row's columns equal the current values of one side?
+ */
+static bool
+row_matches_keys(TupleTableSlot *slot, EqualityKeys *keys)
+{
+	for (int i = 0; i < keys->nequal; i++)
+	{
+		bool		isnull;
+		Datum		value;
+
+		value = slot_getattr(slot, keys->attnos[i], &isnull);
+		if (isnull || DatumGetInt64(value) != keys->values[i])
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * row_matches_inner
+ *		Would the inner index hold an entry for this row version: does it
+ *		satisfy the inner equalities and the inner predicate?  Used where
+ *		the row was not matched against the inner index by TID.
+ */
+static bool
+row_matches_inner(IntersectScanState *state, TupleTableSlot *slot)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+
+	if (!row_matches_keys(slot, &state->inner_keys))
+		return false;
+
+	econtext->ecxt_scantuple = slot;
+
+	return ExecQualAndReset(state->inner_pred, econtext);
 }
 
 /*
@@ -1310,7 +1559,8 @@ tid_compare(const void *a, const void *b)
 static void
 read_inner_entry(IntersectScanState *state, ScanDirection dir)
 {
-	if (read_index_entry(state->inner_scan, dir, 1, &state->inner_value,
+	if (read_index_entry(state->inner_scan, dir, state->inner_sortpos + 1,
+						 &state->inner_value,
 						 &state->inner_tid, &state->inner_read))
 		state->have_inner = true;
 	else
@@ -1431,23 +1681,18 @@ intersect_next(ScanState *ss)
 
 			/*
 			 * An entry of an overflowed group was not matched against the
-			 * inner index: check its predicate on the row itself.
+			 * inner index: check the inner conditions on the row itself.
 			 */
-			if (state->match_by_pred)
-			{
-				ExprContext *econtext = ss->ps.ps_ExprContext;
-
-				econtext->ecxt_scantuple = slot;
-				if (!ExecQualAndReset(state->inner_pred, econtext))
-					continue;
-			}
+			if (state->match_by_pred && !row_matches_inner(state, slot))
+				continue;
 
 			return slot;
 		}
 
 		if (!state->have_outer)
 		{
-			if (!read_index_entry(state->outer_scan, dir, state->nequal + 1,
+			if (!read_index_entry(state->outer_scan, dir,
+								  state->outer_keys.nequal + 1,
 								  &state->outer_value, &state->outer_tid,
 								  &state->outer_read))
 				break;
@@ -1519,24 +1764,12 @@ static bool
 intersect_recheck(ScanState *ss, TupleTableSlot *slot)
 {
 	IntersectScanState *state = (IntersectScanState *) ss;
-	ExprContext *econtext = ss->ps.ps_ExprContext;
 
 	if (!evaluate_equal_values(state))
 		return false;
 
-	for (int i = 0; i < state->nequal; i++)
-	{
-		bool		isnull;
-		Datum		value;
-
-		value = slot_getattr(slot, state->equal_attnos[i], &isnull);
-		if (isnull || DatumGetInt64(value) != state->equal_values[i])
-			return false;
-	}
-
-	econtext->ecxt_scantuple = slot;
-
-	return ExecQualAndReset(state->inner_pred, econtext);
+	return row_matches_keys(slot, &state->outer_keys) &&
+		row_matches_inner(state, slot);
 }
 
 static TupleTableSlot *

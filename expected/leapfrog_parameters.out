@@ -198,9 +198,10 @@ FROM (VALUES (2::bigint), (3)) o (owner_id),
          ->  Values Scan on "*VALUES*"
          ->  Limit
                ->  Custom Scan (Index Merge Intersect) on lf_param
-                     Outer Index: lf_param_owner_kind_id
-                     Inner Index: lf_param_live_id
-(8 rows)
+                     Filter: (deleted_at IS NULL)
+                     Outer Index: lf_param_owner_id
+                     Inner Index: lf_param_owner_kind_id
+(9 rows)
 
 SELECT lf_check($$
 SELECT o.owner_id, k.kind_id, s.id

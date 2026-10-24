@@ -218,9 +218,10 @@ ORDER BY id DESC LIMIT 20 $$);
 -------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_basic
-         Outer Index: lf_basic_owner_kind_id
-         Inner Index: lf_basic_live_id
-(4 rows)
+         Filter: (deleted_at IS NULL)
+         Outer Index: lf_basic_owner_id
+         Inner Index: lf_basic_owner_kind_id
+(5 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND kind_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
                      lf_check                      

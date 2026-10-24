@@ -28,14 +28,16 @@ REGRESS = \
 	leapfrog_mvcc \
 	leapfrog_memory \
 	leapfrog_explain \
-	leapfrog_example
+	leapfrog_example \
+	leapfrog_btree_pair
 
 ISOLATION = \
 	leapfrog_concurrent_update \
 	leapfrog_predicate_flip \
 	leapfrog_hot_update \
 	leapfrog_delete \
-	leapfrog_repeatable_read
+	leapfrog_repeatable_read \
+	leapfrog_btree_pair
 
 ISOLATION_OPTS = --load-extension=leapfrog
 REGRESS_OPTS = --load-extension=leapfrog

@@ -1,0 +1,305 @@
+--
+-- leapfrog_btree_pair
+--
+-- Intersection of two ordinary composite indexes, (customer_id, id) and
+-- (product_id, id): with an equality on its leading column each scan
+-- returns its entries in id order, so the two streams merge like the
+-- partial-index case.  Results are compared with the standard plans.
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE lf_pair (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+);
+-- 50 customers x 7 products, every combination present; rows inserted out
+-- of id order.
+INSERT INTO lf_pair (id, customer_id, product_id, deleted_at, payload)
+SELECT g, g % 50, g % 7,
+	CASE WHEN g % 3 = 0 THEN '2026-01-01'::timestamptz END, 'p' || g
+FROM generate_series(1, 50000) g
+ORDER BY (g * 7919) % 50000;
+CREATE INDEX lf_pair_customer_id ON lf_pair (customer_id, id);
+CREATE INDEX lf_pair_product_id ON lf_pair (product_id, id);
+ANALYZE lf_pair;
+-- The two ordinary indexes form a pair; both equalities are enforced by
+-- the scans, so no Filter is left.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4
+ORDER BY id DESC LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_pair
+         Outer Index: lf_pair_product_id
+         Inner Index: lf_pair_customer_id
+(4 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 143/143, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 143/143, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id LIMIT 1 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 1/1, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id DESC LIMIT 100 $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 999 AND product_id = 4 ORDER BY id $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 0/0, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 999 ORDER BY id DESC $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 0/0, missing: 0, extra: 0
+(1 row)
+
+-- Only the rows of both sides are fetched.
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id DESC $$);
+      counter       |         value         
+--------------------+-----------------------
+ Outer Index        | "lf_pair_product_id"
+ Inner Index        | "lf_pair_customer_id"
+ Outer Entries Read | 7143
+ Inner Entries Read | 1000
+ Matched TIDs       | 143
+ Heap Fetches       | 143
+ Peak Group Memory  | 96
+ Actual Rows        | 143.00
+ Actual Loops       | 1
+(9 rows)
+
+SELECT count(*) FROM lf_pair WHERE customer_id = 3 AND product_id = 4;
+ count 
+-------
+   143
+(1 row)
+
+-- A third condition no index covers stays in the Filter.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL
+ORDER BY id LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_pair
+         Filter: (deleted_at IS NULL)
+         Outer Index: lf_pair_product_id
+         Inner Index: lf_pair_customer_id
+(5 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
+-- A partial index with an equality prefix: (product_id, id) WHERE
+-- deleted_at IS NULL serves both the product and the deleted_at condition.
+CREATE INDEX lf_pair_live_product_id ON lf_pair (product_id, id) WHERE deleted_at IS NULL;
+ANALYZE lf_pair;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL
+ORDER BY id DESC LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_pair
+         Filter: (deleted_at IS NULL)
+         Outer Index: lf_pair_live_product_id
+         Inner Index: lf_pair_customer_id
+(5 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL ORDER BY id DESC $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 96/96, missing: 0, extra: 0
+(1 row)
+
+DROP INDEX lf_pair_live_product_id;
+-- Query parameters on both sides.
+SET leapfrog.force = on;
+SET plan_cache_mode = force_generic_plan;
+PREPARE lf_pair_q (bigint, integer) AS
+	SELECT id FROM lf_pair WHERE customer_id = $1 AND product_id = $2
+	ORDER BY id DESC LIMIT 3;
+EXPLAIN (COSTS OFF) EXECUTE lf_pair_q(3, 4);
+                      QUERY PLAN                      
+------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_pair
+         Outer Index: lf_pair_product_id
+         Inner Index: lf_pair_customer_id
+(4 rows)
+
+EXECUTE lf_pair_q(3, 4);
+  id   
+-------
+ 49753
+ 49403
+ 49053
+(3 rows)
+
+EXECUTE lf_pair_q(10, 1);
+  id   
+-------
+ 49960
+ 49610
+ 49260
+(3 rows)
+
+EXECUTE lf_pair_q(3, NULL);
+ id 
+----
+(0 rows)
+
+DEALLOCATE lf_pair_q;
+RESET plan_cache_mode;
+RESET leapfrog.force;
+-- The inner equality value comes from an outer relation: a nestloop
+-- parameter on the inner side.
+SELECT * FROM lf_plan($$
+SELECT v.p, s.id
+FROM (VALUES (1::bigint), (4), (999)) v (p),
+	LATERAL (SELECT id FROM lf_pair
+			 WHERE customer_id = 3 AND product_id = v.p
+			 ORDER BY id DESC LIMIT 3) s $$);
+                          lf_plan                           
+------------------------------------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*"
+   ->  Limit
+         ->  Custom Scan (Index Merge Intersect) on lf_pair
+               Outer Index: lf_pair_product_id
+               Inner Index: lf_pair_customer_id
+(6 rows)
+
+SELECT lf_check($$
+SELECT v.p, s.id
+FROM (VALUES (1::bigint), (4), (999)) v (p),
+	LATERAL (SELECT id FROM lf_pair
+			 WHERE customer_id = 3 AND product_id = v.p
+			 ORDER BY id DESC LIMIT 3) s $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 6/6, missing: 0, extra: 0
+(1 row)
+
+-- Pairs that must not be formed: the primary key (id) alone narrows
+-- nothing down, and with only that and (customer_id, id) there is no pair.
+BEGIN;
+DROP INDEX lf_pair_product_id;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id LIMIT 20 $$);
+                        lf_plan                        
+-------------------------------------------------------
+ Limit
+   ->  Index Scan using lf_pair_customer_id on lf_pair
+         Index Cond: (customer_id = 3)
+         Filter: (product_id = 4)
+(4 rows)
+
+ROLLBACK;
+-- An ordinary inner index whose equality columns all appear in the outer
+-- index adds nothing either: (customer_id, product_id, id) may be the
+-- outer side of (customer_id, id), but not the other way round.
+BEGIN;
+DROP INDEX lf_pair_product_id;
+CREATE INDEX lf_pair_customer_product_id ON lf_pair (customer_id, product_id, id);
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id LIMIT 20 $$);
+                       lf_plan                        
+------------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_pair
+         Outer Index: lf_pair_customer_id
+         Inner Index: lf_pair_customer_product_id
+(4 rows)
+
+ROLLBACK;
+--
+-- A non-unique sort column with a group that overflows work_mem.  The
+-- fallback fetches every outer row of the value and must check the inner
+-- equality on it: product_id is enforced by the inner scan only and is not
+-- in the node's Filter.
+--
+CREATE TABLE lf_pair_dup (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	grp bigint NOT NULL
+);
+-- one customer, one grp value; 15,000 rows of product 2 (more than the
+-- 10,922 TIDs that fit into 64kB) and 5,000 of product 3
+INSERT INTO lf_pair_dup
+SELECT g, 1, CASE WHEN g % 4 = 0 THEN 3 ELSE 2 END, 1
+FROM generate_series(1, 20000) g;
+CREATE INDEX lf_pair_dup_customer_grp ON lf_pair_dup (customer_id, grp);
+CREATE INDEX lf_pair_dup_product_grp ON lf_pair_dup (product_id, grp);
+ANALYZE lf_pair_dup;
+SET work_mem = '64kB';
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_pair_dup WHERE customer_id = 1 AND product_id = 2 ORDER BY grp $$);
+                      lf_plan                       
+----------------------------------------------------
+ Custom Scan (Index Merge Intersect) on lf_pair_dup
+   Outer Index: lf_pair_dup_customer_grp
+   Inner Index: lf_pair_dup_product_grp
+(3 rows)
+
+SELECT * FROM lf_counters($$
+SELECT * FROM lf_pair_dup WHERE customer_id = 1 AND product_id = 2 ORDER BY grp $$)
+WHERE counter IN ('Outer Index', 'Inner Index', 'Group Overflows',
+				  'Rows Checked by Predicate', 'Actual Rows');
+          counter          |           value            
+---------------------------+----------------------------
+ Outer Index               | "lf_pair_dup_customer_grp"
+ Inner Index               | "lf_pair_dup_product_grp"
+ Rows Checked by Predicate | 20000
+ Group Overflows           | 1
+ Actual Rows               | 15000.00
+(5 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_pair_dup WHERE customer_id = 1 AND product_id = 2 ORDER BY grp $$, false);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 15000/15000, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT * FROM lf_pair_dup WHERE customer_id = 1 AND product_id = 3 ORDER BY grp DESC $$, false);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 5000/5000, missing: 0, extra: 0
+(1 row)
+
+RESET work_mem;
+-- the same without overflow
+SELECT lf_check($$ SELECT * FROM lf_pair_dup WHERE customer_id = 1 AND product_id = 2 ORDER BY grp $$, false);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 15000/15000, missing: 0, extra: 0
+(1 row)
+
+DROP TABLE lf_pair_dup;
+DROP TABLE lf_pair;

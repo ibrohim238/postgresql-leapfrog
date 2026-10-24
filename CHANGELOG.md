@@ -7,6 +7,18 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Intersection of two ordinary B-tree indexes. The inner side is now any
+  `(j1, …, jM, sortcol, …)` index with an equality on every `jI`, partial or
+  not; an ordinary index needs at least one equality column the outer index
+  does not have. `(customer_id, id)` and `(product_id, id)` serve
+  `customer_id = $1 AND product_id = $2 ORDER BY id LIMIT n`. The inner
+  equalities are scan keys, are rechecked under EvalPlanQual, and are checked
+  on the row in the overflow fallback. Tests `leapfrog_btree_pair` (regression
+  and isolation); both fail without the inner checks.
+- The sort column no longer has to lead some index of the table.
+- Under `leapfrog.force` the index pairs compete among themselves by their
+  real cost instead of all costing zero.
+
 - `leapfrog_memory` regression test: peak backend memory of the predicate
   fallback; fails by about 200 MB of growth without the per-row context reset.
 - Cost model checks in `leapfrog_explain`: heap correlation (set through

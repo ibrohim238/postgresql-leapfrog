@@ -1,3 +1,4 @@
 ColumnMatchArg
+EqualityKeys
+IndexCandidate
 IntersectScanState
-OuterCandidate
