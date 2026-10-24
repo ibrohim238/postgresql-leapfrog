@@ -709,6 +709,22 @@ intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 						RelationGetRelationName(state->outer_index), es);
 	ExplainPropertyText("Inner Index",
 						RelationGetRelationName(state->inner_index), es);
+
+	/* the cost model's expectation, to set against the counters below */
+	if (es->verbose && es->costs)
+	{
+		List	   *private = ((CustomScan *) node->ss.ps.plan)->custom_private;
+
+		ExplainPropertyFloat("Outer Entries Estimated", NULL,
+							 DatumGetFloat8(private_datum(private,
+														  PRIVATE_OUTER_ESTIMATE)),
+							 0, es);
+		ExplainPropertyFloat("Inner Entries Estimated", NULL,
+							 DatumGetFloat8(private_datum(private,
+														  PRIVATE_INNER_ESTIMATE)),
+							 0, es);
+	}
+
 	/* summed over all rescans, like the executor's own counters */
 	if (es->analyze)
 	{

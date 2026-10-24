@@ -398,6 +398,7 @@ Custom Scan (Index Merge Intersect) on orders
 | `Outer Index` / `Inner Index` | the chosen pair; separate properties in `FORMAT JSON/YAML/XML`. |
 | `Filter` | conditions the node checks on the row. The equalities of both indexes and conditions implied by the inner predicate are not in `Filter` (like `Index Cond` of an Index Scan); the exception is the target relation of `UPDATE/DELETE/SELECT FOR UPDATE`, where predicate-implied conditions are kept for EvalPlanQual. |
 | `Outer Entries Read` / `Inner Entries Read` | entries read from each index, including dead entries with a NULL sort value that are skipped. |
+| `Outer Entries Estimated` / `Inner Entries Estimated` | with `VERBOSE` (and costs on): the entries the cost model expected each side to read, to set against the two counters above. `tests/performance/cost_bench.sh` records both and their ratio per query. |
 | `Matched TIDs` | entries found by TID in both indexes. |
 | `Heap Fetches` | `index_fetch_heap` calls (including HOT chain continuations). |
 | `Rows Removed by Filter` | the standard counter of rows dropped by `Filter`. |

@@ -4,17 +4,20 @@
 #
 # Table of ROWS rows:
 #   customer_id   200 values, hashed (independent of everything else)
+#   product_id    100 values, hashed (a second ordinary index for pairs)
 #   region        10 values, region = id / (ROWS / 10): follows the heap order
 #   deleted_at    set for 10 % of the oldest 20 % of ids only (skewed)
 #   archived      1.6 % of the rows, hashed (uniform)
-# Indexes: (customer_id, id), (region, id), (id) WHERE deleted_at IS NOT
-# NULL, (id) WHERE archived.
+# Indexes: (customer_id, id), (product_id, id), (region, id), (id) WHERE
+# deleted_at IS NOT NULL, (id) WHERE archived.
 #
 # Every query runs three ways: leapfrog on (the planner's choice), forced
 # (the stock scans disabled, so that the node keeps its real estimate) and
-# off (stock).  For each the estimated total cost of
-# the top node and the median execution time over REPEATS runs are recorded,
-# with the forced node's entries read.  The summary marks
+# off (stock).  For each the estimated total cost of the top node, the
+# median execution time over REPEATS runs and the shared buffers touched are
+# recorded; for the node also the entries the cost model expected each side
+# to read (EXPLAIN VERBOSE), the entries read and the skips.  The summary
+# marks
 #   miss    the forced node is more than 15 % faster than the planner's
 #           choice, and the planner did not choose it
 #   wrong   the planner chose the node and the stock plan is more than
@@ -22,6 +25,10 @@
 #   bias    (node cost / node ms) / (stock cost / stock ms): above 1 the
 #           node is overcosted relative to the stock plan, below 1
 #           undercosted
+#   est_ratio  entries the cost model expected / entries read.  Meaningful
+#           for the queries without LIMIT: the estimate is for the whole
+#           merge, a Limit above stops it early.  Near 1 there, a miss is in
+#           the cost per entry or page, not in the entries estimate.
 #
 # Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; ROWS (1000000),
 # REPEATS (5), RANDOM_PAGE_COST (4).
@@ -48,36 +55,40 @@ DROP TABLE IF EXISTS lf_cost_bench;
 CREATE TABLE lf_cost_bench (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
 	region bigint NOT NULL,
 	deleted_at timestamptz,
 	archived boolean NOT NULL,
 	payload text
 ) WITH (autovacuum_enabled = false);
 INSERT INTO lf_cost_bench
-SELECT g, abs(hashint8(g * 4 + 1)) % 200, (g - 1) / ($ROWS / 10),
+SELECT g, abs(hashint8(g * 4 + 1)) % 200, abs(hashint8(g * 8 + 5)) % 100,
+	(g - 1) / ($ROWS / 10),
 	CASE WHEN g <= $ROWS / 5 AND abs(hashint8(g * 4 + 2)) % 10 = 0
 		THEN '2026-01-01'::timestamptz END,
 	abs(hashint8(g * 4 + 3)) % 64 = 0,
 	repeat('x', 40)
 FROM generate_series(1, $ROWS) g;
 CREATE INDEX lf_cost_bench_customer_id ON lf_cost_bench (customer_id, id);
+CREATE INDEX lf_cost_bench_product_id ON lf_cost_bench (product_id, id);
 CREATE INDEX lf_cost_bench_region_id ON lf_cost_bench (region, id);
 CREATE INDEX lf_cost_bench_deleted ON lf_cost_bench (id) WHERE deleted_at IS NOT NULL;
 CREATE INDEX lf_cost_bench_archived ON lf_cost_bench (id) WHERE archived;
 VACUUM ANALYZE lf_cost_bench;
 
 CREATE OR REPLACE FUNCTION lf_cost_bench_run(query text, repeats int)
-RETURNS TABLE (node boolean, cost numeric, ms numeric, outer_read bigint,
-			   inner_read bigint, rows bigint)
+RETURNS TABLE (node boolean, cost numeric, ms numeric, buffers bigint,
+			   outer_est numeric, inner_est numeric, outer_read bigint,
+			   inner_read bigint, skips bigint, rows bigint)
 LANGUAGE plpgsql AS \$\$
 DECLARE
 	plan jsonb;
 	custom jsonb;
 	times numeric[] := '{}';
 BEGIN
-	EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || query INTO plan;
+	EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, BUFFERS, FORMAT JSON) ' || query INTO plan;
 	FOR i IN 1 .. repeats LOOP
-		EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || query INTO plan;
+		EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, BUFFERS, FORMAT JSON) ' || query INTO plan;
 		times := times || (plan -> 0 ->> 'Execution Time')::numeric;
 	END LOOP;
 	SELECT n INTO custom FROM jsonb_path_query(plan, 'strict \$[0].Plan.**') AS n
@@ -86,8 +97,13 @@ BEGIN
 	cost := (plan -> 0 -> 'Plan' ->> 'Total Cost')::numeric;
 	ms := (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY t)
 		   FROM unnest(times) t)::numeric(10, 3);
+	buffers := (plan -> 0 -> 'Plan' ->> 'Shared Hit Blocks')::bigint +
+		(plan -> 0 -> 'Plan' ->> 'Shared Read Blocks')::bigint;
+	outer_est := (custom ->> 'Outer Entries Estimated')::numeric;
+	inner_est := (custom ->> 'Inner Entries Estimated')::numeric;
 	outer_read := (custom ->> 'Outer Entries Read')::bigint;
 	inner_read := (custom ->> 'Inner Entries Read')::bigint;
+	skips := coalesce((custom ->> 'Skips')::bigint, 0);
 	rows := (plan -> 0 -> 'Plan' ->> 'Actual Rows')::numeric::bigint;
 	RETURN NEXT;
 END
@@ -100,6 +116,8 @@ conditions=(
 	"region0+deleted|region = 0 AND deleted_at IS NOT NULL"
 	"region9+deleted|region = 9 AND deleted_at IS NOT NULL"
 	"region9+customer|region = 9 AND customer_id = 7"
+	"customer+product|customer_id = 7 AND product_id = 42"
+	"customer+product+deleted|customer_id = 7 AND product_id = 42 AND deleted_at IS NOT NULL"
 	"region5+archived|region = 5 AND archived"
 )
 orders=(
@@ -110,7 +128,7 @@ orders=(
 )
 
 settings="LOAD 'leapfrog'; SET max_parallel_workers_per_gather = 0; SET random_page_cost = $RANDOM_PAGE_COST;"
-echo "query,order,mode,node,cost,ms,outer_read,inner_read,rows" > "$out/cost.csv"
+echo "query,order,mode,node,cost,ms,buffers,outer_est,inner_est,outer_read,inner_read,skips,rows" > "$out/cost.csv"
 for c in "${conditions[@]}"; do
 	for o in "${orders[@]}"; do
 		query="SELECT * FROM lf_cost_bench WHERE ${c#*|} ${o#*|}"
@@ -134,12 +152,17 @@ $PSQL -c "DROP TABLE lf_cost_bench; DROP FUNCTION lf_cost_bench_run(text, int)"
 # summary: one line per query and order
 $PSQL -P footer=off <<SQL
 CREATE TEMP TABLE r (query text, ord text, mode text, node boolean, cost numeric,
-	ms numeric, outer_read bigint, inner_read bigint, rows bigint);
+	ms numeric, buffers bigint, outer_est numeric, inner_est numeric,
+	outer_read bigint, inner_read bigint, skips bigint, rows bigint);
 \copy r FROM '$out/cost.csv' WITH (FORMAT csv, HEADER)
+-- est_ratio: entries the cost model expected / entries the node read
 SELECT q.query, q.ord,
 	o.node AS chosen,
 	f.ms AS node_ms, s.ms AS stock_ms, o.ms AS chosen_ms,
+	f.buffers AS node_buf, s.buffers AS stock_buf,
 	f.outer_read + f.inner_read AS node_entries,
+	round((f.outer_est + f.inner_est) / greatest(f.outer_read + f.inner_read, 1), 2) AS est_ratio,
+	f.skips,
 	round(f.cost) AS node_cost, round(s.cost) AS stock_cost,
 	round((f.cost / greatest(f.ms, 0.001)) / (s.cost / greatest(s.ms, 0.001)), 2) AS bias,
 	CASE WHEN NOT o.node AND f.ms < o.ms / 1.15 THEN 'miss'

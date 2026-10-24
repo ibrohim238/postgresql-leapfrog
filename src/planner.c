@@ -69,6 +69,13 @@ make_oid_const(Oid value)
 					 ObjectIdGetDatum(value), false, true);
 }
 
+static Const *
+make_float8_const(double value)
+{
+	return makeConst(FLOAT8OID, -1, InvalidOid, sizeof(float8),
+					 Float8GetDatum(value), false, FLOAT8PASSBYVAL);
+}
+
 static bool
 is_column_var(Node *node, Index rti, AttrNumber attno)
 {
@@ -477,6 +484,8 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	Relids		required_outer;
 	double		outer_entries;
 	double		inner_entries;
+	double		outer_read;
+	double		inner_read;
 	double		group_size;
 
 	outer_entries = lf_index_entries(root, rti, outer, outer_candidate);
@@ -517,6 +526,10 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	cpath->flags = 0;
 	cpath->methods = &intersect_path_methods;
 
+	lf_cost_intersect_path(cpath, root, rte, sort_attno, outer_candidate,
+						   inner_candidate, outer_entries, inner_entries,
+						   group_size, correlation, &outer_read, &inner_read);
+
 	/*
 	 * A CustomPath has no custom_exprs; the value expressions and the inner
 	 * index predicate travel in custom_private and become the plan's
@@ -532,15 +545,15 @@ add_intersect_path(PlannerInfo *root, RelOptInfo *rel, Index rti,
 							 Int32GetDatum(inner_candidate->sortpos),
 							 false, true));
 	cpath->custom_private = lappend(cpath->custom_private,
+									make_float8_const(outer_read));
+	cpath->custom_private = lappend(cpath->custom_private,
+									make_float8_const(inner_read));
+	cpath->custom_private = lappend(cpath->custom_private,
 									copyObject(outer_candidate->exprs));
 	cpath->custom_private = lappend(cpath->custom_private,
 									copyObject(inner->indpred));
 	cpath->custom_private = lappend(cpath->custom_private,
 									copyObject(inner_candidate->exprs));
-
-	lf_cost_intersect_path(cpath, root, rte, sort_attno, outer_candidate,
-						   inner_candidate, outer_entries, inner_entries,
-						   group_size, correlation);
 
 	/*
 	 * With leapfrog.force the competition with the other plans is skipped,

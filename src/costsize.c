@@ -538,9 +538,11 @@ lf_index_entries(PlannerInfo *root, Index rti, IndexOptInfo *index,
  * lf_cost_intersect_path
  *		Set the rows, startup and total cost of an Index Merge Intersect path
  *		whose parameterization is set and whose rows hold the planner's
- *		estimate for the relation, as cost_index does for an index path.  outer_entries and inner_entries are lf_index_entries of
- *		both sides, group_size the expected TID group, correlation
- *		lf_outer_index_correlation of the outer index.
+ *		estimate for the relation, as cost_index does for an index path.
+ *		outer_entries and inner_entries are lf_index_entries of both sides,
+ *		group_size the expected TID group, correlation
+ *		lf_outer_index_correlation of the outer index.  Returns the entries
+ *		each side is expected to read, for EXPLAIN VERBOSE.
  */
 void
 lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
@@ -548,7 +550,8 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 					   IndexCandidate *outer_candidate,
 					   IndexCandidate *inner_candidate,
 					   double outer_entries, double inner_entries,
-					   double group_size, double correlation)
+					   double group_size, double correlation,
+					   double *outer_read_p, double *inner_read_p)
 {
 	RelOptInfo *rel = cpath->path.parent;
 	ParamPathInfo *param_info = cpath->path.param_info;
@@ -612,3 +615,5 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	cpath->path.startup_cost = startup_cost;
 	cpath->path.total_cost = startup_cost + run_cost;
 }
+	*outer_read_p = outer_read;
+	*inner_read_p = inner_read;

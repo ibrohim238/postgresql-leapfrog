@@ -28,6 +28,28 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
 EXPLAIN (COSTS OFF, VERBOSE)
 SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
 
+-- VERBOSE with costs adds the entries the cost model expects each side to
+-- read, to set against the ANALYZE counters (numbers masked).
+CREATE FUNCTION lf_plan_verbose(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+	line text;
+BEGIN
+	PERFORM set_config('leapfrog.force', 'on', true);
+	FOR line IN EXECUTE 'EXPLAIN (VERBOSE) ' || query LOOP
+		RETURN NEXT regexp_replace(line, '\d+(\.\d+)?', 'N', 'g');
+	END LOOP;
+END
+$$;
+SELECT * FROM lf_plan_verbose($$
+SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$)
+WHERE lf_plan_verbose ~ 'Entries Estimated';
+-- not without VERBOSE, not with COSTS OFF
+SELECT count(*) FROM lf_plan_costs($$
+SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$)
+WHERE lf_plan_costs ~ 'Estimated';
+DROP FUNCTION lf_plan_verbose(text);
+
 -- Costs are present without force (numbers masked).  Here the standard
 -- plan is cheaper: half of the rows are live and every fourth belongs to
 -- the owner, a plain index scan finds a match every few rows.

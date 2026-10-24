@@ -34,7 +34,10 @@
 #define PRIVATE_INNER_INDEX		1
 #define PRIVATE_DESCENDING		2
 #define PRIVATE_INNER_SORTPOS	3
-#define PRIVATE_COUNT			4
+#define PRIVATE_OUTER_ESTIMATE	4	/* entries the cost model expects each
+									 * side to read; EXPLAIN VERBOSE */
+#define PRIVATE_INNER_ESTIMATE	5
+#define PRIVATE_COUNT			6
 #define EXPRS_OUTER_KEYS		0	/* value expressions of the outer
 									 * equalities */
 #define EXPRS_INNER_PRED		1	/* predicate of the inner index, or NIL */
@@ -100,7 +103,8 @@ extern void lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 								   IndexCandidate *outer_candidate,
 								   IndexCandidate *inner_candidate,
 								   double outer_entries, double inner_entries,
-								   double group_size, double correlation);
+								   double group_size, double correlation,
+								   double *outer_read, double *inner_read);
 
 /* indexstream.c */
 extern int64 lf_datum_get_int64(Datum value, Oid type);

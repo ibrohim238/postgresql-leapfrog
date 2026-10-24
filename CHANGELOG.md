@@ -5,6 +5,16 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `EXPLAIN (VERBOSE)` shows `Outer Entries Estimated` and `Inner Entries
+  Estimated`: the entries the cost model expected each side to read, next to
+  the `ANALYZE` counters of what it read. `cost_bench.sh` records both, the
+  ratio, the skips and the buffers of every query, so that a miss can be
+  traced to the entries estimate or to the cost per entry.
+- `cost_bench.sh`: a second ordinary index `(product_id, id)` and two pair
+  queries, with and without a third condition.
+
 ## [0.0.2] — 2026-10-24
 
 Still experimental. The shared library changes; the SQL functions do not:
