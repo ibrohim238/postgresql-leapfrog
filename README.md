@@ -14,7 +14,8 @@ Limit
 Status: **experimental**. The algorithm and the executor are covered by
 regression and isolation tests (see [Tests](#tests)); the cost model is
 explainable but has been calibrated on synthetic data only. Read
-[Limitations](#limitations) before using it in production.
+[Known limitations](#known-limitations-and-planned-improvements) before using
+it in production.
 
 ## Contents
 
@@ -31,11 +32,10 @@ explainable but has been calibrated on synthetic data only. Read
 11. [Tests](#tests)
 12. [Benchmarks](#benchmarks)
 13. [Cost model](#cost-model)
-14. [Limitations](#limitations)
+14. [Known limitations and planned improvements](#known-limitations-and-planned-improvements)
 15. [Known issues](#known-issues)
 16. [Operational safety](#operational-safety)
-17. [Roadmap](#roadmap)
-18. [License](#license)
+17. [License](#license)
 
 ## Purpose
 
@@ -483,31 +483,236 @@ model makes the same assumption for `Index Scan + Filter`, so neither side
 has a systematic advantage. Refining the estimate with MCV statistics is
 postponed (see [Roadmap](#roadmap)).
 
-## Limitations
+## Known limitations and planned improvements
 
-- `bigint` columns only (the sort column and every equality column of the
-  outer index), `integer_ops` operator family only; `int2`/`int4` constants
-  and parameters are accepted, `int4` columns are not.
+The goal of the project is to replace many specialised composite indexes
+with fewer general ones — one `(filter_column, id)` index per filter plus a
+few partial indexes shared by the table — so that writes maintain fewer
+indexes and less storage, while ordered, `LIMIT`-ed reads stay fast because
+the planner composes those indexes at query time. Version 0.0.1 covers one
+shape of that composition. This section lists, as of the current code, what
+it does not do yet and what is planned; nothing below the "Current
+limitations" list is implemented.
+
+### Current limitations
+
+Verified against `src/leapfrog.c` and the test suites.
+
+**Index pairs**
+
+- Exactly two streams. The outer index is `(k1, …, kN, sortcol)` with an
+  equality on every `kI` (`find_outer_candidate`); the inner index must be a
+  **partial** index whose first column is `sortcol` (`is_inner_index`
+  requires `indpred != NIL`). Two ordinary composite indexes such as
+  `(customer_id, id)` and `(product_id, id)` cannot be intersected.
+- The outer index has at least two key columns and `sortcol` is its last key
+  column; expression columns are not accepted.
+
+**Data types and conditions**
+
+- `bigint` columns only, `integer_ops` operator family only
+  (`is_usable_btree`): the scan keys are built with `int8` operators
+  (`intersect_start`). `int2`/`int4` constants and parameters are accepted
+  (`is_int8_equality`), `int4`, `uuid` and other column types are not.
+- Equality (`=`) only on the outer columns. `IN (…)`, ranges and `IS NULL`
+  are not supported.
 - The sort column must be `NOT NULL` according to the planner
-  (`RelOptInfo.notnullattnums`): a constraint added `NOT VALID` does not count
+  (`RelOptInfo.notnullattnums`); a constraint added `NOT VALID` does not count
   until `VALIDATE CONSTRAINT`.
-- Equality (`=`) only; `IN (…)`, ranges, `IS NULL` on equality columns are not
-  supported.
-- Both indexes: nbtree v4, `ASC`, no `DESC` columns, the same operator family
-  as the query's sort key. `ORDER BY … DESC` is served by a backward scan.
-- The outer index has at least two key columns; the inner one is partial,
-  starts with the sort column, and its predicate follows from `WHERE`.
+- Both indexes: nbtree v4, `ASC` columns, the operator family of the query's
+  sort key. `ORDER BY … DESC` is served by a backward scan.
+
+**Planner**
+
+- Candidates are generated for every ordered pair of the relation's indexes
+  (two nested loops in `intersect_set_rel_pathlist`), and every pair that
+  passes the cheap checks runs `estimate_num_groups`, a `pg_statistic`
+  lookup and `_bt_metaversion` (which opens the index). The cost grows with
+  the square of the number of indexes; planning time has not been measured
+  on tables with many indexes.
+- Only the first key of the query's `ORDER BY` (`root->query_pathkeys`) is
+  considered; orders that would help a merge join, a window or an ordered
+  aggregate are not.
+- For a parameterized path the first suitable equality per column is used
+  (`find_equality_clause`); alternatives through other members of an
+  equivalence class are not offered as separate paths.
 - One relation per node; partitioned tables, inheritance children and
-  materialized views as a source are rejected (`relkind = 'r'`,
-  `RELOPT_BASEREL`). No parallel execution (`parallel_safe = false`).
-- Only the first `ORDER BY` key is used for the merge; with a composite
-  `ORDER BY` the planner puts a `Sort` (incremental or full) above the node.
-- The TID group is limited by `work_mem`. Average group estimate above
-  `work_mem` — the path is not offered. Actual group above `work_mem` —
-  predicate fallback (`Group Overflows`): correct, but more expensive.
-- No `pg_stat_statements`-specific instrumentation; counters are shown only by
-  `EXPLAIN ANALYZE`.
+  materialized views are rejected (`relkind = 'r'`, `RELOPT_BASEREL`). No
+  parallel execution (`parallel_safe = false`).
+
+**Executor and memory**
+
+- The lagging stream is always read sequentially (`intersect_next`). When
+  the matches are far apart, both indexes are read over the whole gap; in the
+  benchmark one `LIMIT 1` query read 30,026 outer entries to return one row.
+- The inner entries of a value are materialised (`collect_group`): an array
+  of 6-byte TIDs that doubles up to `work_mem`, sorted with `qsort`, then
+  probed with `bsearch` for every outer entry of the value. The array keeps
+  its peak size until the end of the scan.
+- A group larger than `work_mem` falls back to fetching every outer row of
+  the value and checking the inner predicate on it (`Group Overflows`):
+  correct (tests `leapfrog_overflow`, `leapfrog_memory`), but every outer row
+  of that value costs a heap fetch.
+
+**Cost model**
+
+- Matches are assumed to be spread evenly along both indexes, and a `LIMIT`
+  is served by a proportional fraction of the total cost. Extended statistics
+  and the distribution of matches along `sortcol` are not used.
+- Measured effect: in the 1M-row benchmark the model never picked the node
+  where it was clearly slower, but it missed 14 of 192 queries where the
+  forced node was clearly faster, and it misses the 1,000-customer variant of
+  the README example (see [BENCHMARKS.md](BENCHMARKS.md)).
+
+**Tests and benchmarks**
+
+- Concurrency is covered for `UPDATE` of every relevant column, `DELETE`,
+  HOT updates, `VACUUM` between statements, `READ COMMITTED`, `REPEATABLE
+  READ`, `SERIALIZABLE` and EvalPlanQual. Not covered yet: concurrent
+  `INSERT` under `READ COMMITTED`, EvalPlanQual on a row that came through the
+  overflow fallback, concurrent changes inside large duplicate groups, and
+  `VACUUM` running while a scan is in progress.
+- The benchmark measures index size and `SELECT` only. Write throughput,
+  WAL volume and planning time — the other half of the project's goal — are
+  not measured yet.
+
+**Other**
+
+- No instrumentation outside `EXPLAIN ANALYZE`.
 - The library is never unloaded; switch it off with `leapfrog.enabled = off`.
+
+### Roadmap
+
+The items below are plans. The examples use a neutral schema: `orders` with
+`customer_id`, `product_id` and `deleted_at`.
+
+#### P1. Intersection of two ordinary B-tree indexes
+
+Today the inner side must be a partial index starting with the sort column.
+The target is two independent composite indexes:
+
+```sql
+CREATE INDEX idx_orders_customer ON orders (customer_id, id);
+CREATE INDEX idx_orders_product  ON orders (product_id, id);
+
+SELECT * FROM orders
+WHERE customer_id = 100 AND product_id = 200
+ORDER BY id DESC LIMIT 100;
+```
+
+With an equality on its leading column, each scan returns its entries in
+`id` order, so the existing merge applies. Needed: equality scan keys on the
+inner side (today it is opened with none), the inner equalities in the
+EvalPlanQual recheck and in the qual stripping (`intersect_scan_qual`), and
+costing of the inner side as a selective scan rather than a full read of a
+partial index. Matching by TID, both scan directions and non-unique `id`
+values must work as they do now. This is the main step towards fewer
+specialised composite indexes.
+
+#### P1. Cost model
+
+- Estimate how many entries of each stream must be read to produce
+  `LIMIT N`, from the distribution of each condition along `sortcol` rather
+  than an even spread: histograms of `sortcol` per condition, MCV lists, and
+  extended statistics (`CREATE STATISTICS … (dependencies, mcv)`) between the
+  filter columns and the predicate columns.
+- Separate the startup cost (entries read before the first match) from the
+  total cost, so that `LIMIT` is costed on the real shape of the gap.
+- Acceptance: on the benchmark matrix, including data where the filters are
+  correlated or anti-correlated with `sortcol`, the node is never chosen where
+  a stock plan is clearly cheaper, and the number of missed cases (14 of 192
+  today) goes down.
+
+#### P1. Adaptive skip-ahead
+
+When one stream is far behind, re-position it instead of reading the gap:
+
+```text
+outer: 1, 2, 3, 4, … 900000
+inner: 900000, 900001, 900002
+```
+
+The mechanism available to an extension is `index_rescan` with an extra
+scan key `sortcol >= value` (`<=` for a backward scan); it costs one descent
+of the B-tree, about `tree_height` page reads. Plan: read sequentially by
+default, and switch to a re-descent once the lagging side has read more than
+about a leaf page of entries without meeting the other side; record the
+number of re-descents in `EXPLAIN ANALYZE`. This is also what makes the name
+"leapfrog" accurate.
+
+#### P2. N-way intersection
+
+```sql
+-- (customer_id, id), (product_id, id), (id) WHERE deleted_at IS NULL
+SELECT * FROM orders
+WHERE customer_id = 100 AND product_id = 200 AND deleted_at IS NULL
+ORDER BY id DESC LIMIT 100;
+```
+
+Generalise the merge to k sorted streams (advance the minimum, match by TID
+across all of them). In the planner, bound the combinations: a maximum
+number of streams, and streams added greedily by selectivity rather than all
+subsets.
+
+#### P2. Planner search
+
+Pre-filter indexes once per relation (leading column, operator family,
+`ASC`, NOT NULL), cache the group size, correlation and nbtree version per
+relation instead of per pair, consider useful pathkeys beyond the query's
+`ORDER BY`, and measure planning time on tables with 10, 20 and 50 indexes.
+
+#### P2. Memory of non-unique keys
+
+Research a streaming match without materialising the group: when both
+streams return the TIDs of one value in TID order, a two-pointer merge needs
+no array. This holds for a forward scan of an index whose remaining key
+columns are all fixed by equality; whether it holds for backward scans and
+posting lists has to be verified against nbtree before relying on it. Also
+release the group array after an unusually large group.
+
+#### P2. Concurrency tests
+
+Add the cases listed above as not covered: concurrent `INSERT` under `READ
+COMMITTED`, EvalPlanQual through the overflow fallback, concurrent changes
+inside large duplicate groups, `VACUUM` during a scan, and dead entries with
+`NULL` under concurrency. Criterion: for the same snapshot the node returns
+exactly the rows of the stock plans.
+
+#### P2. Write and storage benchmarks
+
+Compare on the same data and equivalent queries:
+
+1. many specialised composite indexes;
+2. fewer general indexes + leapfrog;
+3. the same general indexes, stock PostgreSQL.
+
+Measure total index size, `INSERT`/`UPDATE`/`DELETE` rows per second, WAL
+generated, `SELECT` latency, planning time and heap fetches. This is the
+evidence for the write-side half of the project's goal.
+
+#### P3. More types and conditions
+
+`int4`, `uuid` and other B-tree operator families through operators looked
+up from the index's operator family instead of fixed `int8` operators;
+`IN (…)` on an equality column as several outer scans merged in `sortcol`
+order; composite sort keys. A range on a leading outer column breaks the
+`sortcol` order of the outer stream, so it can only be supported as several
+per-value scans. Each item lands only with tests that compare it with the
+stock plans.
+
+### Priorities
+
+| Priority | Improvement | Main benefit |
+|---|---|---|
+| P1 | Two ordinary B-tree indexes | Fewer specialised composite indexes |
+| P1 | Better cost model | More reliable plan choice |
+| P1 | Adaptive skip-ahead | Faster reads on sparse intersections |
+| P2 | N-way intersection | More index reuse |
+| P2 | Planner search | Lower planning overhead |
+| P2 | Memory of non-unique keys | Predictable memory use |
+| P2 | Concurrency tests | Correctness evidence |
+| P2 | Write and storage benchmarks | Evidence for smaller indexes and faster writes |
+| P3 | More types and conditions | Broader applicability |
 
 ## Known issues
 
@@ -549,23 +754,6 @@ postponed (see [Roadmap](#roadmap)).
   functions, as for any C extension).
 - `leapfrog.force` is `USERSET`: any user can slow down their own query; other
   sessions are not affected.
-
-## Roadmap
-
-- Skip ahead instead of reading the lagging side sequentially: re-descend the
-  B-tree to the other side's value (true leapfrog), which removes the
-  long sequential reads seen under skew.
-- Refine the entries-read estimate with MCV statistics and histograms (skewed
-  distribution of deleted rows).
-- `int4` columns and other btree operator families through dynamic operator
-  lookup (`get_opfamily_member`).
-- `IN (…)` / `ScalarArrayOpExpr` on equality columns as several consecutive
-  scans of the outer index.
-- Intersection of more than two indexes and use of the second `ORDER BY` key.
-- Partitioned tables (`RELOPT_OTHER_MEMBER_REL`).
-- Parallel execution (`parallel_aware` with range partitioning of `sortcol`).
-- Publication on PGXN; discussion on pgsql-hackers as an Index Merge
-  Intersect node for core.
 
 ## License
 

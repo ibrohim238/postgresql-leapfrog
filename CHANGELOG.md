@@ -22,6 +22,13 @@ versions: [SemVer](https://semver.org/).
   not win. The previous example output had been written by hand and could not
   be reproduced (the table had no data). The example runs as the regression
   test `leapfrog_example`.
+- README section "Known limitations and planned improvements": the current
+  limitations verified against the code and the tests (index pairs, types,
+  planner search, executor memory, cost model, test and benchmark coverage)
+  and a prioritised roadmap (two ordinary B-tree indexes, cost model,
+  adaptive skip-ahead, N-way intersection, planner search, memory,
+  concurrency tests, write and storage benchmarks, more types). It replaces
+  the separate "Limitations" and "Roadmap" sections.
 
 ### Removed
 
