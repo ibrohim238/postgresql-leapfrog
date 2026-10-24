@@ -431,6 +431,7 @@ Regression tests (`sql/`):
 | `leapfrog_example` | the example above verbatim, with the planner's choice at both page costs |
 | `leapfrog_btree_pair` | two ordinary indexes `(customer_id, id)` and `(product_id, id)`: both directions, parameters on either side, partial index with an equality prefix, pairs that must not be formed, the overflow fallback checking the inner equality |
 | `leapfrog_skip` | skip-ahead on both sides, both directions, non-unique sort column, rescans, dead entries |
+| `leapfrog_outer_partial` | partial index on the outer side: its predicate's conditions stay in the `Filter`, plain and `FOR UPDATE`, rows that left the index |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -449,6 +450,9 @@ Isolation tests (`tests/isolation/specs/`):
 | `leapfrog_hot_update` | three HOT updates in a row, a reader with an old snapshot |
 | `leapfrog_delete` | `DELETE` and owner change, old and new snapshots, `VACUUM` |
 | `leapfrog_repeatable_read` | stable repeated reads, `SERIALIZABLE`, `FOR UPDATE` on a changed row |
+| `leapfrog_outer_partial` | EvalPlanQual with a partial outer index: a row soft-deleted while `FOR UPDATE` waits is dropped, a row whose other columns changed is returned |
+| `leapfrog_insert_vacuum` | concurrent `INSERT` under `READ COMMITTED`, `FOR UPDATE` waiting on a transaction that also inserts, `VACUUM` with an open cursor whose scan has run out |
+| `leapfrog_overflow_epq` | EvalPlanQual through the overflow fallback (`work_mem = 64kB`): rows leaving and joining the inner side |
 
 ## Benchmarks
 
@@ -551,9 +555,9 @@ Verified against `src/leapfrog.c` and the tests.
 
 **Tests and benchmarks**
 
-- Not covered yet: concurrent `INSERT` under `READ COMMITTED`, EvalPlanQual
-  through the overflow fallback, `VACUUM` while a scan is in progress, and an
-  assert-enabled (`--enable-cassert`) server build.
+- `VACUUM` while the node's scan is positioned on a leaf page is not in the
+  isolation tests: `isolationtester` does not see buffer pin waits. It was
+  checked by hand (see Known issues).
 - Benchmarks ran on one laptop with data in memory; timings vary up to 2×
   between runs. Cold-cache and 10M+ row runs have not been made.
 
@@ -570,7 +574,7 @@ and `deleted_at`.
 | P2 | N-way intersection | open |
 | P2 | Planner search | open |
 | P2 | Memory of non-unique keys | open |
-| P2 | Concurrency tests | partly (EPQ for both pair kinds); items above open |
+| P2 | Concurrency tests | **done**: EPQ for both pair kinds, partial outer index, overflow fallback; `INSERT`, `VACUUM` |
 | P2 | Write and storage benchmarks | **done**: `write_bench.sh` |
 | P3 | More types and conditions | open |
 
@@ -629,6 +633,12 @@ from the index's operator family; `IN (…)` as several outer scans merged in
   order: the row is returned at its old position with the new `id`. Every
   PostgreSQL plan behaves this way; `leapfrog_concurrent_update` records
   identical output for the node and the stock plan.
+- **VACUUM waits for a scan in progress.** The node reads the sort value from
+  the index tuple, so nbtree keeps the scan's current leaf page pinned, as for
+  an Index Only Scan. `VACUUM` of that index waits until the scan moves to the
+  next page or ends — for example behind a cursor left open in the middle of
+  its result. When the merge ends both scans release their pages, so an
+  exhausted cursor does not hold `VACUUM` (`leapfrog_insert_vacuum`).
 - **Misses of the cost model**, see above. `leapfrog.force` shows what the node
   would do; it does not guarantee the node is chosen (a parameterization the
   join order cannot provide, for example).

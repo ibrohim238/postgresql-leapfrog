@@ -25,7 +25,7 @@ versions: [SemVer](https://semver.org/).
   equalities are scan keys, are rechecked under EvalPlanQual, and are checked
   on the row in the overflow fallback. Tests `leapfrog_btree_pair` (regression
   and isolation); both fail without the inner checks.
-- Adaptive skip-ahead: a scan that has read 32 entries in a row without
+- Adaptive skip-ahead: a scan that has read 1,024 entries in a row without
   catching up with the other side descends its B-tree again straight to the
   other side's value (`index_rescan` with `sortcol >= value`, `<=` backward).
   Shown as `Skips` in `EXPLAIN ANALYZE`; costed per gap in the cost model.
@@ -57,8 +57,18 @@ versions: [SemVer](https://semver.org/).
   concurrency tests, write and storage benchmarks, more types). It replaces
   the separate "Limitations" and "Roadmap" sections.
 
+- Concurrency tests: `leapfrog_outer_partial` (regression and isolation; a
+  partial index on the outer side keeps its predicate's conditions in the
+  `Filter`, rechecked under EvalPlanQual — a variant dropping them returns a
+  concurrently soft-deleted row), `leapfrog_insert_vacuum` (concurrent
+  `INSERT`, `VACUUM` with an open cursor) and `leapfrog_overflow_epq`
+  (EvalPlanQual through the overflow fallback).
+
 ### Fixed
 
+- `VACUUM` waited for an open cursor whose node had finished its merge: the
+  stream that had not run out kept its leaf page pinned until the scan was
+  closed. Both scans now release their pages when the merge ends.
 - Cost model: heap fetches were charged with the correlation of the sort
   column, while a stock Index Scan on the outer index, which reads the same
   rows in the same order, is charged with the correlation of its leading
