@@ -515,7 +515,7 @@ BENCH_RANDOM_PAGE_COST=1.1 bash tests/performance/run.sh
 BENCH_SIZES="10000000" bash tests/performance/run.sh
 bash tests/performance/cost_bench.sh             # cost model: estimate against time, skewed and correlated data
 bash tests/performance/skip_bench.sh             # skip-ahead thresholds: buffers and entries read
-bash tests/performance/planning_bench.sh         # planning time with 10/20/50 indexes
+bash tests/performance/planning_bench.sh         # planning time: 10/20/50 indexes on the table, 1/2/6 used by the query
 ```
 
 Both scripts record `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` after a warm-up,
@@ -619,31 +619,48 @@ Verified against `src/` and the tests.
 
 **Planner and cost model**
 
-- Each index is checked once per planned relation; sets are formed only from
-  the indexes that can return the sort column in order with their equalities
-  fixed, and the `ndistinct` of the sort column, the outer correlation, the
-  nbtree version, the probed sort range and its share of the table are looked
-  up once per index. Every pair is costed; only the cheapest pair is then
-  grown, one stream per round, so a set of k streams costs k − 2 more rounds
-  over the candidates, not every combination. Measured with
-  `tests/performance/planning_bench.sh` (median of 100 plans, 20,000 rows,
-  constants in the query, laptop):
+- **Planning time depends on the candidates, not on how many indexes the
+  table has.** The planner looks at every index of the table once, but only
+  at its metadata (access method, key columns, operator family, predicate
+  proven by the planner already): an index whose columns before the sort
+  column are not all fixed by the query's equalities is dropped there, at
+  the cost of a loop over a few arrays. On a table with 50 indexes and a
+  query that uses 2 of them, 48 are dropped this way and never costed,
+  probed or combined.
 
-  | Indexes | Equalities | Stock, ms | With the node, ms | Range probe, two indexes only, ms |
+  The expensive work — reading each candidate's sort range from its B-tree,
+  the histogram lookups, costing the sets — is done only for the remaining
+  candidates. Every pair of candidates is costed; only the cheapest pair is
+  then grown, one stream per round, so a set of k streams costs k − 2 more
+  rounds over the candidates, not every combination.
+
+  Measured with `tests/performance/planning_bench.sh` (median of 100 plans,
+  20,000 rows, constants in the query, laptop). Every query also has
+  `deleted_at IS NULL`, so the indexes it can use are one per equality plus
+  `(id) WHERE deleted_at IS NULL`. That column is what the time follows; the
+  number of indexes on the table barely changes it:
+
+  | Indexes on the table | Equalities | Indexes the query can use | Stock, ms | With leapfrog, ms |
   |---:|---:|---:|---:|---:|
-  | 10 | 1 | 0.05 | 0.27 | 0.32 |
-  | 10 | 2 | 0.10 | 0.35 | 0.71 |
-  | 10 | 6 | 0.11 | 0.86 | 5.23 |
-  | 50 | 2 | 0.15 | 0.52 | 0.42 |
-  | 50 | 6 | 0.30 | 1.47 | 2.73 |
+  | 10 | 1 | 2 | 0.05 | 0.27 |
+  | 50 | 1 | 2 | 0.13 | 0.25 |
+  | 10 | 2 | 3 | 0.10 | 0.35 |
+  | 50 | 2 | 3 | 0.15 | 0.30 |
+  | 10 | 6 | 7 | 0.11 | 0.86 |
+  | 50 | 6 | 7 | 0.19 | 0.94 |
 
-  The last column is the previous version, where every pair recomputed the
-  range shares from the histogram; the planning overhead of the range probe
-  (`get_actual_variable_range`-style descents and histogram lookups) is the
-  bulk of what remains. A generic plan, which cannot probe, plans in 0.2 ms
-  with four streams on the benchmark table. The cost grows with the square
-  of the number of indexes that match the query's equalities (6 in the
-  rows above), not of all indexes; timings vary up to 2× between runs.
+  Where the time goes, from a profile of one plan on another table: 4
+  equalities and `deleted_at IS NULL`, 5 usable indexes (the primary key
+  passes the metadata check too but forms no set), 16 pairs and 5 larger
+  sets costed. Of the 0.66 ms leapfrog adds, 0.17 ms read the candidates'
+  sort ranges from their B-trees, 0.40 ms turn those ranges into shares of
+  the table through the histogram, 0.04 ms cost all 21 sets, and the
+  metadata loop over all of the table's indexes takes 0.003 ms. A generic
+  plan, whose parameters leave no range to read, adds 0.06 ms with the same
+  candidates. Timings vary up to 2× between runs.
+
+  The previous version recomputed the histogram shares for every pair:
+  with 7 usable indexes it took 5.2 ms (10 on the table) and 2.7 ms (50).
 - Only the first key of the query's `ORDER BY` is considered.
 - The cost model is conservative. On the 1M-row benchmark (192 queries,
   `tests/performance/choices.sql`) the planner picks the node 2 times at
@@ -769,9 +786,12 @@ soft-delete rate) the planner keeps the pair and the `Filter`. Measured in
 
 #### Planner search
 
-Done: indexes are checked once per relation, `ndistinct`, correlation and
-nbtree version are cached, planning time is measured with 10, 20 and 50
-indexes. Open: consider useful pathkeys beyond the query's `ORDER BY`.
+Done: indexes are checked once per relation and only those the query can use
+go on to costing; `ndistinct`, correlation, nbtree version, sort ranges and
+their shares are cached per index. Planning time is measured on tables with
+10, 20 and 50 indexes and follows the number the query can use, not the
+table's total. Open: the histogram shares of the sort ranges (most of what
+remains), and useful pathkeys beyond the query's `ORDER BY`.
 
 #### Memory of non-unique keys
 

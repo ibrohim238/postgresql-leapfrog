@@ -122,8 +122,10 @@ combinations are scanned to the end, the case that costs every plan the most.
   partial index is estimated too cheaply, see the README's Current
   limitations) and "3 filters, composite in S" at the default page cost
   (`BitmapAnd`, 2.3 ms against 0.58).
-- Planning: 0.25–0.57 ms with leapfrog against 0.09–0.12 ms stock (range
-  probe and the set search; see the README's planning table).
+- Planning: 0.25–0.57 ms with leapfrog against 0.09–0.12 ms stock. The table
+  has 14 indexes; a query with k filters can use k + 1 of them (the filter
+  columns and one `deleted_at` index), and only those are costed — the time
+  follows k, not 14 (see the README's planning table).
 
 ## Read benchmark, 1M rows
 
