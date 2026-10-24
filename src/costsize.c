@@ -324,22 +324,23 @@ static Cost
 merge_read_cost(PlannerInfo *root, IndexCandidate **streams, int nstreams,
 				double *reads, double loop_count)
 {
-	int			order[INTERSECT_MAX_STREAMS];
+	int			order[INTERSECT_MAX_STREAMS] = {0};
 	double		sparse_entries;
 	double		iterations;
 	Cost		cost = 0;
 
-	/* streams by entries, sparsest first */
+	/* streams by entries, sparsest first (insertion sort, a few streams) */
 	for (int i = 0; i < nstreams; i++)
+		order[i] = i;
+	for (int i = 1; i < nstreams; i++)
 	{
-		int			j = i;
-
-		while (j > 0 && reads[order[j - 1]] > reads[i])
+		for (int j = i; j > 0 && reads[order[j - 1]] > reads[order[j]]; j--)
 		{
+			int			tmp = order[j];
+
 			order[j] = order[j - 1];
-			j--;
+			order[j - 1] = tmp;
 		}
-		order[j] = i;
 	}
 
 	sparse_entries = Max(reads[order[0]], 1.0);
