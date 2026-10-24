@@ -1,0 +1,84 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_explain
+step s2_explain: 
+	EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+	SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE;
+
+QUERY PLAN                                                                           
+-------------------------------------------------------------------------------------
+LockRows (actual rows=15000.00 loops=1)                                              
+  ->  Custom Scan (Index Merge Intersect) on lf_iso_oe (actual rows=15000.00 loops=1)
+        Outer Index: lf_iso_oe_customer_grp                                          
+        Inner Index: lf_iso_oe_product_grp                                           
+        Outer Entries Read: 20000                                                    
+        Inner Entries Read: 15000                                                    
+        Matched TIDs: 0                                                              
+        Heap Fetches: 20000                                                          
+        Peak Group Memory: 65532 B                                                   
+        Group Overflows: 1                                                           
+        Rows Checked by Predicate: 20000                                             
+(11 rows)
+
+
+starting permutation: s1_begin s1_move_product s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_move_product: UPDATE lf_iso_oe SET product_id = 3 WHERE id IN (1, 2, 5);
+step s2_lock: 
+	SELECT count(*), sum(id) FROM (
+		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+count|      sum
+-----+---------
+14997|149999992
+(1 row)
+
+
+starting permutation: s1_begin s1_move_product s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_move_product: UPDATE lf_iso_oe SET product_id = 3 WHERE id IN (1, 2, 5);
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT count(*), sum(id) FROM (
+		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+count|      sum
+-----+---------
+14997|149999992
+(1 row)
+
+
+starting permutation: s1_begin s1_join_product s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_join_product: UPDATE lf_iso_oe SET product_id = 2 WHERE id IN (4, 8);
+step s2_lock: 
+	SELECT count(*), sum(id) FROM (
+		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
+
+count|      sum
+-----+---------
+15000|150000000
+(1 row)
+
+step s1_commit: COMMIT;
+
+starting permutation: s1_begin s1_join_product s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_join_product: UPDATE lf_iso_oe SET product_id = 2 WHERE id IN (4, 8);
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT count(*), sum(id) FROM (
+		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
+	RESET leapfrog.enabled;
+
+count|      sum
+-----+---------
+15000|150000000
+(1 row)
+
+step s1_commit: COMMIT;

@@ -30,7 +30,8 @@ REGRESS = \
 	leapfrog_explain \
 	leapfrog_example \
 	leapfrog_btree_pair \
-	leapfrog_skip
+	leapfrog_skip \
+	leapfrog_outer_partial
 
 ISOLATION = \
 	leapfrog_concurrent_update \
@@ -38,7 +39,10 @@ ISOLATION = \
 	leapfrog_hot_update \
 	leapfrog_delete \
 	leapfrog_repeatable_read \
-	leapfrog_btree_pair
+	leapfrog_btree_pair \
+	leapfrog_outer_partial \
+	leapfrog_insert_vacuum \
+	leapfrog_overflow_epq
 
 ISOLATION_OPTS = --load-extension=leapfrog
 REGRESS_OPTS = --load-extension=leapfrog

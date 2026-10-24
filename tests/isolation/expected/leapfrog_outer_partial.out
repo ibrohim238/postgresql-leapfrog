@@ -1,0 +1,95 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_plan
+step s2_plan: 
+	EXPLAIN (COSTS OFF)
+	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
+	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
+
+QUERY PLAN                                                        
+------------------------------------------------------------------
+Limit                                                             
+  ->  LockRows                                                    
+        ->  Result                                                
+              ->  Custom Scan (Index Merge Intersect) on lf_iso_op
+                    Filter: (deleted_at IS NULL)                  
+                    Outer Index: lf_iso_op_live_customer_id       
+                    Inner Index: lf_iso_op_product_id_kind        
+(7 rows)
+
+
+starting permutation: s1_begin s1_soft_delete s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso_op SET deleted_at = now() WHERE id = 22;
+step s2_lock: 
+	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
+	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|customer_id|product_id|kind|live
+--+-----------+----------+----+----
+10|          2|         1|   0|t   
+34|          2|         1|   0|t   
+46|          2|         1|   0|t   
+58|          2|         1|   0|t   
+(4 rows)
+
+
+starting permutation: s1_begin s1_soft_delete s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_soft_delete: UPDATE lf_iso_op SET deleted_at = now() WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
+	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|customer_id|product_id|kind|live
+--+-----------+----------+----+----
+10|          2|         1|   0|t   
+34|          2|         1|   0|t   
+46|          2|         1|   0|t   
+58|          2|         1|   0|t   
+(4 rows)
+
+
+starting permutation: s1_begin s1_kind s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_kind: UPDATE lf_iso_op SET kind = 7 WHERE id = 22;
+step s2_lock: 
+	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
+	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|customer_id|product_id|kind|live
+--+-----------+----------+----+----
+10|          2|         1|   0|t   
+22|          2|         1|   7|t   
+34|          2|         1|   0|t   
+46|          2|         1|   0|t   
+(4 rows)
+
+
+starting permutation: s1_begin s1_kind s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_kind: UPDATE lf_iso_op SET kind = 7 WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
+	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|customer_id|product_id|kind|live
+--+-----------+----------+----+----
+10|          2|         1|   0|t   
+22|          2|         1|   7|t   
+34|          2|         1|   0|t   
+46|          2|         1|   0|t   
+(4 rows)
+

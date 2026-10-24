@@ -1,0 +1,164 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_begin s2_count s1_begin s1_insert s2_count s2_count_std s1_commit s2_count s2_count_std s2_commit
+step s2_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2_count: 
+	SELECT count(*), max(id), sum(id) FROM (
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+
+count| max|   sum
+-----+----+------
+  333|1994|332666
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_insert: INSERT INTO lf_iso_iv SELECT g, 2, NULL, 'new' FROM generate_series(5001, 5100) g;
+step s2_count: 
+	SELECT count(*), max(id), sum(id) FROM (
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+
+count| max|   sum
+-----+----+------
+  333|1994|332666
+(1 row)
+
+step s2_count_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), max(id), sum(id) FROM (
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count| max|   sum
+-----+----+------
+  333|1994|332666
+(1 row)
+
+step s1_commit: COMMIT;
+step s2_count: 
+	SELECT count(*), max(id), sum(id) FROM (
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+
+count| max|   sum
+-----+----+------
+  433|5100|837716
+(1 row)
+
+step s2_count_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), max(id), sum(id) FROM (
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count| max|   sum
+-----+----+------
+  433|5100|837716
+(1 row)
+
+step s2_commit: COMMIT;
+
+starting permutation: s1_begin s1_lock_and_insert s2_begin s2_lock s1_commit s2_lock s2_commit
+step s1_begin: BEGIN;
+step s1_lock_and_insert: 
+	UPDATE lf_iso_iv SET payload = 'locked' WHERE id = 1994;
+	INSERT INTO lf_iso_iv VALUES (900001, 2, NULL, 'newer');
+
+step s2_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2_lock: 
+	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+  id|payload
+----+-------
+1994|locked 
+1990|p1990  
+1982|p1982  
+(3 rows)
+
+step s2_lock: 
+	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
+
+    id|payload
+------+-------
+900001|newer  
+  1994|locked 
+  1990|p1990  
+(3 rows)
+
+step s2_commit: COMMIT;
+
+starting permutation: s1_begin s1_lock_and_insert s2_begin s2_lock_std s1_commit s2_lock_std s2_commit
+step s1_begin: BEGIN;
+step s1_lock_and_insert: 
+	UPDATE lf_iso_iv SET payload = 'locked' WHERE id = 1994;
+	INSERT INTO lf_iso_iv VALUES (900001, 2, NULL, 'newer');
+
+step s2_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+  id|payload
+----+-------
+1994|locked 
+1990|p1990  
+1982|p1982  
+(3 rows)
+
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+
+    id|payload
+------+-------
+900001|newer  
+  1994|locked 
+  1990|p1990  
+(3 rows)
+
+step s2_commit: COMMIT;
+
+starting permutation: s1_delete_tail s2_begin s2_declare s2_fetch s2_drain s1_vacuum s2_count s2_count_std s2_commit
+step s1_delete_tail: DELETE FROM lf_iso_iv WHERE owner_id = 2 AND id > 1000;
+step s2_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step s2_declare: 
+	DECLARE c CURSOR FOR
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id;
+
+step s2_fetch: FETCH 3 FROM c;
+id
+--
+ 2
+10
+14
+(3 rows)
+
+step s2_drain: 
+	MOVE ALL FROM c;
+
+step s1_vacuum: VACUUM lf_iso_iv;
+step s2_count: 
+	SELECT count(*), max(id), sum(id) FROM (
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+
+count|max|  sum
+-----+---+-----
+  167|998|83666
+(1 row)
+
+step s2_count_std: 
+	SET LOCAL leapfrog.enabled = off;
+	SELECT count(*), max(id), sum(id) FROM (
+		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
+	RESET leapfrog.enabled;
+
+count|max|  sum
+-----+---+-----
+  167|998|83666
+(1 row)
+
+step s2_commit: COMMIT;

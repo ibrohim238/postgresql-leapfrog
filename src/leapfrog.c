@@ -1294,6 +1294,10 @@ path_private_oid(CustomPath *best_path, int pos)
  *		index predicate are dropped as well, except for a target relation of
  *		UPDATE/DELETE/SELECT FOR UPDATE, where check_index_predicates keeps
  *		them in the plan for EvalPlanQual.
+ *
+ * Clauses implied by the predicate of a partial outer index are never
+ * dropped: the node does not keep that predicate, so under EvalPlanQual
+ * only this qual checks it on the new row version (leapfrog_outer_partial).
  */
 static List *
 intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -1887,6 +1891,21 @@ intersect_next(ScanState *ss)
 		}
 	}
 
+	/*
+	 * The merge ends when one stream runs out, with the other one still
+	 * positioned on a leaf page.  The scans keep their leaf page pinned, as
+	 * an Index Only Scan does, since the sort value is read from the index
+	 * tuple (xs_want_itup); VACUUM of the index would wait for that pin as
+	 * long as an exhausted cursor stays open.  Resetting both scans releases
+	 * the pins; a rescan positions them again.
+	 */
+	if (!state->done)
+	{
+		rescan_with_keys(state->outer_scan, &state->outer_keys,
+						 state->descending, no_bound(state->descending));
+		rescan_with_keys(state->inner_scan, &state->inner_keys,
+						 state->descending, no_bound(state->descending));
+	}
 	state->done = true;
 
 	return ExecClearTuple(slot);
