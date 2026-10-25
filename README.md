@@ -382,7 +382,9 @@ run, but only with the mark.
 
 Compose environment variables: `LEAPFROG_PORT` (5433), `LEAPFROG_BIND`
 (127.0.0.1: the server is reachable from this machine only, since the
-password is well known; `0.0.0.0` publishes it on every interface),
+password is well known; `0.0.0.0` publishes it on every interface, for a
+client on another machine or a remote `DOCKER_HOST`; connect to `127.0.0.1`
+rather than `localhost`, which may resolve to `::1` first),
 `POSTGRES_PASSWORD` (`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB),
 `BENCH_SIZES`, `BENCH_REPEATS`.
 
