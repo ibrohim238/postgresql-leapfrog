@@ -27,6 +27,16 @@ versions: [SemVer](https://semver.org/).
   repeats across containers (PID 1 in each). `make bench-smoke` checks that
   `run.sh` is refused while the lock is held (without the lock it fails:
   the run went ahead).
+- `tests/run-in-docker.sh` ran `docker compose down -v` in the default
+  project `leapfrog`, removing the `pgdata` volume of a server started with
+  `docker compose up`. It now uses a project unique to the run,
+  `leapfrog-test-<pid>-<random>` (`COMPOSE_TEST_PROJECT`), so that it also
+  leaves a server kept by an earlier `--keep` run alone, with an overlay,
+  `tests/compose.test.yaml`, that publishes the server on a free port of
+  127.0.0.1 only; `--keep` prints the port and the command that stops it.
+  A `COMPOSE_TEST_PROJECT` that already has containers or volumes is
+  refused, and so is Docker Compose older than 2.24.4, which lacks
+  `!override`.
 
 ## [0.0.3] — 2026-10-25
 

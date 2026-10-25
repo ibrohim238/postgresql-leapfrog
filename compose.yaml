@@ -3,7 +3,8 @@
 # docker compose --profile bench run --rm bench   benchmarks (see tests/performance)
 #
 # The benchmarks run in a database of their own, leapfrog_bench, never in
-# PGDATABASE.
+# PGDATABASE; tests/run-in-docker.sh runs in a Compose project unique to the
+# run and leaves this one and its volume alone.
 #
 # Environment: LEAPFROG_PORT (default 5433) is the host port of the server;
 # POSTGRES_PASSWORD defaults to "leapfrog".

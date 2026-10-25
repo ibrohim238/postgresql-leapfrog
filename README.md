@@ -339,13 +339,20 @@ docker compose up -d --build --wait     # PostgreSQL 18 with leapfrog in shared_
 psql -h localhost -p 5433 -U postgres -d leapfrog   # password: leapfrog
 ```
 
-Tests in one command (starts the server, runs regression and isolation suites
-in a separate container, tears everything down):
+Tests in one command (starts a server in a Compose project of its own,
+`leapfrog-test-<pid>-<random>`, on a free port of 127.0.0.1, runs regression
+and isolation suites in a separate container, and removes that project with
+its volume; the default project, servers kept by earlier runs and their data
+are not touched; `--keep` prints the port and the command that stops it):
 
 ```bash
 bash tests/run-in-docker.sh          # or: make docker-test
 bash tests/run-in-docker.sh --keep   # keep the server running
 ```
+
+`run-in-docker.sh` needs Docker Compose 2.24.4 or later, for `!override` in
+`tests/compose.test.yaml`. `COMPOSE_TEST_PROJECT` sets the project name; a
+project that already has containers or volumes is refused.
 
 Benchmarks (`bench` profile, 100k and 1M rows by default):
 
