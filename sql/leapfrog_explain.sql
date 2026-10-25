@@ -153,14 +153,27 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND delet
 -- Page costs come from the tablespace of the table and the indexes.  The
 -- table lives in a tablespace of the test's own (in place, under pg_tblspc),
 -- so that the setting changed is not one that other databases of the
--- cluster use, as pg_default's would be.  One left by an interrupted run is
--- empty, its database having been dropped, and is dropped first.
-SET client_min_messages = warning;
-DROP TABLESPACE IF EXISTS lf_test_space;
-RESET client_min_messages;
+-- cluster use, as pg_default's would be.  It carries a comment; one with
+-- that comment left by an interrupted run is empty, its database having
+-- been dropped, and is dropped first.  A tablespace of that name without
+-- the comment is someone else's: the script stops before touching it (psql
+-- would go on past a failed CREATE TABLESPACE), and the test fails.
+SELECT EXISTS (SELECT FROM pg_tablespace WHERE spcname = 'lf_test_space'
+	AND shobj_description(oid, 'pg_tablespace') = 'leapfrog regression test')
+	AS lf_space_left \gset
+\if :lf_space_left
+DROP TABLESPACE lf_test_space;
+\endif
+SELECT EXISTS (SELECT FROM pg_tablespace WHERE spcname = 'lf_test_space')
+	AS lf_space_taken \gset
+\if :lf_space_taken
+\echo tablespace lf_test_space exists without the comment of this test, stopping
+\quit
+\endif
 SET allow_in_place_tablespaces = on;
 CREATE TABLESPACE lf_test_space LOCATION '';
 RESET allow_in_place_tablespaces;
+COMMENT ON TABLESPACE lf_test_space IS 'leapfrog regression test';
 SET default_tablespace = lf_test_space;
 CREATE TABLE lf_cost_spaced (LIKE lf_cost_shuffled INCLUDING ALL);
 RESET default_tablespace;

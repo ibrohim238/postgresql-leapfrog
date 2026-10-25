@@ -28,8 +28,10 @@ versions: [SemVer](https://semver.org/).
   against a server with other databases it changed their plans while it
   ran, could stay set after an interrupted run, and its `RESET` dropped a
   value set before. It now creates a tablespace of its own (in place,
-  `allow_in_place_tablespaces`), puts a copy of the table there and drops
-  both afterwards. The check still fails when the cost model ignores the
+  `allow_in_place_tablespaces`) with a marking comment, puts a copy of the
+  table there and drops both afterwards; one left by an interrupted run is
+  dropped only with the mark, and a tablespace of that name without it
+  stops the test before anything is changed. The check still fails when the cost model ignores the
   tablespace (tried with `get_tablespace_page_costs(InvalidOid, …)`).
 - The benchmark scripts ran in `PGDATABASE` and dropped tables with common
   names there (`orders` in `run.sh`, `write_bench.sh` and `schema.sql`), so
