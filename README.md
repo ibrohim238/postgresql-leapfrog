@@ -380,9 +380,11 @@ benchmarks on one server disturb each other's timings anyway); set
 `leapfrog_bench_smoke` and drops it afterwards, also one left by an earlier
 run, but only with the mark.
 
-Compose environment variables: `LEAPFROG_PORT` (5433), `POSTGRES_PASSWORD`
-(`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB), `BENCH_SIZES`,
-`BENCH_REPEATS`.
+Compose environment variables: `LEAPFROG_PORT` (5433), `LEAPFROG_BIND`
+(127.0.0.1: the server is reachable from this machine only, since the
+password is well known; `0.0.0.0` publishes it on every interface),
+`POSTGRES_PASSWORD` (`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB),
+`BENCH_SIZES`, `BENCH_REPEATS`.
 
 ## Loading the library
 

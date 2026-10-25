@@ -5,6 +5,12 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `compose.yaml` publishes the server on 127.0.0.1 only, not on every
+  interface: the password is the well-known default. `LEAPFROG_BIND=0.0.0.0`
+  restores the old behaviour.
+
 ### Fixed
 
 - The planner kept the cheapest pair, and in the greedy expansion the

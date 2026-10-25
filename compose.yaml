@@ -6,8 +6,10 @@
 # PGDATABASE; tests/run-in-docker.sh runs in a Compose project unique to the
 # run and leaves this one and its volume alone.
 #
-# Environment: LEAPFROG_PORT (default 5433) is the host port of the server;
-# POSTGRES_PASSWORD defaults to "leapfrog".
+# Environment: LEAPFROG_PORT (default 5433) is the host port of the server,
+# published on LEAPFROG_BIND (default 127.0.0.1, this machine only: the
+# password is well known; 0.0.0.0 for every interface); POSTGRES_PASSWORD
+# defaults to "leapfrog".
 
 name: leapfrog
 
@@ -32,7 +34,7 @@ services:
       - -c
       - shared_buffers=${LEAPFROG_SHARED_BUFFERS:-512MB}
     ports:
-      - "${LEAPFROG_PORT:-5433}:5432"
+      - "${LEAPFROG_BIND:-127.0.0.1}:${LEAPFROG_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
