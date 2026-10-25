@@ -211,18 +211,34 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND delet
  t
 (1 row)
 
--- Page costs come from the tablespace of the table and the indexes.
-SELECT lf_node_cost($$ SELECT * FROM lf_cost_shuffled WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
+-- Page costs come from the tablespace of the table and the indexes.  The
+-- table lives in a tablespace of the test's own (in place, under pg_tblspc),
+-- so that the setting changed is not one that other databases of the
+-- cluster use, as pg_default's would be.  One left by an interrupted run is
+-- empty, its database having been dropped, and is dropped first.
+SET client_min_messages = warning;
+DROP TABLESPACE IF EXISTS lf_test_space;
+RESET client_min_messages;
+SET allow_in_place_tablespaces = on;
+CREATE TABLESPACE lf_test_space LOCATION '';
+RESET allow_in_place_tablespaces;
+SET default_tablespace = lf_test_space;
+CREATE TABLE lf_cost_spaced (LIKE lf_cost_shuffled INCLUDING ALL);
+RESET default_tablespace;
+INSERT INTO lf_cost_spaced SELECT * FROM lf_cost_shuffled;
+VACUUM ANALYZE lf_cost_spaced;
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	AS default_cost \gset
-ALTER TABLESPACE pg_default SET (random_page_cost = 40);
-SELECT lf_node_cost($$ SELECT * FROM lf_cost_shuffled WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
+ALTER TABLESPACE lf_test_space SET (random_page_cost = 40);
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	 > :default_cost * 2 AS tablespace_page_cost_is_used;
  tablespace_page_cost_is_used 
 ------------------------------
  t
 (1 row)
 
-ALTER TABLESPACE pg_default RESET (random_page_cost);
+DROP TABLE lf_cost_spaced;
+DROP TABLESPACE lf_test_space;
 -- A path parameterized by a join column is rescanned once per outer row;
 -- the same index and heap pages are read again and stay cached, so the
 -- per-loop cost falls with the loop count.  (A LATERAL subquery with its

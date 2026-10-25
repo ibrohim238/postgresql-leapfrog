@@ -17,6 +17,14 @@ versions: [SemVer](https://semver.org/).
   cost is now kept as a number taken before `add_path`. Test in
   `leapfrog_nway`: under `leapfrog.force` the query that gets three streams
   without it gets the same three; before, a pair and a filter.
+- The `leapfrog_explain` regression test set `random_page_cost` on
+  `pg_default`, a setting of the whole cluster: under `make installcheck`
+  against a server with other databases it changed their plans while it
+  ran, could stay set after an interrupted run, and its `RESET` dropped a
+  value set before. It now creates a tablespace of its own (in place,
+  `allow_in_place_tablespaces`), puts a copy of the table there and drops
+  both afterwards. The check still fails when the cost model ignores the
+  tablespace (tried with `get_tablespace_page_costs(InvalidOid, …)`).
 - The benchmark scripts ran in `PGDATABASE` and dropped tables with common
   names there (`orders` in `run.sh`, `write_bench.sh` and `schema.sql`), so
   a run against a database with real data could destroy it. They now run in
