@@ -23,19 +23,23 @@
 #
 # The script waits for the server (pg_isready) after the command.
 #
-# Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; ROWS (1000000), THRESHOLDS
-# ("0 128 256 512 1024 2048"), REPEATS (5), COLD_CMD (unset), BENCH_OUT (a
-# directory that must not exist yet).
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
+# bench_db.sh); ROWS (1000000), THRESHOLDS ("0 128 256 512 1024 2048"),
+# REPEATS (5), COLD_CMD (unset), BENCH_OUT (a directory that must not exist
+# yet).
 # Output: tests/performance/results/skip-<timestamp>/skip.csv and a summary
 # on stdout.
 set -euo pipefail
 
 cd "$(dirname "$0")"
+. ./bench_db.sh
 
 ROWS=${ROWS:-1000000}
 THRESHOLDS=${THRESHOLDS:-"0 128 256 512 1024 2048"}
 REPEATS=${REPEATS:-5}
 COLD_CMD=${COLD_CMD:-}
+
+bench_db_use
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 out=${BENCH_OUT:-"results/skip-$stamp"}

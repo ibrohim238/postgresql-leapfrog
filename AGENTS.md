@@ -79,7 +79,11 @@ make pgindent                      # must be clean; pgindent-fix reformats
 ## Benchmarks
 
 Scripts are in `tests/performance/`; each writes into a new directory
-(`BENCH_OUT` or `results/<kind>-<timestamp>/`) and refuses an existing one.
+(`BENCH_OUT` or `results/<kind>-<timestamp>/`) and refuses an existing one,
+and runs in its own database (`BENCH_DB`, default `leapfrog_bench`, see
+`bench_db.sh`), never in `PGDATABASE`, one run at a time per database
+(an advisory lock). A new script sources `bench_db.sh` and calls
+`bench_db_use` before its first query.
 `make bench-smoke` checks the harness. When comparing builds, run them in
 ABBA order on the same data, report medians and tails, and do not conclude
 from a single run; record results in BENCHMARKS.md with the commit compared.

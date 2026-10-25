@@ -5,6 +5,29 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The benchmark scripts ran in `PGDATABASE` and dropped tables with common
+  names there (`orders` in `run.sh`, `write_bench.sh` and `schema.sql`), so
+  a run against a database with real data could destroy it. They now run in
+  a database of their own, `BENCH_DB` (default `leapfrog_bench`), created
+  with a marking comment; a database without the mark is refused
+  (`tests/performance/bench_db.sh`). Data left by earlier runs in
+  `PGDATABASE` (`bench_types` and the like) is not moved. `make bench-smoke`
+  dropped and recreated `leapfrog_bench_smoke` whatever it held; now only
+  when it carries the mark, one `bench-smoke` at a time. It checks that
+  `run.sh` leaves the `orders` table of `PGDATABASE` alone and refuses a
+  `BENCH_DB` without the mark (with the old `run.sh` it fails: the refused
+  run went ahead).
+- Two benchmarks started at once in one database dropped and recreated
+  each other's tables. A run now holds an advisory lock in `BENCH_DB`,
+  through a `psql` session that ends with the script, also when it is
+  killed, and a second run is refused. The session is recognised by a
+  random token in its application name, not by the shell's PID, which
+  repeats across containers (PID 1 in each). `make bench-smoke` checks that
+  `run.sh` is refused while the lock is held (without the lock it fails:
+  the run went ahead).
+
 ## [0.0.3] — 2026-10-25
 
 Still experimental. The shared library changes; the SQL functions do not:

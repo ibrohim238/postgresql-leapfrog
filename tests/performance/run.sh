@@ -19,7 +19,8 @@
 # plans.jsonl next to it.
 #
 # Environment (all optional):
-#   PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE   connection
+#   PGHOST/PGPORT/PGUSER/PGPASSWORD   connection
+#   BENCH_DB         leapfrog_bench             database (see bench_db.sh)
 #   BENCH_SIZES      "100000 1000000"           row counts
 #   BENCH_DISTS      "uniform skewed"           distributions
 #   BENCH_DELETED    "1 10 50 90"               deleted share, percent
@@ -37,6 +38,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+. ./bench_db.sh
 
 SIZES=${BENCH_SIZES:-"100000 1000000"}
 DISTS=${BENCH_DISTS:-"uniform skewed"}
@@ -48,6 +50,8 @@ REPEATS=${BENCH_REPEATS:-5}
 RPC=${BENCH_RANDOM_PAGE_COST:-}
 SEED=${BENCH_SEED:-0.42}
 FORCE=${BENCH_FORCE:-1}
+
+bench_db_use
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 out=${BENCH_OUT:-"results/$stamp"}
@@ -67,9 +71,6 @@ $PSQL -tAc "LOAD 'leapfrog'; SELECT 'leapfrog=' || leapfrog_version()" >> "$out/
 $PSQL -tAc "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('shared_buffers','work_mem','random_page_cost','seq_page_cost','effective_cache_size','shared_preload_libraries','jit','max_parallel_workers_per_gather')" >> "$out/server.txt"
 echo "queries run with random_page_cost=${RPC:-server setting}" >> "$out/server.txt"
 
-if ! $PSQL -tAc "SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'" | grep -q 1; then
-	$PSQL -c "CREATE EXTENSION leapfrog"
-fi
 $PSQL -f bench.sql
 
 echo "size,distribution,deleted_pct,strategy,forced,owner_label,owner_id,owner_rows,owner_deleted,predicate,limit,run,plan_node,exec_ms,plan_ms,shared_hit,shared_read,rows_out,outer_read,inner_read,heap_fetches,rows_removed,index_bytes" > "$csv"

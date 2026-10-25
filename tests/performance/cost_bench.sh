@@ -30,17 +30,20 @@
 #           merge, a Limit above stops it early.  Near 1 there, a miss is in
 #           the cost per entry or page, not in the entries estimate.
 #
-# Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; ROWS (1000000),
-# REPEATS (5), RANDOM_PAGE_COST (4), BENCH_OUT (a directory that must not
-# exist yet).
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
+# bench_db.sh); ROWS (1000000), REPEATS (5), RANDOM_PAGE_COST (4), BENCH_OUT
+# (a directory that must not exist yet).
 # Output: tests/performance/results/cost-<timestamp>/cost.csv and a summary.
 set -euo pipefail
 
 cd "$(dirname "$0")"
+. ./bench_db.sh
 
 ROWS=${ROWS:-1000000}
 REPEATS=${REPEATS:-5}
 RANDOM_PAGE_COST=${RANDOM_PAGE_COST:-4}
+
+bench_db_use
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 out=${BENCH_OUT:-"results/cost-$stamp"}
