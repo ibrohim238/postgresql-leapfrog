@@ -727,13 +727,15 @@ add_intersect_path(RelOptInfo *rel, CustomPath *cpath)
 }
 
 /*
- * The cheapest pair found so far, the start of the greedy expansion.
+ * The cheapest pair found so far, the start of the greedy expansion.  Its
+ * cost is kept, not the path: add_path may free a path it rejects or later
+ * replaces, and scales the costs of a path under leapfrog.force.
  */
 typedef struct BestPair
 {
-	CustomPath *path;
-	IndexCandidate *outer;
+	IndexCandidate *outer;		/* NULL until a pair is found */
 	IndexCandidate *inner;
+	Cost		total_cost;
 	double		correlation;
 } BestPair;
 
@@ -766,10 +768,9 @@ search_pairs_from_outer(IntersectSearch *search, IndexCandidate *outer,
 		cpath = build_intersect_path(search, streams, 2, correlation);
 		if (cpath == NULL)
 			continue;
-		if (best->path == NULL ||
-			cpath->path.total_cost < best->path->path.total_cost)
+		if (best->outer == NULL || cpath->path.total_cost < best->total_cost)
 		{
-			best->path = cpath;
+			best->total_cost = cpath->path.total_cost;
 			best->outer = outer;
 			best->inner = inner;
 			best->correlation = correlation;
@@ -796,7 +797,7 @@ expand_best_pair(IntersectSearch *search, BestPair *best)
 {
 	IndexCandidate *streams[INTERSECT_MAX_STREAMS];
 	int			nstreams = 2;
-	CustomPath *best_path = best->path;
+	Cost		best_cost = best->total_cost;
 
 	streams[0] = best->outer;
 	streams[1] = best->inner;
@@ -829,12 +830,12 @@ expand_best_pair(IntersectSearch *search, BestPair *best)
 
 		if (next_best == NULL)
 			break;
-		if (!required &&
-			next_best->path.total_cost >= best_path->path.total_cost)
+		if (!required && next_best->path.total_cost >= best_cost)
 			break;
 
+		/* the cost before add_path, which may free or rescale the path */
 		streams[nstreams++] = next_stream;
-		best_path = next_best;
+		best_cost = next_best->path.total_cost;
 		if (nstreams >= intersect_min_streams)
 			add_intersect_path(search->rel, next_best);
 	}
@@ -911,13 +912,13 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			search.ncandidates++;
 	}
 
-	best.path = NULL;
+	best.outer = NULL;
 	for (int i = 0; i < search.ncandidates; i++)
 	{
 		if (is_outer_candidate(&search.candidates[i]))
 			search_pairs_from_outer(&search, &search.candidates[i], &best);
 	}
-	if (best.path != NULL)
+	if (best.outer != NULL)
 		expand_best_pair(&search, &best);
 
 	pfree(search.candidates);
