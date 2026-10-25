@@ -57,9 +57,11 @@ SELECT * FROM lf_counters($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NOT NULL ORDER BY id $$)
 WHERE counter IN ('Outer Index', 'Inner Index', 'Inner Index 2', 'Matched TIDs', 'Heap Fetches', 'Rows Removed by Filter');
 RESET leapfrog.min_indexes;
+SET leapfrog.max_indexes = 2;
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NOT NULL ORDER BY id $$)
 WHERE counter IN ('Outer Index', 'Inner Index', 'Inner Index 2', 'Matched TIDs', 'Heap Fetches', 'Rows Removed by Filter');
+RESET leapfrog.max_indexes;
 
 -- Four and five streams.
 SET leapfrog.min_indexes = 4;
@@ -115,6 +117,15 @@ SELECT count(*) FROM lf_plan_node($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$)
 WHERE lf_plan_node ~ 'Inner Index 2';
 RESET leapfrog.max_indexes;
+-- leapfrog.force scales down the costs of the paths it offers; the sets are
+-- still compared by their own costs, so the same three streams are chosen.
+-- (The cheapest pair's cost used to be read back from the offered path:
+-- scaled, so no other pair or third stream could beat it; and freed when
+-- add_path rejected or replaced it.)
+SET leapfrog.force = on;
+SELECT * FROM lf_plan_node($$
+SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$);
+RESET leapfrog.force;
 DROP FUNCTION lf_plan_node(text);
 
 -- Parameters: a prepared statement with a generic plan, and a LATERAL

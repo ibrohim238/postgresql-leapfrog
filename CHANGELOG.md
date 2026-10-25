@@ -7,6 +7,16 @@ versions: [SemVer](https://semver.org/).
 
 ### Fixed
 
+- The planner kept the cheapest pair, and in the greedy expansion the
+  cheapest set, as a pointer to the path it had passed to `add_path`, and
+  read its cost from there afterwards. `add_path` frees a path it rejects or
+  later replaces, so the cost could be read from freed memory; and under
+  `leapfrog.force` it was the scaled-down cost, so no later pair and no
+  third stream could beat the first pair offered: under `leapfrog.force`
+  the set was the first pair found, not the cheapest, and never grew. The
+  cost is now kept as a number taken before `add_path`. Test in
+  `leapfrog_nway`: under `leapfrog.force` the query that gets three streams
+  without it gets the same three; before, a pair and a filter.
 - The benchmark scripts ran in `PGDATABASE` and dropped tables with common
   names there (`orders` in `run.sh`, `write_bench.sh` and `schema.sql`), so
   a run against a database with real data could destroy it. They now run in
