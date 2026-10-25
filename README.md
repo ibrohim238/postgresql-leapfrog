@@ -492,8 +492,11 @@ docker run --rm leapfrog-cassert
 ```
 
 The regression tests need a superuser (as `pg_regress` normally runs):
-`leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` changes the
-page cost of `pg_default` for one check and resets it.
+`leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` creates an
+in-place tablespace (`allow_in_place_tablespaces`) named after the database,
+`lf_space_<database>`, sets a page cost on it for one check and drops it. It
+never changes `pg_default`; an existing tablespace of that name that is not
+the test's own (owner and comment) stops the test before anything is changed.
 
 Regression tests (`sql/`):
 

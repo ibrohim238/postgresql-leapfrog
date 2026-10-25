@@ -214,35 +214,40 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND delet
 -- Page costs come from the tablespace of the table and the indexes.  The
 -- table lives in a tablespace of the test's own (in place, under pg_tblspc),
 -- so that the setting changed is not one that other databases of the
--- cluster use, as pg_default's would be.  It carries a comment; one with
--- that comment left by an interrupted run is empty, its database having
--- been dropped, and is dropped first.  A tablespace of that name without
--- the comment is someone else's: the script stops before touching it (psql
--- would go on past a failed CREATE TABLESPACE), and the test fails.
-SELECT EXISTS (SELECT FROM pg_tablespace WHERE spcname = 'lf_test_space'
-	AND shobj_description(oid, 'pg_tablespace') = 'leapfrog regression test')
-	AS lf_space_left \gset
-\if :lf_space_left
-DROP TABLESPACE lf_test_space;
-\endif
-SELECT EXISTS (SELECT FROM pg_tablespace WHERE spcname = 'lf_test_space')
-	AS lf_space_taken \gset
+-- cluster use, as pg_default's would be.  The tablespace is named after the
+-- database, so that runs in other databases of one cluster do not share it.
+-- One owned by this user and carrying the comment of this test was left by
+-- an interrupted run and is dropped first, with the table that may still be
+-- in it.  One of that name without both is someone else's: the script stops
+-- before touching it (psql would go on past a failed CREATE TABLESPACE), and
+-- the test fails.
+SELECT s.name AS lf_space,
+	coalesce(t.mine, false) AS lf_space_left,
+	NOT coalesce(t.mine, true) AS lf_space_taken
+FROM (SELECT left('lf_space_' || current_database(), 63) AS name) s
+LEFT JOIN LATERAL (SELECT pg_get_userbyid(spcowner) = current_user
+		AND shobj_description(oid, 'pg_tablespace') IS NOT DISTINCT FROM
+			'leapfrog regression test' AS mine
+	FROM pg_tablespace WHERE spcname = s.name) t ON true \gset
 \if :lf_space_taken
-\echo tablespace lf_test_space exists without the comment of this test, stopping
+\echo tablespace :lf_space is not owned and marked by this test, stopping
 \quit
+\elif :lf_space_left
+DROP TABLE IF EXISTS lf_cost_spaced;
+DROP TABLESPACE :"lf_space";
 \endif
 SET allow_in_place_tablespaces = on;
-CREATE TABLESPACE lf_test_space LOCATION '';
+CREATE TABLESPACE :"lf_space" LOCATION '';
 RESET allow_in_place_tablespaces;
-COMMENT ON TABLESPACE lf_test_space IS 'leapfrog regression test';
-SET default_tablespace = lf_test_space;
+COMMENT ON TABLESPACE :"lf_space" IS 'leapfrog regression test';
+SET default_tablespace = :"lf_space";
 CREATE TABLE lf_cost_spaced (LIKE lf_cost_shuffled INCLUDING ALL);
 RESET default_tablespace;
 INSERT INTO lf_cost_spaced SELECT * FROM lf_cost_shuffled;
 VACUUM ANALYZE lf_cost_spaced;
 SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	AS default_cost \gset
-ALTER TABLESPACE lf_test_space SET (random_page_cost = 40);
+ALTER TABLESPACE :"lf_space" SET (random_page_cost = 40);
 SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	 > :default_cost * 2 AS tablespace_page_cost_is_used;
  tablespace_page_cost_is_used 
@@ -251,7 +256,7 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND delet
 (1 row)
 
 DROP TABLE lf_cost_spaced;
-DROP TABLESPACE lf_test_space;
+DROP TABLESPACE :"lf_space";
 -- A path parameterized by a join column is rescanned once per outer row;
 -- the same index and heap pages are read again and stay cached, so the
 -- per-loop cost falls with the loop count.  (A LATERAL subquery with its
