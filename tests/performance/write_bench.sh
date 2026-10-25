@@ -26,20 +26,23 @@
 # execution and planning time over REPEATS runs after a warm-up, the plan's
 # top scan node and, for leapfrog, the number of indexes it combined.
 #
-# Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; NFILTERS (12), BASE_ROWS
-# (500000), BATCH_ROWS (100000), REPEATS (5), BENCH_OUT (a directory that
-# must not exist yet).
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
+# bench_db.sh); NFILTERS (12), BASE_ROWS (500000), BATCH_ROWS (100000),
+# REPEATS (5), BENCH_OUT (a directory that must not exist yet).
 # Output: tests/performance/results/write-<timestamp>/write.csv, read.csv
 # and a summary on stdout.
 set -euo pipefail
 
 cd "$(dirname "$0")"
+. ./bench_db.sh
 
 NFILTERS=${NFILTERS:-12}
 BASE_ROWS=${BASE_ROWS:-500000}
 BATCH_ROWS=${BATCH_ROWS:-100000}
 REPEATS=${REPEATS:-5}
 QUARTER=$((BATCH_ROWS / 4))
+
+bench_db_use
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 out=${BENCH_OUT:-"results/write-$stamp"}

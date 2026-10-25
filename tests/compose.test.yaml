@@ -1,0 +1,9 @@
+# Overlay for tests/run-in-docker.sh, which runs in a Compose project of its
+# own (leapfrog-test-<pid>-<random>): the server publishes its port on a free
+# host port instead of LEAPFROG_PORT, so that it does not clash with the
+# server of the default project or of another run, whose volumes the tests
+# never touch, and on 127.0.0.1 only: the password is the well-known default.
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1::5432"

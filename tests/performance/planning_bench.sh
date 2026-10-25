@@ -7,9 +7,13 @@
 # extension on and off; the median planning time (EXPLAIN SUMMARY) is
 # printed, and whether the plan under leapfrog.force has the node.
 #
-# Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; INDEX_COUNTS ("10 20 50"),
-# REPEATS (200).  The library must be preloaded or loadable by LOAD.
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
+# bench_db.sh); INDEX_COUNTS ("10 20 50"), REPEATS (200).  The library must
+# be preloaded or loadable by LOAD.
 set -euo pipefail
+
+. "$(dirname "$0")/bench_db.sh"
+bench_db_use
 
 INDEX_COUNTS=${INDEX_COUNTS:-"10 20 50"}
 REPEATS=${REPEATS:-200}

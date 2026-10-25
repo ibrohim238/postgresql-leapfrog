@@ -31,18 +31,20 @@
 #   BENCH_LABEL=new BENCH_OUT=results/types-new bash types_bench.sh
 #   bash types_compare.sh results/types-old results/types-new
 #
-# The table is loaded when missing or with BENCH_RELOAD=1, so both builds
-# read the same data and the same physical layout.
+# The table is loaded when missing from BENCH_DB or with BENCH_RELOAD=1, so
+# both builds read the same data and the same physical layout.
 #
-# Environment: PGHOST/PGPORT/PGUSER/PGDATABASE; ROWS (1000000), REPEATS (15),
-# WARMUP (2), LIMITS ("1 10 100 1000"), MODES ("auto force stock"), CASES
-# (all), BENCH_LABEL (leapfrog_version()), BENCH_RELOAD (0), BENCH_OUT (a
-# directory that must not exist yet).
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
+# bench_db.sh); ROWS (1000000), REPEATS (15), WARMUP (2),
+# LIMITS ("1 10 100 1000"), MODES ("auto force stock"), CASES (all),
+# BENCH_LABEL (leapfrog_version()), BENCH_RELOAD (0), BENCH_OUT (a directory
+# that must not exist yet).
 # Output: tests/performance/results/types-<timestamp>/runs.csv (one row per
 # run), summary.csv and server.txt.
 set -euo pipefail
 
 cd "$(dirname "$0")"
+. ./bench_db.sh
 
 ROWS=${ROWS:-1000000}
 REPEATS=${REPEATS:-15}
@@ -51,6 +53,8 @@ LIMITS=${LIMITS:-"1 10 100 1000"}
 MODES=${MODES:-"auto force stock"}
 CASES=${CASES:-"int8_int8 int4_int8 int2_int8 uuid_uuid text_text varchar_text"}
 RELOAD=${BENCH_RELOAD:-0}
+
+bench_db_use
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 out=${BENCH_OUT:-"results/types-$stamp"}

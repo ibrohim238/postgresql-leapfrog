@@ -339,13 +339,20 @@ docker compose up -d --build --wait     # PostgreSQL 18 with leapfrog in shared_
 psql -h localhost -p 5433 -U postgres -d leapfrog   # password: leapfrog
 ```
 
-Tests in one command (starts the server, runs regression and isolation suites
-in a separate container, tears everything down):
+Tests in one command (starts a server in a Compose project of its own,
+`leapfrog-test-<pid>-<random>`, on a free port of 127.0.0.1, runs regression
+and isolation suites in a separate container, and removes that project with
+its volume; the default project, servers kept by earlier runs and their data
+are not touched; `--keep` prints the port and the command that stops it):
 
 ```bash
 bash tests/run-in-docker.sh          # or: make docker-test
 bash tests/run-in-docker.sh --keep   # keep the server running
 ```
+
+`run-in-docker.sh` needs Docker Compose 2.24.4 or later, for `!override` in
+`tests/compose.test.yaml`. `COMPOSE_TEST_PROJECT` sets the project name; a
+project that already has containers or volumes is refused.
 
 Benchmarks (`bench` profile, 100k and 1M rows by default):
 
@@ -359,6 +366,19 @@ Every benchmark script writes into a new directory, `results/<timestamp>/`
 or `results/<kind>-<timestamp>/`, or into `BENCH_OUT`, and refuses to run
 when that directory already exists rather than mix two runs. `make
 bench-smoke` writes into a temporary directory and removes it afterwards.
+
+The scripts drop and recreate tables such as `orders`, so they never run in
+`PGDATABASE`: they run in a database of their own, `BENCH_DB` (default
+`leapfrog_bench`), which they create with the comment `leapfrog benchmark
+scratch database` and keep for the next run (`dropdb leapfrog_bench` removes
+it). An existing database without that comment is refused before anything
+is dropped. One benchmark runs at a time per database: a run holds an
+advisory lock in `BENCH_DB` until it ends, however it ends, and a second one
+started meanwhile is refused (two would drop each other's tables, and
+benchmarks on one server disturb each other's timings anyway); set
+`BENCH_DB` to another name to run one elsewhere. `make bench-smoke` uses
+`leapfrog_bench_smoke` and drops it afterwards, also one left by an earlier
+run, but only with the mark.
 
 Compose environment variables: `LEAPFROG_PORT` (5433), `POSTGRES_PASSWORD`
 (`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB), `BENCH_SIZES`,
@@ -516,6 +536,13 @@ Isolation tests (`tests/isolation/specs/`):
 | `leapfrog_types` | EvalPlanQual with `text` and `uuid` equalities: the status, the owner and an unrelated column changing while `FOR UPDATE` waits |
 
 ## Benchmarks
+
+Run the benchmarks on a PostgreSQL instance of their own, never on a server
+with real work on it: a database of their own isolates the data, not the
+load. They write gigabytes of WAL at the default sizes, `write_bench.sh`
+runs `CHECKPOINT` on the whole cluster, and `skip_bench.sh` with `COLD_CMD`
+restarts the server and drops the OS page cache. The Docker server above,
+or one started for the purpose, is the intended target.
 
 ```bash
 bash tests/performance/write_bench.sh            # storage, writes and reads for 12 filter columns
