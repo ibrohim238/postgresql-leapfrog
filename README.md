@@ -380,9 +380,13 @@ benchmarks on one server disturb each other's timings anyway); set
 `leapfrog_bench_smoke` and drops it afterwards, also one left by an earlier
 run, but only with the mark.
 
-Compose environment variables: `LEAPFROG_PORT` (5433), `POSTGRES_PASSWORD`
-(`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB), `BENCH_SIZES`,
-`BENCH_REPEATS`.
+Compose environment variables: `LEAPFROG_PORT` (5433), `LEAPFROG_BIND`
+(127.0.0.1: the server is reachable from this machine only, since the
+password is well known; `0.0.0.0` publishes it on every interface, for a
+client on another machine or a remote `DOCKER_HOST`; connect to `127.0.0.1`
+rather than `localhost`, which may resolve to `::1` first),
+`POSTGRES_PASSWORD` (`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB),
+`BENCH_SIZES`, `BENCH_REPEATS`.
 
 ## Loading the library
 
@@ -490,8 +494,11 @@ docker run --rm leapfrog-cassert
 ```
 
 The regression tests need a superuser (as `pg_regress` normally runs):
-`leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` changes the
-page cost of `pg_default` for one check and resets it.
+`leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` creates an
+in-place tablespace (`allow_in_place_tablespaces`) named after the database,
+`lf_space_<database>`, sets a page cost on it for one check and drops it. It
+never changes `pg_default`; an existing tablespace of that name that is not
+the test's own (owner and comment) stops the test before anything is changed.
 
 Regression tests (`sql/`):
 

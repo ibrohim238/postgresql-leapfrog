@@ -211,18 +211,52 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND delet
  t
 (1 row)
 
--- Page costs come from the tablespace of the table and the indexes.
-SELECT lf_node_cost($$ SELECT * FROM lf_cost_shuffled WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
+-- Page costs come from the tablespace of the table and the indexes.  The
+-- table lives in a tablespace of the test's own (in place, under pg_tblspc),
+-- so that the setting changed is not one that other databases of the
+-- cluster use, as pg_default's would be.  The tablespace is named after the
+-- database, so that runs in other databases of one cluster do not share it.
+-- One owned by this user and carrying the comment of this test was left by
+-- an interrupted run and is dropped first, with the table that may still be
+-- in it.  One of that name without both is someone else's: the script stops
+-- before touching it (psql would go on past a failed CREATE TABLESPACE), and
+-- the test fails.
+SELECT s.name AS lf_space,
+	coalesce(t.mine, false) AS lf_space_left,
+	NOT coalesce(t.mine, true) AS lf_space_taken
+FROM (SELECT left('lf_space_' || current_database(), 63) AS name) s
+LEFT JOIN LATERAL (SELECT pg_get_userbyid(spcowner) = current_user
+		AND shobj_description(oid, 'pg_tablespace') IS NOT DISTINCT FROM
+			'leapfrog regression test' AS mine
+	FROM pg_tablespace WHERE spcname = s.name) t ON true \gset
+\if :lf_space_taken
+\echo tablespace :lf_space is not owned and marked by this test, stopping
+\quit
+\elif :lf_space_left
+DROP TABLE IF EXISTS lf_cost_spaced;
+DROP TABLESPACE :"lf_space";
+\endif
+SET allow_in_place_tablespaces = on;
+CREATE TABLESPACE :"lf_space" LOCATION '';
+RESET allow_in_place_tablespaces;
+COMMENT ON TABLESPACE :"lf_space" IS 'leapfrog regression test';
+SET default_tablespace = :"lf_space";
+CREATE TABLE lf_cost_spaced (LIKE lf_cost_shuffled INCLUDING ALL);
+RESET default_tablespace;
+INSERT INTO lf_cost_spaced SELECT * FROM lf_cost_shuffled;
+VACUUM ANALYZE lf_cost_spaced;
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	AS default_cost \gset
-ALTER TABLESPACE pg_default SET (random_page_cost = 40);
-SELECT lf_node_cost($$ SELECT * FROM lf_cost_shuffled WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
+ALTER TABLESPACE :"lf_space" SET (random_page_cost = 40);
+SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
 	 > :default_cost * 2 AS tablespace_page_cost_is_used;
  tablespace_page_cost_is_used 
 ------------------------------
  t
 (1 row)
 
-ALTER TABLESPACE pg_default RESET (random_page_cost);
+DROP TABLE lf_cost_spaced;
+DROP TABLESPACE :"lf_space";
 -- A path parameterized by a join column is rescanned once per outer row;
 -- the same index and heap pages are read again and stay cached, so the
 -- per-loop cost falls with the loop count.  (A LATERAL subquery with its

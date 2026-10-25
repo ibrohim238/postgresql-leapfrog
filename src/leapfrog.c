@@ -58,8 +58,9 @@
  * as an index scan rechecks indexqualorig: the equalities on the columns of
  * both indexes and the predicate of the inner index.
  *
- * Limitations: key columns must be bigint and the scan covers a single
- * relation only.
+ * Limitations: the sort column must be smallint, integer or bigint (or a
+ * domain over one); equality columns may be of any type with a B-tree
+ * operator family.  The scan covers a single relation only.
  *
  * The library installs set_rel_pathlist_hook from _PG_init, so it must be
  * loaded into the backend: shared_preload_libraries, session_preload_libraries
