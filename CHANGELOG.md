@@ -5,6 +5,15 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `tests/performance/bitmap_bench.sh`: the node against `BitmapAnd`, stock
+  PostgreSQL and PostgreSQL with leapfrog at 100k to 50M rows, with and
+  without `LIMIT`, the modes in ABBA order; `WORK_MEM` for exact bitmaps;
+  `DELETED=batches` for rows deleted customer by customer in random
+  physical order, where the stock Index Scan reads the heap. Results in the
+  README and BENCHMARKS.md; `make bench-smoke` runs it too.
+
 ### Changed
 
 - `compose.yaml` publishes the server on 127.0.0.1 only, not on every

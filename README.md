@@ -287,6 +287,85 @@ SET leapfrog.force = on;   -- diagnostics, not for production
 | Memory | O(1) | bitmaps of both indexes | TID group of one value, ≤ `work_mem` |
 | Wins when | matches are frequent | the whole result is needed | matches are sparse and there is a `LIMIT` |
 
+### Measured as the table grows
+
+[`tests/performance/bitmap_bench.sh`](tests/performance/bitmap_bench.sh):
+indexes `(customer_id, id)`, `(product_id, id)` and `(id) WHERE deleted_at
+IS NOT NULL`; 100 customers, 50 products, 10 % of the rows deleted. Two
+queries with `LIMIT 100` — a pair of ordinary indexes
+(`customer_id = 7 AND product_id = 3`) and a customer's deleted rows
+(`customer_id = 7 AND deleted_at IS NOT NULL`) — and the pair without
+`LIMIT`. Three runs on the C code of commit `daf9ece`, each on a freshly
+loaded table, with `work_mem` 256MB at every size, as a tuned server would
+have, so that every bitmap is exact; 5 warm-up and 11 measured runs each, the four plans
+interleaved in ABBA order; one laptop, `shared_buffers` 512MB. Median and,
+in brackets, 90th percentile of the 33 measured runs, in milliseconds.
+
+| Rows | Query | Index Merge Intersect | BitmapAnd | Stock PostgreSQL's choice |
+|---:|---|---:|---:|---|
+| 1M | pair | 1.32 (1.69) | 4.19 (5.04) | BitmapAnd 4.11 (5.30) |
+| 10M | pair | 1.27 (1.53) | 53.0 (60.4) | BitmapAnd 53.3 (61.6) in two runs, Index Scan 2.85 (3.13) in one |
+| 50M | pair | 1.27 (1.72) | 231 (236) | Index Scan 3.13 (3.70) |
+| 1M | deleted | 0.95 (1.20) | 9.02 (13.2) | Index Scan 2.88 (3.54) |
+| 10M | deleted | 0.85 (1.27) | 80.9 (84.0) | Index Scan 2.37 (2.59) |
+| 50M | deleted | 0.87 (1.22) | 409 (415) | Index Scan 2.18 (3.02) |
+| 1M | pair, no `LIMIT` | 2.08 (2.85) | 4.30 (5.99) | BitmapAnd 4.22 (6.07) |
+| 10M | pair, no `LIMIT` | 17.1 (19.1) | 45.2 (50.3) | BitmapAnd 44.4 (51.8) |
+| 50M | pair, no `LIMIT` | 84.3 (85.0) | 223 (228) | BitmapAnd 222 (229) |
+
+- With a `LIMIT` the node's work does not depend on the table size: 133–179
+  buffers and 10,752–18,621 index entries at 1M, 10M and 50M rows, the same
+  in every run. `BitmapAnd` cannot return a row before it has read every
+  entry of both conditions — 1.5 million for the pair and 5.5 million for
+  the deleted rows at 50M — so the gap grows with the table: 3.2–9.5× at 1M
+  rows, 42–95× at 10M, 180–470× at 50M.
+- Without a `LIMIT` both read the same entries and buffers; the node is
+  2.1–2.6× faster because it builds no bitmaps and does not sort.
+- The plan stock PostgreSQL picks is the fairer comparison. Where it turns
+  to an Index Scan that stops early too, the node is 2.2–3.0× faster; where
+  it keeps `BitmapAnd`, 3.1× at 1M rows and 42× at 10M. Which of the two it
+  picks for the pair at 10M rows changed from one load of the same data to
+  the next (the statistics are a sample); the node's plan did not.
+
+**Deleted rows in batches.** Above, the deleted rows are spread evenly, as
+PostgreSQL assumes. In real tables they are usually deleted in batches,
+customer by customer, and the heap is not in `id` order. `DELETED=batches`
+loads such a table: 12.5 % of the rows deleted, a customer's rows in a block
+of `id`s deleted all or none, rows in random physical order; the queried
+customer has no deleted rows among its newest ones while other customers
+do. Stock PostgreSQL still expects its deleted rows right at the top and
+picks an Index Scan on `(customer_id, id)` filtering `deleted_at`, which
+fetches every newer live row of the customer from the heap. Same settings
+and three runs, the deleted-rows query with `LIMIT 100`:
+
+| Rows | Pages | Index Merge Intersect | Stock PostgreSQL: Index Scan | BitmapAnd | Pages read, Index Merge Intersect / Index Scan |
+|---:|---|---:|---:|---:|---:|
+| 1M | in memory | 1.3 ms | 0.8 ms | 11 ms | 146 / 1,042 |
+| 10M | in memory | 6.8 ms | 6.3 ms | 120 ms | 470 / 9,556 |
+| 50M | in memory (`shared_buffers` 1.5GB) | 32 ms | 32 ms | 857 ms | 1,896 / 47,200 |
+| 50M | **read from disk** | **45 ms, at worst 0.4 s** | **4.5 s, 4.0–5.2 s** | 1.5 s | from disk: up to 1,600 / about 43,000 |
+
+Median of 33 runs (three loads of 11). At 50M rows the table does not fit
+in the laptop's memory. "In memory" at 50M is a separate run of three loads
+with `shared_buffers` 1.5GB, where all pages the three plans read stay in
+shared buffers (none read from outside). "Read from disk" are the runs with
+`shared_buffers` 512MB right after `BitmapAnd`, which reads 78,797 pages and
+evicts the other plans' pages (15 to 18 runs per plan, and all runs of
+`BitmapAnd` itself).
+
+- While the pages are in memory the Index Scan is as fast or faster: the
+  node reads fewer pages, but steps through the deleted entries of the
+  other customers (13,692, 127,838 and 633,657 index entries), which lie
+  too close together to skip.
+- When the pages have to come from disk, the Index Scan reads about 43,000
+  heap pages back and takes 4–5 s, the case this data set is for. Most of
+  the node's 1,896 pages stay cached; when about 1,500 of them had to be
+  read back (6 of 18 runs) it took 0.24–0.38 s.
+- With leapfrog the planner picks the node at every size.
+
+Details, runs at the default `work_mem` and the caveats (one laptop, a
+50M-row table larger than its memory) are in [BENCHMARKS.md](BENCHMARKS.md#against-bitmapand-as-the-table-grows).
+
 ## Requirements
 
 - PostgreSQL **18** (the planner and executor APIs change between major
@@ -559,6 +638,7 @@ BENCH_SIZES="10000000" bash tests/performance/run.sh
 bash tests/performance/cost_bench.sh             # cost model: estimate against time, skewed and correlated data
 bash tests/performance/skip_bench.sh             # skip-ahead thresholds: buffers and entries read
 bash tests/performance/planning_bench.sh         # planning time: 10/20/50 indexes on the table, 1/2/6 used by the query
+SIZES="1000000 10000000 50000000" WORK_MEM=256MB WARMUP=5 bash tests/performance/bitmap_bench.sh   # against BitmapAnd as the table grows, exact bitmaps; DELETED=hashed or batches for one data set
 BENCH_LABEL=old BENCH_OUT=results/types-old bash tests/performance/types_bench.sh   # equality types, one build
 bash tests/performance/types_compare.sh tests/performance/results/types-old tests/performance/results/types-new
 ```

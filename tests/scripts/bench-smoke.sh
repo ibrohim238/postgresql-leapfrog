@@ -7,6 +7,11 @@
 # from the current one, as a database left over from an older version of the
 # harness would have; run.sh must replace it.
 #
+# Then a tiny run of tests/performance/bitmap_bench.sh, in a database seeded
+# with its helper table, function and view in shapes of their own, which it
+# must replace; it must leave no lf_bitmap table behind, also when it fails
+# after creating it.
+#
 # The run writes into a temporary directory of its own (BENCH_OUT), not into
 # tests/performance/results, so earlier results there, of any benchmark,
 # neither confuse the checks nor get touched; the temporary directory is
@@ -168,4 +173,47 @@ if [ "$(md5sum < "$out/results.csv")" != "$before" ]; then
 	exit 1
 fi
 
-echo "bench-smoke: ok ($rows result rows)"
+# bitmap_bench.sh: stale helper objects are replaced
+$PSQL -d "$BENCH_DB" <<-'SQL'
+	CREATE TABLE lf_bitmap_runs (stale_column int);
+	CREATE VIEW lf_bitmap_metrics AS SELECT stale_column FROM lf_bitmap_runs;
+	CREATE FUNCTION lf_bitmap_run(stale bigint, a text, b text, c int, d text)
+	RETURNS void LANGUAGE sql AS 'SELECT';
+SQL
+bitmap_out="$tmp/bitmap"
+BENCH_DB=$BENCH_DB BENCH_OUT=$bitmap_out SIZES=20000 REPEATS=1 WARMUP=0 \
+	WORK_MEM=64MB bash tests/performance/bitmap_bench.sh > /dev/null
+
+no_bitmap_table() {
+	[ -z "$($PSQL -d "$BENCH_DB" -tAc "SELECT to_regclass('lf_bitmap')")" ]
+}
+
+# 1 size x 2 kinds of deleted rows x 3 queries x 4 modes, 1 run each
+bitmap_rows=$(($(wc -l < "$bitmap_out/summary.csv") - 1))
+if [ "$bitmap_rows" -ne 24 ]; then
+	echo "bench-smoke: bitmap_bench.sh: expected 24 summary rows, got $bitmap_rows" >&2
+	exit 1
+fi
+if ! awk -F, '$4 == "node" && $5 == "Index Merge Intersect" { n++ }
+	$4 == "bitmap" && $5 ~ /Bitmap Heap Scan/ { b++ }
+	END { exit !(n == 6 && b == 6) }' "$bitmap_out/summary.csv"; then
+	echo "bench-smoke: bitmap_bench.sh: the node or bitmap mode did not use its plan" >&2
+	exit 1
+fi
+if ! no_bitmap_table; then
+	echo "bench-smoke: bitmap_bench.sh left its lf_bitmap table behind" >&2
+	exit 1
+fi
+
+# a run failing after the table is created drops it too
+if BENCH_DB=$BENCH_DB BENCH_OUT="$tmp/bitmap-failed" SIZES=not_a_number \
+	bash tests/performance/bitmap_bench.sh > /dev/null 2>&1; then
+	echo "bench-smoke: bitmap_bench.sh with SIZES=not_a_number succeeded" >&2
+	exit 1
+fi
+if ! no_bitmap_table; then
+	echo "bench-smoke: a failed bitmap_bench.sh left its lf_bitmap table behind" >&2
+	exit 1
+fi
+
+echo "bench-smoke: ok ($rows result rows, $bitmap_rows bitmap_bench rows)"
