@@ -37,6 +37,13 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- The planner and the merge follow a MySQL index merge. One pass over the
+  candidates, fewest entries first, keeps the cheapest set, instead of every
+  pair and a greedy growth from the cheapest. The streams catch up with a
+  candidate in turn, the sparsest first after each new candidate, so a dense
+  stream reads around the values the others agree on. Any index that reads in
+  the query's order can be the outer one; it is the densest without a predicate.
+  Tests in `leapfrog_merge_order`.
 - nbtree's private scan state (`BTScanOpaque`) is read in one function,
   `lf_scan_leaf_position`.
 - `compose.yaml` publishes the server on 127.0.0.1 only, not on every

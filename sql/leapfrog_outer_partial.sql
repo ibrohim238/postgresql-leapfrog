@@ -22,10 +22,10 @@ INSERT INTO lf_outer_partial
 SELECT g, g % 20, g % 7, g % 3,
 	CASE WHEN g % 4 = 0 THEN '2026-01-01'::timestamptz END
 FROM generate_series(1, 20000) g;
--- outer: partial, ends with id
+-- partial
 CREATE INDEX lf_outer_partial_live_customer_id ON lf_outer_partial (customer_id, id)
 	WHERE deleted_at IS NULL;
--- inner: id is not its last column, so it cannot be the outer side
+-- id is not its last column: that does not change the order it reads in
 CREATE INDEX lf_outer_partial_product_id_kind ON lf_outer_partial (product_id, id, kind);
 ANALYZE lf_outer_partial;
 
@@ -49,5 +49,13 @@ SELECT lf_check($$ SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND prod
 -- (id % 280 = 123: every other row of customer 3, product 4)
 UPDATE lf_outer_partial SET deleted_at = now() WHERE id % 280 = 123;
 SELECT lf_check($$ SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL ORDER BY id DESC $$);
+
+-- With a stream without a predicate that one is the outer stream, and the predicate
+-- leaves the Filter; with predicates on both sides one must stay.
+DROP INDEX lf_outer_partial_product_id_kind;
+CREATE INDEX lf_outer_partial_product_two ON lf_outer_partial (product_id, id) WHERE kind = 1;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND product_id = 4 AND kind = 1 AND deleted_at IS NULL ORDER BY id LIMIT 5 $$);
+SELECT lf_check($$ SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND product_id = 4 AND kind = 1 AND deleted_at IS NULL ORDER BY id $$);
 
 DROP TABLE lf_outer_partial;

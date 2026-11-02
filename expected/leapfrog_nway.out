@@ -110,10 +110,10 @@ ORDER BY id $$);
                     lf_plan                     
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_product_id
-   Inner Index: lf_nway_customer_id
+   Outer Index: lf_nway_region_id
+   Inner Index: lf_nway_product_id
    Inner Index 2: lf_nway_archived_id
-   Inner Index 3: lf_nway_region_id
+   Inner Index 3: lf_nway_customer_id
 (5 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND region = 2 AND archived ORDER BY id $$);
@@ -136,10 +136,10 @@ ORDER BY id $$);
                     lf_plan                     
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_product_id
-   Inner Index: lf_nway_customer_id
+   Outer Index: lf_nway_region_id
+   Inner Index: lf_nway_product_id
    Inner Index 2: lf_nway_archived_id
-   Inner Index 3: lf_nway_region_id
+   Inner Index 3: lf_nway_customer_id
    Inner Index 4: lf_nway_live_id
 (6 rows)
 
@@ -190,9 +190,9 @@ SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY
                   lf_plan_node                  
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_customer_id
+   Outer Index: lf_nway_region_id
    Inner Index: lf_nway_archived_id
-   Inner Index 2: lf_nway_region_id
+   Inner Index 2: lf_nway_customer_id
 (4 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$);
@@ -241,9 +241,9 @@ SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY
                   lf_plan_node                  
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_customer_id
+   Outer Index: lf_nway_region_id
    Inner Index: lf_nway_archived_id
-   Inner Index 2: lf_nway_region_id
+   Inner Index 2: lf_nway_customer_id
 (4 rows)
 
 RESET leapfrog.force;
@@ -482,26 +482,28 @@ SELECT * FROM lf_nway_red WHERE membership_id = 3 ORDER BY id DESC LIMIT 100 $$)
 
 -- (membership_id, id) WHERE deleted_at IS NULL alone enforces both
 -- conditions: (membership_id, id) adds nothing to it, nor does
--- (id) WHERE deleted_at IS NULL, whose predicate it implies.  The pair that
--- remains is (membership_id, id) and (id) WHERE deleted_at IS NULL, each
--- adding one condition.
+-- (id) WHERE deleted_at IS NULL, whose predicate it implies.  With the fewest
+-- entries it comes first, and no set forms.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
-                         lf_plan                          
-----------------------------------------------------------
+                                  lf_plan                                   
+----------------------------------------------------------------------------
  Limit
-   ->  Custom Scan (Index Merge Intersect) on lf_nway_red
-         Outer Index: lf_nway_red_membership
-         Inner Index: lf_nway_red_live
-(4 rows)
+   ->  Sort
+         Sort Key: id DESC
+         ->  Bitmap Heap Scan on lf_nway_red
+               Recheck Cond: ((membership_id = 3) AND (deleted_at IS NULL))
+               ->  Bitmap Index Scan on lf_nway_red_membership_live
+                     Index Cond: (membership_id = 3)
+(7 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
                       lf_check                       
 -----------------------------------------------------
- custom scan: t, rows: 100/100, missing: 0, extra: 0
+ custom scan: f, rows: 100/100, missing: 0, extra: 0
 (1 row)
 
--- The same with the pair gone: the partial index on both columns is the plan.
+-- The same without the (id) WHERE index.
 BEGIN;
 DROP INDEX lf_nway_red_live;
 SELECT * FROM lf_plan($$

@@ -23,9 +23,8 @@
  * With every column before sortcol fixed by equality, both scans produce
  * sortcol values in the same order.
  *
- * Execution (executor.c) follows RowIDIntersectionIterator::DoRead: both
- * indexes are read sequentially in the same direction and the side that
- * lags behind is advanced until the values meet.  MySQL merges rowids; here
+ * Execution (executor.c) follows RowIDIntersectionIterator::DoRead: the indexes
+ * are read sequentially and the streams catch up with a candidate in turn.  MySQL merges rowids; here
  * the entries of one value are matched by heap TID as well, so the merge
  * stays correct when sortcol is not unique or dead row versions are still
  * in the index.  The TIDs of one value are not in a usable order on both

@@ -331,33 +331,26 @@ descent_cost(IndexOptInfo *index)
 /*
  * merge_read_cost
  *		Cost of reading the index streams through the merge, with the
- *		skip-ahead of intersect_next.  reads[] holds the entries of each
- *		stream inside the overlap and is updated to what the merge reads.
+ *		skip-ahead of find_common_value.  reads[] holds the entries of each
+ *		stream inside the overlap and is updated to what the merge reads;
+ *		ranks[] gets each stream's turn in the merge, sparsest first.
  *
- * The two sparsest streams set the pace.  With the matches spread evenly,
- * the denser of the two has dense/sparse entries between two entries of the
- * sparser one.  Up to leapfrog.skip_after of them are read one by one; a gap
- * longer by more than two leaf pages is crossed by one more descent of the
- * B-tree, charged as btcostestimate charges a descent plus the leaf page it
- * lands on.  A shorter gap is read through: the executor backs off from
- * skips that land on the next leaf page (check_landing).
- *
- * Every further stream is pulled along: the merge advances a lagging stream
- * by one entry per iteration, and the entries read so far count the
- * iterations.  A stream clearly denser than that (more than twice) reads
- * about one entry per iteration and descends again every
- * leapfrog.skip_after of them (measured: 40,000 entries behind a pair of
- * 2,000 each read 5,200 with 46 skips, 460,000 behind 5,000 each read
- * 12,100 with 166); one near the pace keeps up and reads all its entries
- * (20,000 behind 5,000 and 10,000: all of them, 2 skips).
+ * A stream has to reach only the values every sparser stream agrees on.  With
+ * the streams independent, the sparsest stream's entries are the first such
+ * values, and each further stream keeps the share of them that it holds among
+ * the table's rows.  With the matches spread evenly, a stream has
+ * entries/values entries between two of those values.  Up to leapfrog.skip_after
+ * of them are read one by one; a gap longer by more than two leaf pages is
+ * crossed by one more descent of the B-tree, charged as btcostestimate charges a
+ * descent plus the leaf page it lands on.  A shorter gap is read through: the
+ * executor backs off from skips that land on the next leaf page (check_landing).
  */
 static Cost
 merge_read_cost(PlannerInfo *root, IndexCandidate **streams, int nstreams,
-				double *reads, double loop_count)
+				double *reads, int *ranks, double table_rows, double loop_count)
 {
 	int			order[INTERSECT_MAX_STREAMS] = {0};
-	double		sparse_entries;
-	double		iterations;
+	double		values;
 	Cost		cost = 0;
 
 	/* streams by entries, sparsest first (insertion sort, a few streams) */
@@ -374,32 +367,27 @@ merge_read_cost(PlannerInfo *root, IndexCandidate **streams, int nstreams,
 		}
 	}
 
-	sparse_entries = Max(reads[order[0]], 1.0);
-	iterations = sparse_entries;
+	values = Max(reads[order[0]], 1.0);
 
 	for (int n = 0; n < nstreams; n++)
 	{
 		int			i = order[n];
 		IndexOptInfo *index = streams[i]->index;
 		double		leaf_entries = index->tuples / Max(index->pages, 1);
+		double		entries = reads[i];
 		double		descents = 0;
 		double		spc_random_page_cost;
 
-		if (n == 1 && intersect_skip_after > 0 &&
-			reads[i] / sparse_entries >
-			intersect_skip_after + 2 * leaf_entries)
+		ranks[i] = n;
+
+		if (n >= 1 && intersect_skip_after > 0 &&
+			entries / values > intersect_skip_after + 2 * leaf_entries)
 		{
-			reads[i] = sparse_entries * intersect_skip_after;
-			descents = sparse_entries;
+			reads[i] = values * intersect_skip_after;
+			descents = values;
 		}
-		else if (n >= 2 && reads[i] > 2 * iterations)
-		{
-			reads[i] = iterations;
-			if (intersect_skip_after > 0)
-				descents = iterations / intersect_skip_after;
-		}
-		if (n >= 1)
-			iterations += reads[i];
+		if (n >= 1 && table_rows > 0)
+			values = Max(values * Min(entries / table_rows, 1.0), 1.0);
 
 		get_tablespace_page_costs(index->reltablespace, &spc_random_page_cost,
 								  NULL);
@@ -788,13 +776,15 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		sort is the column the query sorts by.  ndistinct is
  *		lf_sortcol_ndistinct, correlation
  *		lf_outer_index_correlation of the outer index.  Returns in reads[]
- *		the entries each stream is expected to read, for EXPLAIN VERBOSE.
+ *		the entries each stream is expected to read, for EXPLAIN VERBOSE, and
+ *		in ranks[] its turn in the merge.
  */
 void
 lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 					   RangeTblEntry *rte, SortColumn *sort,
 					   IndexCandidate **streams, int nstreams,
-					   double ndistinct, double correlation, double *reads)
+					   double ndistinct, double correlation, double *reads,
+					   int *ranks)
 {
 	RelOptInfo *rel = cpath->path.parent;
 	ParamPathInfo *param_info = cpath->path.param_info;
@@ -844,7 +834,8 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	 * target list on the result rows.  The heap fetches are charged as for an
 	 * Index Scan on the outer index (see lf_outer_index_correlation).
 	 */
-	run_cost = merge_read_cost(root, streams, nstreams, reads, loop_count);
+	run_cost = merge_read_cost(root, streams, nstreams, reads, ranks,
+							   rel->tuples, loop_count);
 	for (int i = 1; i < nstreams; i++)
 		run_cost += group_cost(reads[0], reads[i],
 							   Max(1.0, streams[i]->entries / ndistinct));

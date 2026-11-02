@@ -66,7 +66,8 @@
 #define STREAM_PRIVATE_COLLATIONS 4 /* OID list: its collation per key */
 #define STREAM_PRIVATE_BACKWARD 5	/* the index reads the query's order
 									 * backward */
-#define STREAM_PRIVATE_COUNT	6
+#define STREAM_PRIVATE_RANK		6	/* its turn in the merge, sparsest first */
+#define STREAM_PRIVATE_COUNT	7
 #define STREAM_EXPRS_KEYS		0
 #define STREAM_EXPRS_PRED		1
 #define STREAM_EXPRS_COUNT		2
@@ -182,7 +183,7 @@ extern void lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 								   RangeTblEntry *rte, SortColumn *sort,
 								   IndexCandidate **streams, int nstreams,
 								   double ndistinct, double correlation,
-								   double *reads);
+								   double *reads, int *ranks);
 
 /* indexstream.c */
 extern void lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,

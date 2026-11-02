@@ -17,6 +17,7 @@
 #include "access/nbtree.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_type.h"
+#include "common/int.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -433,8 +434,10 @@ is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
  *		columns before it are fixed by equalities.
  *
  * Every key column before sort_attno must be compared for equality with a
- * value known at execution time.  Returns false when sort_attno is not a
- * key column or a column before it has no usable equality.
+ * value known at execution time: the index then reads in the query's order,
+ * as a MySQL secondary index with its leading columns fixed reads in primary
+ * key order.  Returns false when sort_attno is not a key column or a column
+ * before it has no usable equality.
  */
 static bool
 find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
@@ -487,19 +490,6 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 	candidate->entries = lf_index_entries(search->root, search->rti, candidate);
 
 	return true;
-}
-
-/*
- * is_outer_candidate
- *		Can the index be the outer stream of the intersection: at least one
- *		equality column, then sortcol as the last key column?
- */
-static bool
-is_outer_candidate(IndexCandidate *candidate)
-{
-	return candidate->usable &&
-		candidate->index->nkeycolumns >= 2 &&
-		candidate->sortpos == candidate->index->nkeycolumns - 1;
 }
 
 /*
@@ -576,8 +566,8 @@ adds_restriction(IndexCandidate **streams, int nstreams,
 
 /*
  * is_inner_candidate
- *		Can the index join the set as an inner stream: (j1, ..., jM, sortcol,
- *		...) with equalities on every jI, not in the set yet, adding a
+ *		Can the index join the set as an inner stream: (j1, ..., jM, sortcol)
+ *		with equalities on every jI, not in the set yet, adding a
  *		restriction of its own, and leaving every stream already in the set
  *		with one of its own?  A pair of (membership_id, id) and (membership_id,
  *		id) WHERE deleted_at IS NULL is not a set: the partial index alone
@@ -625,6 +615,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	Relids		required_outer = NULL;
 	double		group_bytes = 0;
 	double		reads[INTERSECT_MAX_STREAMS];
+	int			ranks[INTERSECT_MAX_STREAMS];
 
 	if (search->ndistinct < 0)
 		search->ndistinct = lf_sortcol_ndistinct(root, rel, search->rti,
@@ -672,7 +663,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 
 	lf_cost_intersect_path(cpath, root, search->rte, &search->sort,
 						   streams, nstreams, search->ndistinct, correlation,
-						   reads);
+						   reads, ranks);
 
 	/*
 	 * A CustomPath has no custom_exprs; the value expressions and the index
@@ -705,6 +696,8 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 										list_copy(streams[i]->collations));
 		cpath->custom_private = lappend(cpath->custom_private,
 										makeBoolConst(streams[i]->backward, false));
+		cpath->custom_private = lappend(cpath->custom_private,
+										make_int4_const(ranks[i]));
 	}
 	for (int i = 0; i < nstreams; i++)
 	{
@@ -739,118 +732,102 @@ add_intersect_path(RelOptInfo *rel, CustomPath *cpath)
 }
 
 /*
- * The cheapest pair found so far, the start of the greedy expansion.  Its
- * cost is kept, not the path: add_path may free a path it rejects or later
- * replaces, and scales the costs of a path under leapfrog.force.
+ * candidate_entries_cmp
+ *		Order of find_intersect_order in MySQL, less its first criterion, the
+ *		columns an index covers, which matters there for a plan that reads no
+ *		rows: fewest entries first.  The OID makes it deterministic.
  */
-typedef struct BestPair
+static int
+candidate_entries_cmp(const void *a, const void *b)
 {
-	IndexCandidate *outer;		/* NULL until a pair is found */
-	IndexCandidate *inner;
-	Cost		total_cost;
-	double		correlation;
-} BestPair;
+	const IndexCandidate *ca = (const IndexCandidate *) a;
+	const IndexCandidate *cb = (const IndexCandidate *) b;
 
-/*
- * search_pairs_from_outer
- *		Offer every pair of one outer index with an inner candidate, as the
- *		planner compares them with the stock plans and with each other, and
- *		remember the cheapest pair of all in *best.  Pairs are not offered
- *		under leapfrog.min_indexes > 2.
- */
-static void
-search_pairs_from_outer(IntersectSearch *search, IndexCandidate *outer,
-						BestPair *best)
-{
-	IndexCandidate *streams[2];
-	double		correlation;
-
-	correlation = lf_outer_index_correlation(search->root, search->rti,
-											 outer->index);
-	streams[0] = outer;
-
-	for (int j = 0; j < search->ncandidates; j++)
-	{
-		IndexCandidate *inner = &search->candidates[j];
-		CustomPath *cpath;
-
-		if (!is_inner_candidate(streams, 1, inner))
-			continue;
-		streams[1] = inner;
-		cpath = build_intersect_path(search, streams, 2, correlation);
-		if (cpath == NULL)
-			continue;
-		if (best->outer == NULL || cpath->path.total_cost < best->total_cost)
-		{
-			best->total_cost = cpath->path.total_cost;
-			best->outer = outer;
-			best->inner = inner;
-			best->correlation = correlation;
-		}
-		if (intersect_min_streams <= 2)
-			add_intersect_path(search->rel, cpath);
-	}
+	if (ca->entries != cb->entries)
+		return ca->entries < cb->entries ? -1 : 1;
+	return pg_cmp_u32(ca->index->indexoid, cb->index->indexoid);
 }
 
 /*
- * expand_best_pair
- *		From the cheapest pair, add one stream at a time, the one that lowers
- *		the estimated cost the most, as long as one does and
- *		leapfrog.max_indexes allows.  A stream that costs more than it saves
- *		is left out and the planner stays with the smaller set.  Only the
- *		cheapest pair is expanded: a larger set built on a dearer pair reads
- *		the dearer pair's streams and more.  Sets smaller than
- *		leapfrog.min_indexes are built but not offered, and the set that
- *		reaches it is offered whatever its cost: that lets a test run a
- *		larger set against the stock plans.
+ * build_set_path
+ *		Build the path of a set of streams in merge order.  The first stream of
+ *		a path is the outer one, whose entries are fetched from the heap, and
+ *		the merge does not depend on which it is.  It is the densest stream
+ *		without a predicate: the others are held in memory, value by value, so
+ *		this keeps the groups small, and a predicate of the outer index would
+ *		have to stay in the Filter.
+ */
+static CustomPath *
+build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams)
+{
+	IndexCandidate *ordered[INTERSECT_MAX_STREAMS];
+	int			outer = 0;
+
+	for (int i = 0; i < nstreams; i++)
+	{
+		if (streams[i]->index->indpred == NIL)
+			outer = i;
+		ordered[i] = streams[i];
+	}
+	ordered[0] = streams[outer];
+	ordered[outer] = streams[0];
+
+	return build_intersect_path(search, ordered, nstreams,
+								lf_outer_index_correlation(search->root,
+														   search->rti,
+														   ordered[0]->index));
+}
+
+/*
+ * search_intersection
+ *		One pass over the candidates, as get_best_ror_intersect in MySQL: a
+ *		stream joins the set when it adds a restriction, even if the set costs
+ *		more with it, and the cheapest set seen is offered.  A set smaller than
+ *		leapfrog.min_indexes is not offered, and the first to reach it is
+ *		whatever its cost: that lets a test run a larger set against the stock
+ *		plans.  With plain_only the candidates that need a parameter stay out,
+ *		so that the unparameterized set has its own chance.
  */
 static void
-expand_best_pair(IntersectSearch *search, BestPair *best)
+search_intersection(IntersectSearch *search, bool plain_only)
 {
 	IndexCandidate *streams[INTERSECT_MAX_STREAMS];
-	int			nstreams = 2;
-	Cost		best_cost = best->total_cost;
+	int			nstreams = 0;
+	CustomPath *best = NULL;
+	Cost		best_cost = 0;
 
-	streams[0] = best->outer;
-	streams[1] = best->inner;
-
-	while (nstreams < intersect_max_streams)
+	for (int j = 0; j < search->ncandidates &&
+		 nstreams < intersect_max_streams; j++)
 	{
-		CustomPath *next_best = NULL;
-		IndexCandidate *next_stream = NULL;
-		bool		required = nstreams + 1 <= intersect_min_streams;
+		IndexCandidate *candidate = &search->candidates[j];
+		CustomPath *cpath;
 
-		for (int j = 0; j < search->ncandidates; j++)
+		if (plain_only && !bms_is_empty(candidate->required_outer))
+			continue;
+		if (nstreams == 0)
 		{
-			IndexCandidate *inner = &search->candidates[j];
-			CustomPath *cpath;
-
-			if (!is_inner_candidate(streams, nstreams, inner))
-				continue;
-			streams[nstreams] = inner;
-			cpath = build_intersect_path(search, streams, nstreams + 1,
-										 best->correlation);
-			if (cpath == NULL)
-				continue;
-			if (next_best == NULL ||
-				cpath->path.total_cost < next_best->path.total_cost)
-			{
-				next_best = cpath;
-				next_stream = inner;
-			}
+			streams[nstreams++] = candidate;
+			continue;
 		}
+		if (!is_inner_candidate(streams, nstreams, candidate))
+			continue;
 
-		if (next_best == NULL)
-			break;
-		if (!required && next_best->path.total_cost >= best_cost)
-			break;
+		streams[nstreams] = candidate;
+		cpath = build_set_path(search, streams, nstreams + 1);
+		if (cpath == NULL)
+			continue;
+		nstreams++;
 
-		/* the cost before add_path, which may free or rescale the path */
-		streams[nstreams++] = next_stream;
-		best_cost = next_best->path.total_cost;
-		if (nstreams >= intersect_min_streams)
-			add_intersect_path(search->rel, next_best);
+		if (nstreams >= intersect_min_streams &&
+			(best == NULL || cpath->path.total_cost < best_cost))
+		{
+			best = cpath;
+			best_cost = cpath->path.total_cost;
+		}
 	}
+
+	if (best != NULL)
+		add_intersect_path(search->rel, best);
 }
 
 /*
@@ -866,7 +843,6 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 						   RangeTblEntry *rte)
 {
 	IntersectSearch search;
-	BestPair	best;
 	EquivalenceMemberIterator it;
 	EquivalenceMember *em;
 	ListCell   *lc;
@@ -937,14 +913,18 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			search.ncandidates++;
 	}
 
-	best.outer = NULL;
+	qsort(search.candidates, search.ncandidates, sizeof(IndexCandidate),
+		  candidate_entries_cmp);
+
+	search_intersection(&search, true);
 	for (int i = 0; i < search.ncandidates; i++)
 	{
-		if (is_outer_candidate(&search.candidates[i]))
-			search_pairs_from_outer(&search, &search.candidates[i], &best);
+		if (!bms_is_empty(search.candidates[i].required_outer))
+		{
+			search_intersection(&search, false);
+			break;
+		}
 	}
-	if (best.outer != NULL)
-		expand_best_pair(&search, &best);
 
 	pfree(search.candidates);
 }

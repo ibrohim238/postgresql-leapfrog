@@ -197,8 +197,8 @@ EXPLAIN (COSTS OFF) EXECUTE lf_st_q(3, 2);
          Sort Key: txt, id
          Presorted Key: txt
          ->  Custom Scan (Index Merge Intersect) on lf_st
-               Outer Index: lf_st_owner_txt
-               Inner Index: lf_st_kind_txt
+               Outer Index: lf_st_kind_txt
+               Inner Index: lf_st_owner_txt
 (7 rows)
 
 CREATE TEMP TABLE lf_st_generic AS EXECUTE lf_st_q(3, 2);

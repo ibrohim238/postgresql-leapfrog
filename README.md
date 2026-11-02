@@ -123,14 +123,16 @@ What this shows, plainly:
 For every base relation of the query the planner looks for a set of two or
 more indexes to intersect, called streams:
 
-- the **outer** B-tree `(k1, …, kN, sortcol)`: every `kI` is compared for
-  equality with a value known when the scan starts, as for an `Index Cond`:
-  a constant, a parameter, a column of an outer relation, or a
-  non-volatile expression of those (`$1 || $2`, `lower(o.email)`), and the
-  last column is the first sort key of the query;
-- one or more **inner** B-trees `(j1, …, jM, sortcol, …)` with an equality on
-  every `jI`. With `M = 0` it must be a partial index whose predicate is
-  implied by the query (`(id) WHERE deleted_at IS NULL`).
+- two or more B-trees `(k1, …, kN, sortcol, …)` that read in the same order
+  once their leading columns are fixed. Every `kI` is compared for equality
+  with a value known when the scan starts, as for an `Index Cond`: a constant,
+  a parameter, a column of an outer relation, or a non-volatile expression of
+  those (`$1 || $2`, `lower(o.email)`). `sortcol` is the first sort key of the
+  query. With `N = 0` the index must be partial with a predicate implied by the
+  query (`(id) WHERE deleted_at IS NULL`). This is the rule of a MySQL index
+  merge, where a secondary index with its columns fixed reads in primary key
+  order. Indexes without `sortcol`, like `(q_id)` and `(w_id)`, are left to
+  `BitmapAnd`.
 
 Every stream of a set, the outer one included, must add a restriction the
 others do not enforce: an equality column no other stream has
@@ -140,14 +142,13 @@ streams' equalities and predicates together do not imply. So
 form a set — the partial index alone is the plan — and neither do `(kind, id)`
 with `kind = 2` and `(id) WHERE kind = 2`. A plain `(id)` never joins a set.
 
-The planner offers every pair of an outer and an inner candidate, then from
-the cheapest pair adds one stream at a time — the one that lowers the
-estimated cost the most — as long as one does and `leapfrog.max_indexes`
-(default 4) allows. Each set is a separate path with its own cost, and
-PostgreSQL picks among them and the stock plans as usual: a third index is
-used where fetching the rows the pair leaves costs more than reading the
-third stream, and left out — its condition becomes a `Filter` — where it
-does not.
+The planner works as `get_best_ror_intersect` does in MySQL: one pass over the
+candidates, fewest entries first. A stream joins the set when it adds a
+restriction, up to `leapfrog.max_indexes` (default 4), and the cheapest set seen
+in the pass becomes the path; PostgreSQL picks between it and the stock plans
+as usual. A condition left out of the set becomes a `Filter`. The outer stream,
+whose entries are fetched from the heap, is the densest one without a
+predicate: the others are held in memory value by value.
 
 With every column before `sortcol` fixed, every scan returns its entries in
 `sortcol` order. The executor reads them as sorted streams in the `ORDER BY`
@@ -606,6 +607,7 @@ Regression tests (`sql/`):
 | `leapfrog_sort_icu` | a sort column in an ICU collation, deterministic or not; skipped where the database's encoding has none |
 | `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions |
 | `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
+| `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -734,10 +736,9 @@ Verified against `src/` and the tests.
 **Index sets**
 
 - Up to `leapfrog.max_indexes` streams (default 4, at most 16), added
-  greedily: from the cheapest pair, the stream that lowers the cost the most,
-  while one does. A set the greedy order never reaches is not considered.
-- The outer index ends with `sortcol` and has at least one equality column;
-  every inner one starts with equality columns, then `sortcol`. Every stream
+  in one pass, fewest entries first. A set that pass never reaches is not
+  considered.
+- Every index has equality columns or a predicate, then `sortcol`. Every stream
   must add an equality column or a predicate the other streams do not
   enforce; implication is proved with `predicate_implied_by`, so an
   equivalent condition the prover cannot see through keeps a redundant
