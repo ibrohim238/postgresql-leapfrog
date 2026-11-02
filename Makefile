@@ -18,10 +18,11 @@ OBJS = \
 	src/planner.o
 
 EXTENSION = leapfrog
-EXTVERSION = 0.0.3
+EXTVERSION = 0.0.4
 DATA = leapfrog--$(EXTVERSION).sql \
 	leapfrog--0.0.1--0.0.2.sql \
-	leapfrog--0.0.2--0.0.3.sql
+	leapfrog--0.0.2--0.0.3.sql \
+	leapfrog--0.0.3--0.0.4.sql
 PGFILEDESC = "leapfrog - Index Merge Intersect custom scan"
 PG_CPPFLAGS = -DLEAPFROG_VERSION='"$(EXTVERSION)"'
 
