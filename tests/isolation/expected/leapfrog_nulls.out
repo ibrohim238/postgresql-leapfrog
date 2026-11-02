@@ -1,0 +1,75 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_plan
+step s2_plan: EXPLAIN (COSTS OFF) SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val NULLS LAST LIMIT 2 FOR UPDATE;
+QUERY PLAN                                                    
+--------------------------------------------------------------
+Limit                                                         
+  ->  LockRows                                                
+        ->  Custom Scan (Index Merge Intersect) on lf_iso_null
+              Outer Index: lf_iso_null_b                      
+              Inner Index: lf_iso_null_a                      
+(5 rows)
+
+
+starting permutation: s1_begin s1_null s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_null: UPDATE lf_iso_null SET val = NULL WHERE id = 22;
+step s2_lock: SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val NULLS LAST LIMIT 2 FOR UPDATE; <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|val
+--+---
+22|   
+34| 34
+(2 rows)
+
+
+starting permutation: s1_begin s1_null s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_null: UPDATE lf_iso_null SET val = NULL WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val NULLS LAST LIMIT 2 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|val
+--+---
+22|   
+34| 34
+(2 rows)
+
+
+starting permutation: s1_begin s1_b s2_tail s1_commit
+step s1_begin: BEGIN;
+step s1_b: UPDATE lf_iso_null SET b = 0 WHERE id = 10;
+step s2_tail: SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val DESC NULLS FIRST, id LIMIT 3 FOR UPDATE; <waiting ...>
+step s1_commit: COMMIT;
+step s2_tail: <... completed>
+ id|val
+---+---
+ 70|   
+130|   
+190|   
+(3 rows)
+
+
+starting permutation: s1_begin s1_b s2_tail_std s1_commit
+step s1_begin: BEGIN;
+step s1_b: UPDATE lf_iso_null SET b = 0 WHERE id = 10;
+step s2_tail_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val DESC NULLS FIRST, id LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_tail_std: <... completed>
+ id|val
+---+---
+ 70|   
+130|   
+190|   
+(3 rows)
+

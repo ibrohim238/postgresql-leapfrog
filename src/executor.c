@@ -61,6 +61,8 @@ typedef struct IndexStream
 	bool		have;			/* current entry is not consumed yet */
 	bool		eof;
 	Datum		value;			/* points into the scan's index tuple */
+	bool		isnull;
+	bool		bounded;		/* a skip's bound keeps NULLs still ahead out */
 	ItemPointerData tid;
 	SkipAhead	skip;
 	MemoryContext bound_cxt;	/* the bound of the last skip, which nbtree
@@ -96,11 +98,14 @@ typedef struct IntersectScanState
 	bool		match_by_pred;	/* some inner group overflowed: check the row */
 	bool		in_group;		/* groups of group_value are collected */
 	Datum		group_value;	/* copied into group_cxt: the streams move on */
+	bool		group_isnull;
 	MemoryContext group_cxt;	/* reset when the next group starts */
 	int			group_limit;	/* entries of one group that fit into work_mem */
 	SortSupportData ssup;		/* compares values in query order */
 	int16		sort_typlen;
 	bool		sort_typbyval;
+	bool		sort_notnull;	/* NULL entries are dead: skip them */
+	bool		nulls_ahead;	/* NULLs come after every value in the merge */
 
 	/* instrumentation, summed over all rescans */
 	int64		matched;		/* TIDs found in every stream */
@@ -253,6 +258,11 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 
 	state->ssup.ssup_cxt = CurrentMemoryContext;
 	state->ssup.ssup_collation = sort_collation;
+	state->ssup.ssup_nulls_first = DatumGetBool(private_datum(private,
+															  PRIVATE_SORT_NULLS_FIRST));
+	state->sort_notnull = DatumGetBool(private_datum(private,
+													 PRIVATE_SORT_NOTNULL));
+	state->nulls_ahead = !state->sort_notnull && !state->ssup.ssup_nulls_first;
 	PrepareSortSupportFromOrderingOp(get_opfamily_member(sort_opfamily, sort_type,
 														 sort_type,
 														 state->descending ?
@@ -379,9 +389,12 @@ init_skip(SkipAhead *skip)
  * skip_ahead
  *		Re-position a lagging stream on the frontmost value, remembering the
  *		leaf page it leaves so that check_landing can tell how far it went.
+ *		A bound on a value excludes NULLs, which read_stream_entry goes back
+ *		for when they come later in the merge; a NULL bound is the last group.
  */
 static void
-skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound)
+skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
+		   bool bound_isnull)
 {
 	MemoryContext oldcxt;
 
@@ -392,11 +405,20 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound)
 
 	/* bound belongs to another stream, which will move on */
 	MemoryContextReset(stream->bound_cxt);
-	oldcxt = MemoryContextSwitchTo(stream->bound_cxt);
-	bound = datumCopy(bound, state->sort_typbyval, state->sort_typlen);
-	MemoryContextSwitchTo(oldcxt);
-
-	lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_VALUE, bound);
+	if (bound_isnull)
+	{
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NULL,
+							(Datum) 0);
+		stream->bounded = false;
+	}
+	else
+	{
+		oldcxt = MemoryContextSwitchTo(stream->bound_cxt);
+		bound = datumCopy(bound, state->sort_typbyval, state->sort_typlen);
+		MemoryContextSwitchTo(oldcxt);
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_VALUE, bound);
+		stream->bounded = state->nulls_ahead;
+	}
 	skip->behind = 0;
 	state->skips++;
 }
@@ -449,6 +471,7 @@ intersect_start(IntersectScanState *state)
 
 		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
 							(Datum) 0);
+		stream->bounded = false;
 		init_skip(&stream->skip);
 	}
 
@@ -507,20 +530,31 @@ tid_compare(const void *a, const void *b)
 
 /*
  * read_stream_entry
- *		Advance a stream by one entry; remembers when it is exhausted.
+ *		Advance a stream by one entry; remembers when it is exhausted.  A
+ *		stream that ran out under a skip's bound has not seen the NULLs after
+ *		the values yet.
  */
 static void
 read_stream_entry(IntersectScanState *state, IndexStream *stream,
 				  ScanDirection dir)
 {
-	if (lf_read_index_entry(stream->scan, dir, stream->sort_attno,
-							&stream->value, &stream->tid, &stream->read))
+	for (;;)
 	{
-		stream->have = true;
-		check_landing(state, stream);
+		if (lf_read_index_entry(stream->scan, dir, stream->sort_attno,
+								state->sort_notnull, &stream->value,
+								&stream->isnull, &stream->tid, &stream->read))
+		{
+			stream->have = true;
+			check_landing(state, stream);
+			return;
+		}
+		if (!stream->bounded)
+			break;
+		stream->bounded = false;
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NULL,
+							(Datum) 0);
 	}
-	else
-		stream->eof = true;
+	stream->eof = true;
 }
 
 /*
@@ -542,8 +576,8 @@ collect_group(IntersectScanState *state, IndexStream *stream,
 	stream->group_count = 0;
 
 	while (stream->have &&
-		   ApplySortComparator(stream->value, false, state->group_value, false,
-							   &state->ssup) == 0)
+		   ApplySortComparator(stream->value, stream->isnull, state->group_value,
+							   state->group_isnull, &state->ssup) == 0)
 	{
 		if ((++iterations & 1023) == 0)
 			CHECK_FOR_INTERRUPTS();
@@ -618,6 +652,7 @@ intersect_next(ScanState *ss)
 	while (!state->done)
 	{
 		Datum		front;
+		bool		front_isnull;
 		bool		all_equal;
 		bool		pending;
 		bool		exhausted = false;
@@ -676,7 +711,8 @@ intersect_next(ScanState *ss)
 			bool		found = true;
 			bool		by_pred = false;
 
-			if (ApplySortComparator(outer->value, false, state->group_value, false,
+			if (ApplySortComparator(outer->value, outer->isnull,
+									state->group_value, state->group_isnull,
 									&state->ssup) != 0)
 			{
 				state->in_group = false;
@@ -726,16 +762,21 @@ intersect_next(ScanState *ss)
 
 		/* the frontmost value in scan direction */
 		front = outer->value;
+		front_isnull = outer->isnull;
 		all_equal = true;
 		for (int i = 1; i < state->nstreams; i++)
 		{
-			int			cmp = ApplySortComparator(state->streams[i].value, false,
-												  front, false, &state->ssup);
+			int			cmp = ApplySortComparator(state->streams[i].value,
+												  state->streams[i].isnull,
+												  front, front_isnull, &state->ssup);
 
 			if (cmp != 0)
 				all_equal = false;
 			if (cmp > 0)
+			{
 				front = state->streams[i].value;
+				front_isnull = state->streams[i].isnull;
+			}
 		}
 
 		if (all_equal)
@@ -745,8 +786,9 @@ intersect_next(ScanState *ss)
 			state->in_group = true;
 			MemoryContextReset(state->group_cxt);
 			oldcxt = MemoryContextSwitchTo(state->group_cxt);
-			state->group_value = datumCopy(front, state->sort_typbyval,
-										   state->sort_typlen);
+			state->group_isnull = front_isnull;
+			state->group_value = front_isnull ? (Datum) 0 :
+				datumCopy(front, state->sort_typbyval, state->sort_typlen);
 			MemoryContextSwitchTo(oldcxt);
 			for (int i = 0; i < state->nstreams; i++)
 				state->streams[i].skip.behind = 0;
@@ -766,15 +808,15 @@ intersect_next(ScanState *ss)
 		{
 			IndexStream *stream = &state->streams[i];
 
-			if (ApplySortComparator(stream->value, false, front, false,
-									&state->ssup) == 0)
+			if (ApplySortComparator(stream->value, stream->isnull, front,
+									front_isnull, &state->ssup) == 0)
 			{
 				stream->skip.behind = 0;
 				continue;
 			}
 			stream->have = false;
 			if (++stream->skip.behind >= stream->skip.threshold)
-				skip_ahead(state, stream, front);
+				skip_ahead(state, stream, front, front_isnull);
 		}
 	}
 

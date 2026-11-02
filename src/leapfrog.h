@@ -41,7 +41,8 @@
 
 /*
  * Layout of CustomPath.custom_private: the scan direction, the number of
- * streams and the sort column's type, operator family and collation, then
+ * streams, the sort column's type, operator family and collation, and whether
+ * its NULLs sort first and whether it can hold any, then
  * STREAM_PRIVATE_COUNT Consts per stream, then two expression
  * lists per stream (the value expressions of its equalities and, for a
  * partial index, its predicate).  The plan keeps the Consts in
@@ -53,7 +54,9 @@
 #define PRIVATE_SORT_TYPE		2	/* input type of the index opclass */
 #define PRIVATE_SORT_OPFAMILY	3
 #define PRIVATE_SORT_COLLATION	4
-#define PRIVATE_COUNT			5
+#define PRIVATE_SORT_NULLS_FIRST 5
+#define PRIVATE_SORT_NOTNULL	6
+#define PRIVATE_COUNT			7
 #define STREAM_PRIVATE_INDEX	0	/* index OID */
 #define STREAM_PRIVATE_SORTPOS	1	/* position of sortcol among the key
 									 * columns */
@@ -100,6 +103,7 @@ typedef enum SortBound
 	SORT_BOUND_NONE,
 	SORT_BOUND_VALUE,			/* the value or further in query order */
 	SORT_BOUND_NOT_NULL,		/* any value but NULL */
+	SORT_BOUND_NULL,			/* NULLs only */
 } SortBound;
 
 /*
@@ -115,6 +119,9 @@ typedef struct SortColumn
 	Oid			opfamily;
 	Oid			collation;
 	bool		descending;
+	bool		nulls_first;
+	bool		notnull;		/* no NULLs in the live rows */
+	double		null_frac;		/* share of NULLs, -1 until looked up */
 	bool		range_ssup_ready;
 	SortSupportData range_ssup;
 } SortColumn;
@@ -182,7 +189,8 @@ extern void lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys,
 extern bool lf_scan_leaf_position(IndexScanDesc scan, bool descending,
 								  BlockNumber *page, BlockNumber *next_page);
 extern bool lf_read_index_entry(IndexScanDesc scan, ScanDirection dir,
-								int attno, Datum *value, ItemPointer tid,
+								int attno, bool skip_nulls, Datum *value,
+								bool *isnull, ItemPointer tid,
 								int64 *entries_read);
 
 /* executor.c */

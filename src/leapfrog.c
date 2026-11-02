@@ -42,7 +42,8 @@
  * way index_getnext_slot does.
  *
  * The merge column may be of any type with a btree operator family: values
- * are compared with the comparator of the query's sort key.
+ * are compared with the comparator of the query's sort key, and NULLs are
+ * values of the merge, in the order the query asks for.
  *
  * Costing follows ROR_intersect_plan::add, with every component expressed
  * through the planner's own cost functions (costsize.c).

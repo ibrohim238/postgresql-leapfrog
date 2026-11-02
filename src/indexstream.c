@@ -84,6 +84,13 @@ lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, SortBound kind,
 								   (Datum) 0);
 			nkeys++;
 			break;
+		case SORT_BOUND_NULL:
+			ScanKeyEntryInitialize(&scankeys[nkeys], SK_ISNULL | SK_SEARCHNULL,
+								   keys->nequal + 1, InvalidStrategy,
+								   InvalidOid, InvalidOid, InvalidOid,
+								   (Datum) 0);
+			nkeys++;
+			break;
 	}
 
 	scan->numberOfKeys = nkeys;
@@ -130,22 +137,23 @@ lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
  *		index, including the skipped ones.  A by-reference value points into
  *		the scan's index tuple: it stays valid until the scan moves on.
  *
- * The planner accepts the sort column only when it is NOT NULL, but that
+ * With skip_nulls the planner found the sort column NOT NULL, but that
  * describes the live rows: an index can still hold dead entries with NULL
  * until VACUUM, for instance when a NULL was updated away before SET NOT
  * NULL.  Such entries are skipped.  They cannot belong to a row the merge
  * has to return, since NULL never satisfies the equality the merge is
  * built on, and treating them as a value would derail it: a backward scan
- * reads them first.
+ * reads them first.  Otherwise a NULL is a value of the merge like any other.
  */
 bool
 lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
-					Datum *value, ItemPointer tid, int64 *entries_read)
+					bool skip_nulls, Datum *value, bool *isnull,
+					ItemPointer tid, int64 *entries_read)
 {
 	for (;;)
 	{
 		Datum		datum;
-		bool		isnull;
+		bool		datum_isnull;
 
 		if (index_getnext_tid(scan, dir) == NULL)
 			return false;
@@ -155,14 +163,15 @@ lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
 		Assert(scan->xs_itup != NULL);
 
 		datum = index_getattr(scan->xs_itup, attno, scan->xs_itupdesc,
-							  &isnull);
-		if (isnull)
+							  &datum_isnull);
+		if (datum_isnull && skip_nulls)
 		{
 			CHECK_FOR_INTERRUPTS();
 			continue;
 		}
 
 		*value = datum;
+		*isnull = datum_isnull;
 		ItemPointerCopy(&scan->xs_heaptid, tid);
 
 		return true;

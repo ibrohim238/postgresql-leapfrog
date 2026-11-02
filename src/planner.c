@@ -357,11 +357,10 @@ pathkey_is_column(PathKey *pathkey, RelOptInfo *rel, Index rti,
 
 /*
  * is_notnull_column
- *		NULLs have no place in the merge: values are compared for equality
- *		and the sort column must be NOT NULL.  The planner's notnullattnums
- *		is the source of truth: a NOT NULL constraint added NOT VALID sets
- *		pg_attribute.attnotnull while NULLs may still be in the column, and
- *		get_relation_info leaves such columns out of the set.
+ *		Can the sort column hold NULLs in the live rows?  The planner's
+ *		notnullattnums is the source of truth: a NOT NULL constraint added NOT
+ *		VALID sets pg_attribute.attnotnull while NULLs may still be in the
+ *		column, and get_relation_info leaves such columns out of the set.
  */
 static bool
 is_notnull_column(RelOptInfo *rel, AttrNumber attno)
@@ -397,10 +396,11 @@ is_heapkeyspace(IndexCandidate *candidate)
  *		A btree whose column at position pos is sorted ascending in the
  *		operator family, input type and collation of the query's sort key, so
  *		that every stream of the merge produces values in the order the query
- *		asks for and they compare alike.  NULLs ordering is not checked: the
- *		sort column is NOT NULL.  Whether the duplicates are ordered by TID is
- *		checked last, by is_heapkeyspace, for the sets that pass everything
- *		else: it opens the index.
+ *		asks for and they compare alike.  So must the NULLs of a nullable
+ *		column, in scan direction: a backward scan reads the other end first.
+ *		Whether the duplicates are ordered by TID is checked last, by
+ *		is_heapkeyspace, for the sets that pass everything else: it opens the
+ *		index.
  */
 static bool
 is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
@@ -412,7 +412,10 @@ is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
 		index->sortopfamily[pos] == sort->opfamily &&
 		index->opcintype[pos] == sort->type &&
 		index->indexcollations[pos] == sort->collation &&
-		!index->reverse_sort[pos];
+		!index->reverse_sort[pos] &&
+		(sort->notnull ||
+		 (sort->descending ? !index->nulls_first[pos] : index->nulls_first[pos]) ==
+		 sort->nulls_first);
 }
 
 /*
@@ -674,6 +677,10 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 				   make_oid_const(search->sort.type),
 				   make_oid_const(search->sort.opfamily),
 				   make_oid_const(search->sort.collation));
+	cpath->custom_private = lappend(cpath->custom_private,
+									makeBoolConst(search->sort.nulls_first, false));
+	cpath->custom_private = lappend(cpath->custom_private,
+									makeBoolConst(search->sort.notnull, false));
 	for (int i = 0; i < nstreams; i++)
 	{
 		cpath->custom_private = lappend(cpath->custom_private,
@@ -869,7 +876,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	search.sort.attno = InvalidAttrNumber;
 	search.ndistinct = -1.0;
 
-	/* the sort column: a NOT NULL column of this relation */
+	/* the sort column: a column of this relation */
 	search.pathkey = linitial_node(PathKey, root->query_pathkeys);
 	setup_eclass_member_iterator(&it, search.pathkey->pk_eclass, rel->relids);
 	while ((em = eclass_member_iterator_next(&it)) != NULL)
@@ -882,14 +889,16 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		if (!IsA(expr, Var))
 			continue;
 		attno = ((Var *) expr)->varattno;
-		if (attno > 0 && pathkey_is_column(search.pathkey, rel, rti, attno) &&
-			is_notnull_column(rel, attno))
+		if (attno > 0 && pathkey_is_column(search.pathkey, rel, rti, attno))
 		{
 			search.sort.attno = attno;
 			search.sort.type = em->em_datatype;
 			search.sort.opfamily = search.pathkey->pk_opfamily;
 			search.sort.collation = search.pathkey->pk_eclass->ec_collation;
 			search.sort.descending = search.pathkey->pk_cmptype == COMPARE_GT;
+			search.sort.nulls_first = search.pathkey->pk_nulls_first;
+			search.sort.notnull = is_notnull_column(rel, attno);
+			search.sort.null_frac = -1.0;
 			search.sort.range_ssup_ready = false;
 			break;
 		}

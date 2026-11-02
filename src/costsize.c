@@ -458,6 +458,7 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 	int64		entries = 0;
 	Form_pg_attribute attr;
 	int			sort_keyno = candidate->sortpos + 1;
+	bool		isnull;
 	ListCell   *lc;
 
 	if (candidate->range_known >= 0)
@@ -496,16 +497,16 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 	/* NULLs are at one end of the index and no end of the range */
 	lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
 	candidate->range_empty = !lf_read_index_entry(scan, ForwardScanDirection,
-												  sort_keyno,
-												  &candidate->range_lo, &tid,
-												  &entries);
+												  sort_keyno, true,
+												  &candidate->range_lo, &isnull,
+												  &tid, &entries);
 	if (!candidate->range_empty)
 	{
 		candidate->range_lo = datumCopy(candidate->range_lo, attr->attbyval,
 										attr->attlen);
 		lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
-		if (lf_read_index_entry(scan, BackwardScanDirection, sort_keyno,
-								&candidate->range_hi, &tid, &entries))
+		if (lf_read_index_entry(scan, BackwardScanDirection, sort_keyno, true,
+								&candidate->range_hi, &isnull, &tid, &entries))
 			candidate->range_hi = datumCopy(candidate->range_hi, attr->attbyval,
 											attr->attlen);
 		else
@@ -567,6 +568,33 @@ sortcol_range_selectivity(PlannerInfo *root, Index rti, SortColumn *sort,
 }
 
 /*
+ * sortcol_null_frac
+ *		Share of the table's rows with a NULL in the sort column, from its
+ *		statistics; 0 for a NOT NULL column.
+ */
+static double
+sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)
+{
+	if (sort->null_frac < 0)
+	{
+		sort->null_frac = 0.0;
+		if (!sort->notnull)
+		{
+			VariableStatData vardata;
+
+			examine_variable(root, (Node *) column_var(root, rti, sort->attno),
+							 0, &vardata);
+			if (HeapTupleIsValid(vardata.statsTuple))
+				sort->null_frac =
+					((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;
+			ReleaseVariableStats(vardata);
+		}
+	}
+
+	return sort->null_frac;
+}
+
+/*
  * range_compare
  *		Compare two sortcol values in ascending order, in the query's
  *		collation.
@@ -602,7 +630,9 @@ range_compare(SortColumn *sort, Datum a, Datum b)
  *
  *		A stream is assumed to follow the table's distribution of sortcol
  *		within its own range.  All are 1 when a range cannot be probed; an
- *		empty overlap gives 0.
+ *		empty overlap gives 0.  The range holds values only: the NULLs of a
+ *		nullable column form one more group, which every stream may reach, so
+ *		their share counts in every stream's and in the table's.
  */
 static void
 stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
@@ -612,6 +642,7 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 	Datum		lo = (Datum) 0;
 	Datum		hi = (Datum) 0;
 	bool		empty = false;
+	double		null_frac;
 	Selectivity table_share;
 
 	for (int i = 0; i < nstreams; i++)
@@ -641,7 +672,9 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 				hi = streams[i]->range_hi;
 		}
 	}
-	if (empty || range_compare(sort, lo, hi) > 0)
+	empty = empty || range_compare(sort, lo, hi) > 0;
+	null_frac = sortcol_null_frac(root, rti, sort);
+	if (empty && null_frac <= 0)
 	{
 		for (int i = 0; i < nstreams; i++)
 			shares[i] = 0.0;
@@ -653,25 +686,31 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 	 * The share of each stream's own range is computed once per candidate;
 	 * the overlap is usually the range of the narrowest stream.
 	 */
-	table_share = -1.0;
+	table_share = empty ? 0.0 : -1.0;
 	for (int i = 0; i < nstreams; i++)
 	{
 		IndexCandidate *stream = streams[i];
 
+		if (stream->range_empty)
+		{
+			stream->range_sel = 0.0;
+			continue;
+		}
 		if (stream->range_sel < 0)
 			stream->range_sel = sortcol_range_selectivity(root, rti, sort,
 														  stream->range_lo,
 														  stream->range_hi);
-		if (range_compare(sort, stream->range_lo, lo) == 0 &&
+		if (!empty && range_compare(sort, stream->range_lo, lo) == 0 &&
 			range_compare(sort, stream->range_hi, hi) == 0)
 			table_share = stream->range_sel;
 	}
 	if (table_share < 0)
 		table_share = sortcol_range_selectivity(root, rti, sort, lo, hi);
+	table_share += null_frac;
 
 	for (int i = 0; i < nstreams; i++)
 	{
-		Selectivity sel = streams[i]->range_sel;
+		Selectivity sel = streams[i]->range_sel + null_frac;
 
 		if (sel > 0)
 			shares[i] = Min(table_share / sel, 1.0);

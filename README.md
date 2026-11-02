@@ -602,6 +602,7 @@ Regression tests (`sql/`):
 | `leapfrog_partition` | hash and range partitions, a partition with other attribute numbers, `Merge Append` and ordered `Append`, run-time pruning, `LATERAL`, `FOR UPDATE`, row-level security, `TABLESAMPLE`, a partition without the indexes, inheritance |
 | `leapfrog_sort_types` | `timestamptz`, `date`, `numeric`, `text` in two collations, `varchar`, `char`, `uuid`, arrays, enums, domains and `real` as sort columns, in both directions; skip-ahead with long text, overflow, generic plans, `LATERAL`; other collations, operator families and input types are no streams |
 | `leapfrog_sort_icu` | a sort column in an ICU collation, deterministic or not; skipped where the database's encoding has none |
+| `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -627,6 +628,7 @@ Isolation tests (`tests/isolation/specs/`):
 | `leapfrog_types` | EvalPlanQual with `text` and `uuid` equalities: the status, the owner and an unrelated column changing while `FOR UPDATE` waits |
 | `leapfrog_partition` | EvalPlanQual under a `Merge Append`: inner and outer equalities failing on the new version, an unrelated column, a row moved to another partition |
 | `leapfrog_sort_types` | EvalPlanQual with a `text` sort column |
+| `leapfrog_nulls` | EvalPlanQual with a sort value becoming NULL and a row of the NULL group no longer matching |
 
 ## Benchmarks
 
@@ -691,7 +693,9 @@ total   = startup + run
   histogram, with each stream assumed to follow the table's distribution
   within its own range; the planner's row estimate (conditions independent
   over the whole table) becomes one where they are independent inside the
-  overlap. Disjoint ranges cost next to nothing. A parameterized path or a
+  overlap. Disjoint ranges cost next to nothing, unless the column has NULLs:
+  they form one more group, whose share from the statistics counts in every
+  stream and in the table. A parameterized path or a
   generic plan is costed without the probe. Like any plan built on actual
   values, a cached plan with constants keeps this estimate until it is
   replanned.
@@ -754,8 +758,11 @@ Verified against `src/` and the tests.
   no stream of this one.
 - Equality (`=`) only on the equality columns; `IN (…)`, ranges and `IS NULL`
   are not supported.
-- The sort column must be `NOT NULL` according to the planner
-  (`RelOptInfo.notnullattnums`); dead index entries with NULL are skipped.
+- A nullable sort column: NULL is a value of the merge, in the query's
+  `NULLS FIRST`/`LAST` order, and every stream must have its NULLs at that end
+  in its scan direction. For a column `NOT NULL` according to the planner
+  (`RelOptInfo.notnullattnums`) the position of NULLs does not matter, and dead
+  index entries with NULL are skipped.
 - Both indexes: nbtree v4, `ASC` columns. `ORDER BY … DESC` is a backward scan.
 
 **Planner and cost model**

@@ -474,44 +474,13 @@ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DES
 (4 rows)
 
 ROLLBACK;
--- A nullable sort column is rejected.
+-- A nullable sort column: NULLs are values of the merge (more in leapfrog_nulls).
 CREATE TABLE lf_basic_nullable (id bigint, owner_id bigint NOT NULL, deleted_at timestamptz);
+INSERT INTO lf_basic_nullable SELECT CASE WHEN g % 5 = 0 THEN NULL ELSE g END, g % 3, NULL
+FROM generate_series(1, 300) g;
 CREATE INDEX ON lf_basic_nullable (owner_id, id);
 CREATE INDEX ON lf_basic_nullable (id) WHERE deleted_at IS NULL;
-SELECT * FROM lf_plan($$
-SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
-                                    lf_plan                                     
---------------------------------------------------------------------------------
- Limit
-   ->  Sort
-         Sort Key: id
-         ->  Bitmap Heap Scan on lf_basic_nullable
-               Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
-               ->  BitmapAnd
-                     ->  Bitmap Index Scan on lf_basic_nullable_id_idx
-                     ->  Bitmap Index Scan on lf_basic_nullable_owner_id_id_idx
-                           Index Cond: (owner_id = 5)
-(9 rows)
-
--- a NOT NULL constraint added NOT VALID does not count yet ...
-ALTER TABLE lf_basic_nullable ADD CONSTRAINT lf_basic_nullable_id_notnull NOT NULL id NOT VALID;
-SELECT * FROM lf_plan($$
-SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
-                                    lf_plan                                     
---------------------------------------------------------------------------------
- Limit
-   ->  Sort
-         Sort Key: id
-         ->  Bitmap Heap Scan on lf_basic_nullable
-               Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
-               ->  BitmapAnd
-                     ->  Bitmap Index Scan on lf_basic_nullable_id_idx
-                     ->  Bitmap Index Scan on lf_basic_nullable_owner_id_id_idx
-                           Index Cond: (owner_id = 5)
-(9 rows)
-
--- ... until it is validated.
-ALTER TABLE lf_basic_nullable VALIDATE CONSTRAINT lf_basic_nullable_id_notnull;
+ANALYZE lf_basic_nullable;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
                             lf_plan                             
@@ -521,6 +490,35 @@ SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER 
          Outer Index: lf_basic_nullable_owner_id_id_idx
          Inner Index: lf_basic_nullable_id_idx
 (4 rows)
+
+SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+-- a NOT NULL constraint added NOT VALID does not count: its NULLs are still rows
+ALTER TABLE lf_basic_nullable ADD CONSTRAINT lf_basic_nullable_id_notnull NOT NULL id NOT VALID;
+SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+SELECT count(*) AS null_rows FROM lf_basic_nullable WHERE id IS NULL;
+ null_rows 
+-----------
+        60
+(1 row)
+
+-- once validated the column holds none
+UPDATE lf_basic_nullable SET id = 1000 + owner_id WHERE id IS NULL;
+ALTER TABLE lf_basic_nullable VALIDATE CONSTRAINT lf_basic_nullable_id_notnull;
+SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
 
 DROP TABLE lf_basic_nullable;
 -- An integer sort column is accepted, a non-integer one is rejected.

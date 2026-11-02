@@ -194,20 +194,24 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
 ROLLBACK;
 
--- A nullable sort column is rejected.
+-- A nullable sort column: NULLs are values of the merge (more in leapfrog_nulls).
 CREATE TABLE lf_basic_nullable (id bigint, owner_id bigint NOT NULL, deleted_at timestamptz);
+INSERT INTO lf_basic_nullable SELECT CASE WHEN g % 5 = 0 THEN NULL ELSE g END, g % 3, NULL
+FROM generate_series(1, 300) g;
 CREATE INDEX ON lf_basic_nullable (owner_id, id);
 CREATE INDEX ON lf_basic_nullable (id) WHERE deleted_at IS NULL;
+ANALYZE lf_basic_nullable;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
--- a NOT NULL constraint added NOT VALID does not count yet ...
+SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
+-- a NOT NULL constraint added NOT VALID does not count: its NULLs are still rows
 ALTER TABLE lf_basic_nullable ADD CONSTRAINT lf_basic_nullable_id_notnull NOT NULL id NOT VALID;
-SELECT * FROM lf_plan($$
-SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
--- ... until it is validated.
+SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
+SELECT count(*) AS null_rows FROM lf_basic_nullable WHERE id IS NULL;
+-- once validated the column holds none
+UPDATE lf_basic_nullable SET id = 1000 + owner_id WHERE id IS NULL;
 ALTER TABLE lf_basic_nullable VALIDATE CONSTRAINT lf_basic_nullable_id_notnull;
-SELECT * FROM lf_plan($$
-SELECT * FROM lf_basic_nullable WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
 DROP TABLE lf_basic_nullable;
 
 -- An integer sort column is accepted, a non-integer one is rejected.

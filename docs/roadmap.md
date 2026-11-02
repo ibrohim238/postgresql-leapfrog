@@ -63,6 +63,8 @@ Design:
 
 ## Step 6. Nullable sort column
 
+Done; unreleased.
+
 Goal: drop the `NOT NULL` requirement (`is_notnull_column`,
 `RelOptInfo.notnullattnums`) with correct `NULLS FIRST`/`NULLS LAST`.
 
