@@ -232,7 +232,7 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_int4_owner WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 DROP TABLE lf_basic_int4_owner;
 
--- A partitioned table is left alone.
+-- A partitioned table: the node per partition (more in leapfrog_partition).
 CREATE TABLE lf_basic_part (id bigint NOT NULL, owner_id bigint NOT NULL, deleted_at timestamptz)
 	PARTITION BY HASH (id);
 CREATE TABLE lf_basic_part_0 PARTITION OF lf_basic_part FOR VALUES WITH (MODULUS 2, REMAINDER 0);

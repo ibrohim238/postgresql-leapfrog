@@ -333,16 +333,20 @@ find_equality_clause(PlannerInfo *root, RelOptInfo *rel, Index rti,
  * pathkey_is_column
  *		Is the given pathkey a sort on column attno of relation rti?  A
  *		member nulled by an outer join is a different expression, as
- *		get_eclass_for_sort_expr treats it when building index pathkeys.
+ *		get_eclass_for_sort_expr treats it when building index pathkeys.  The
+ *		column of a partition is a child member of the class, which only the
+ *		iterator shows, with the partition's own attribute number.
  */
 static bool
-pathkey_is_column(PathKey *pathkey, Index rti, AttrNumber attno)
+pathkey_is_column(PathKey *pathkey, RelOptInfo *rel, Index rti,
+				  AttrNumber attno)
 {
-	ListCell   *lc;
+	EquivalenceMemberIterator it;
+	EquivalenceMember *em;
 
-	foreach(lc, pathkey->pk_eclass->ec_members)
+	setup_eclass_member_iterator(&it, pathkey->pk_eclass, rel->relids);
+	while ((em = eclass_member_iterator_next(&it)) != NULL)
 	{
-		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
 		Var		   *var = match_column_var((Node *) em->em_expr, rti, attno);
 
 		if (var != NULL && var->varnullingrels == NULL)
@@ -847,7 +851,10 @@ expand_best_pair(IntersectSearch *search, BestPair *best)
 /*
  * intersect_set_rel_pathlist
  *		set_rel_pathlist_hook: offer Index Merge Intersect paths for every
- *		suitable set of indexes of the relation.
+ *		suitable set of indexes of the relation.  A partition is a relation of
+ *		its own here: its sorted path goes into the parent's MergeAppend or
+ *		ordered Append, and a partition without one is sorted there instead.
+ *		The partitioned parent itself has no storage and is left to those.
  */
 static void
 intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -855,6 +862,8 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 {
 	IntersectSearch search;
 	BestPair	best;
+	EquivalenceMemberIterator it;
+	EquivalenceMember *em;
 	ListCell   *lc;
 
 	if (prev_set_rel_pathlist_hook)
@@ -863,7 +872,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	/* a sampled relation is read through its Sample Scan only */
 	if (!intersect_enabled || rte->rtekind != RTE_RELATION ||
 		rte->relkind != RELKIND_RELATION || rte->tablesample != NULL ||
-		rel->reloptkind != RELOPT_BASEREL || root->query_pathkeys == NIL ||
+		!IS_SIMPLE_REL(rel) || root->query_pathkeys == NIL ||
 		IS_DUMMY_REL(rel) || rel->indexlist == NIL)
 		return;
 
@@ -876,9 +885,9 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	/* the sort column: an integer NOT NULL column of this relation */
 	search.pathkey = linitial_node(PathKey, root->query_pathkeys);
-	foreach(lc, search.pathkey->pk_eclass->ec_members)
+	setup_eclass_member_iterator(&it, search.pathkey->pk_eclass, rel->relids);
+	while ((em = eclass_member_iterator_next(&it)) != NULL)
 	{
-		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
 		Node	   *expr = (Node *) em->em_expr;
 		AttrNumber	attno;
 
@@ -887,7 +896,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		if (!IsA(expr, Var))
 			continue;
 		attno = ((Var *) expr)->varattno;
-		if (attno > 0 && pathkey_is_column(search.pathkey, rti, attno) &&
+		if (attno > 0 && pathkey_is_column(search.pathkey, rel, rti, attno) &&
 			is_integer_column(rte, attno) && is_notnull_column(rel, attno))
 		{
 			search.sort_attno = attno;

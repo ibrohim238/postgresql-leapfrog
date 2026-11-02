@@ -1,0 +1,121 @@
+Parsed test spec with 2 sessions
+
+starting permutation: r_node r_plan
+step r_node: SET leapfrog.enabled = on; SET leapfrog.force = on;
+step r_plan: EXPLAIN (COSTS OFF) SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE;
+QUERY PLAN                                                            
+----------------------------------------------------------------------
+Limit                                                                 
+  ->  LockRows                                                        
+        ->  Merge Append                                              
+              Sort Key: lf_iso_part.id                                
+              ->  Custom Scan (Index Merge Intersect) on lf_iso_part_1
+                    Outer Index: lf_iso_part_1_kind_id_idx            
+                    Inner Index: lf_iso_part_1_flag_id_idx            
+              ->  Custom Scan (Index Merge Intersect) on lf_iso_part_2
+                    Outer Index: lf_iso_part_2_kind_id_idx            
+                    Inner Index: lf_iso_part_2_flag_id_idx            
+(10 rows)
+
+
+starting permutation: r_node w_begin w_kind r_lock w_commit
+step r_node: SET leapfrog.enabled = on; SET leapfrog.force = on;
+step w_begin: BEGIN;
+step w_kind: UPDATE lf_iso_part SET kind = 2 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+id|val
+--+---
+22|  0
+37|  0
+(2 rows)
+
+
+starting permutation: r_stock w_begin w_kind r_lock w_commit
+step r_stock: SET leapfrog.enabled = off; SET leapfrog.force = off;
+step w_begin: BEGIN;
+step w_kind: UPDATE lf_iso_part SET kind = 2 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+id|val
+--+---
+22|  0
+37|  0
+(2 rows)
+
+
+starting permutation: r_node w_begin w_flag r_lock w_commit
+step r_node: SET leapfrog.enabled = on; SET leapfrog.force = on;
+step w_begin: BEGIN;
+step w_flag: UPDATE lf_iso_part SET flag = 3 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+id|val
+--+---
+22|  0
+37|  0
+(2 rows)
+
+
+starting permutation: r_stock w_begin w_flag r_lock w_commit
+step r_stock: SET leapfrog.enabled = off; SET leapfrog.force = off;
+step w_begin: BEGIN;
+step w_flag: UPDATE lf_iso_part SET flag = 3 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+id|val
+--+---
+22|  0
+37|  0
+(2 rows)
+
+
+starting permutation: r_node w_begin w_val r_lock w_commit
+step r_node: SET leapfrog.enabled = on; SET leapfrog.force = on;
+step w_begin: BEGIN;
+step w_val: UPDATE lf_iso_part SET val = 1 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+id|val
+--+---
+ 7|  1
+22|  0
+(2 rows)
+
+
+starting permutation: r_stock w_begin w_val r_lock w_commit
+step r_stock: SET leapfrog.enabled = off; SET leapfrog.force = off;
+step w_begin: BEGIN;
+step w_val: UPDATE lf_iso_part SET val = 1 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+id|val
+--+---
+ 7|  1
+22|  0
+(2 rows)
+
+
+starting permutation: r_node w_begin w_move r_lock w_commit
+step r_node: SET leapfrog.enabled = on; SET leapfrog.force = on;
+step w_begin: BEGIN;
+step w_move: UPDATE lf_iso_part SET owner_id = 1 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
+
+starting permutation: r_stock w_begin w_move r_lock w_commit
+step r_stock: SET leapfrog.enabled = off; SET leapfrog.force = off;
+step w_begin: BEGIN;
+step w_move: UPDATE lf_iso_part SET owner_id = 1 WHERE id = 7;
+step r_lock: SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; <waiting ...>
+step w_commit: COMMIT;
+step r_lock: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update

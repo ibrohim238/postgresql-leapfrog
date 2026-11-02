@@ -7,6 +7,8 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Partitioned tables and inheritance: a node per child under a `Merge Append`
+  or ordered `Append`. Tests in `leapfrog_partition`.
 - `tests/performance/bitmap_bench.sh`: the node against `BitmapAnd`, stock
   PostgreSQL and PostgreSQL with leapfrog at 100k to 50M rows, with and
   without `LIMIT`, the modes in ABBA order; `WORK_MEM` for exact bitmaps;
