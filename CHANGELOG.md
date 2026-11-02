@@ -36,6 +36,10 @@ versions: [SemVer](https://semver.org/).
   an inner predicate lets it drop from `Filter`. It is now charged for what
   it evaluates, the same list the plan's `Filter` is made from
   (`lf_node_quals`), as `cost_index` does.
+- Cost model: a predicate implied by the set's other conditions counted twice
+  in the rows fetched (equality `kind = 2` and predicate `kind = 2`), which
+  also lowered the node's row estimate. It is now left out, as
+  `add_predicate_to_index_quals` does. Tests for both in `leapfrog_cost`.
 - The planner kept the cheapest pair, and in the greedy expansion the
   cheapest set, as a pointer to the path it had passed to `add_path`, and
   read its cost from there afterwards. `add_path` frees a path it rejects or

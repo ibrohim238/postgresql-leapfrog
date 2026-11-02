@@ -1,6 +1,6 @@
 --
 -- The cost model charges the clauses the node evaluates, the same list its
--- Filter is made from.
+-- Filter is made from, and counts a condition once in the rows it expects.
 --
 CREATE TABLE lf_cost (
 	id bigint NOT NULL,
@@ -29,6 +29,7 @@ CREATE INDEX lf_cost_owner ON lf_cost (owner_id, id);
 CREATE INDEX lf_cost_coded ON lf_cost (coded_id lf_cost_ops, id);
 CREATE INDEX lf_cost_flagged ON lf_cost (id) WHERE lf_cost_flag(flag);
 CREATE INDEX lf_cost_kind ON lf_cost (kind, id);
+CREATE INDEX lf_cost_owner_kind2 ON lf_cost (owner_id, id) WHERE kind = 2;
 ANALYZE lf_cost;
 
 -- The node's total cost and estimated rows.  Not under leapfrog.force, which
@@ -94,6 +95,14 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_cost WHERE owner_id = 5 AND kind = 5 AND lf_cost_flag(flag + 1) ORDER BY id LIMIT 5 $$);
 SELECT lf_cost_depends('lf_cost_flag(integer)', $$
 SELECT * FROM lf_cost WHERE owner_id = 5 AND kind = 5 AND lf_cost_flag(flag + 1) ORDER BY id LIMIT 5 $$);
+
+-- A predicate implied by another stream's equality counts once: 10000 rows,
+-- 10 % with kind = 2 and 10 % with owner_id = 7, about 100 rows, not 10.
+DROP INDEX lf_cost_owner;
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_cost WHERE kind = 2 AND owner_id = 7 ORDER BY id $$);
+SELECT plan_rows >= 50 AS rows_estimate_keeps_the_condition_once
+FROM lf_cost_node($$ SELECT * FROM lf_cost WHERE kind = 2 AND owner_id = 7 ORDER BY id $$);
 
 RESET enable_seqscan;
 RESET enable_indexscan;

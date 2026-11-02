@@ -508,6 +508,47 @@ node at every `work_mem`, 15,656 and 64,063 for exact `BitmapAnd`,
   the first had warmed the OS cache for those pages; its times are the ones
   above. The node's pages stay in shared buffers either way.
 
+## Cost of the node's own quals (against `f30cf7a`)
+
+The node is charged for the clauses in its `Filter` instead of the whole
+`baserestrictcost`, and a predicate implied by the set's other conditions no
+longer counts twice in the rows fetched. PostgreSQL 18.6, one container, the
+two builds in ABBA order (`f30cf7a`, change, change, `f30cf7a`); each run loads
+its data and runs `ANALYZE` again.
+
+`cost_bench.sh` (1M rows, 32 queries, 5 repeats):
+
+| | Result |
+|---|---|
+| Queries where the planner's choice differs between the builds | 0 of 32 |
+| Node cost, change / `f30cf7a`, median over the queries | 1.00 |
+| The same, range over the queries, first and last pair of runs | 0.91–1.05 |
+| The same between two runs of one build | 0.96–1.07 |
+
+The change to the cost is smaller than what a new `ANALYZE` sample does to it:
+an equality costs `cpu_operator_cost` per fetched row, little next to the heap
+pages. `planning_bench.sh`, median of the two runs per build: with 1 or 2
+equalities no difference above the spread between runs; with 6 equalities
+planning takes 3–7 % longer (0.514 against 0.492 ms at 10 indexes, 0.528
+against 0.495 at 20, 0.613 against 0.595 at 50), the clause matching the cost
+model now does for every set it considers.
+
+`run.sh` (1M rows, `uniform` and `skewed`, 10 and 50 % deleted, `LIMIT 100` and
+none, 48 cases of strategy B, 5 repeats per run):
+
+| | Result |
+|---|---|
+| Median `exec_ms`, change / `f30cf7a`, median over the cases | 0.95 |
+| The same, range over the cases | 0.70–1.09 |
+| p95, change / `f30cf7a`, median and largest over the cases | 0.88, 1.26 |
+| Cases with the same median shared buffers | 46 of 48 |
+
+Three cases, all `uniform`, 10 % deleted, deleted rows, `LIMIT 100`, change
+plan between runs (`Index Merge Intersect` or `Bitmap Heap Scan`). One does so
+in both builds. The other two stay on the bitmap in both `f30cf7a` runs and
+take the node in one of the two runs of the change, so the change may tip such
+near-equal costs; two runs per build do not settle it.
+
 ## Not done
 
 - 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).

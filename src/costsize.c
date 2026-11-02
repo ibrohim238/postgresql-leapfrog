@@ -655,6 +655,10 @@ lf_index_entries(PlannerInfo *root, Index rti, IndexCandidate *candidate)
  *		partial indexes, estimated the way the planner estimates the
  *		relation's rows from its restrictions.  The node fetches these rows
  *		from the heap; the remaining restrictions filter them afterwards.
+ *		A predicate the other conditions imply restricts nothing further and
+ *		is left out, as btcostestimate's add_predicate_to_index_quals does:
+ *		kind = 2 would otherwise count twice for an equality kind = 2 and a
+ *		predicate kind = 2.
  */
 static double
 stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -664,9 +668,19 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	/* two streams on the same column share the clause: count it once */
 	for (int i = 0; i < nstreams; i++)
-	{
 		clauses = list_concat_unique_ptr(clauses, streams[i]->clauses);
-		clauses = list_concat_unique(clauses, streams[i]->index->indpred);
+
+	for (int i = 0; i < nstreams; i++)
+	{
+		ListCell   *lc;
+
+		foreach(lc, streams[i]->index->indpred)
+		{
+			Node	   *pred = (Node *) lfirst(lc);
+
+			if (!predicate_implied_by(list_make1(pred), clauses, false))
+				clauses = lappend(clauses, pred);
+		}
 	}
 
 	return clamp_row_est(rel->tuples *
