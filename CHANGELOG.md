@@ -5,6 +5,11 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- README: `leapfrog.enabled = off` does not change plans already cached, and
+  `DISCARD PLANS` does; every stream holds its own buffer pin.
+
 ### Fixed
 
 - Cost model: no row comes before the inner streams have read the whole group of
