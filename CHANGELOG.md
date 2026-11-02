@@ -22,6 +22,10 @@ versions: [SemVer](https://semver.org/).
 
 ### Fixed
 
+- `TABLESAMPLE` was ignored: the node was offered for a sampled relation and
+  returned rows outside the sample. Such a relation is now left to its
+  Sample Scan. Test in `leapfrog_basic`; without the check the node is used
+  and the rows differ from the stock plan's.
 - The planner kept the cheapest pair, and in the greedy expansion the
   cheapest set, as a pointer to the path it had passed to `add_path`, and
   read its cost from there afterwards. `add_path` frees a path it rejects or

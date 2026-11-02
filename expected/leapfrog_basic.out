@@ -621,4 +621,25 @@ SELECT lf_check($$ SELECT * FROM lf_basic_view WHERE owner_id = 5 ORDER BY id LI
 (1 row)
 
 DROP VIEW lf_basic_view;
+-- TABLESAMPLE: the sample decides the rows, so only a Sample Scan may read them.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic TABLESAMPLE SYSTEM (50) REPEATABLE (1)
+WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                                    lf_plan                                     
+--------------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: id
+         ->  Sample Scan on lf_basic
+               Sampling: system ('50'::real) REPEATABLE ('1'::double precision)
+               Filter: ((deleted_at IS NULL) AND (owner_id = 5))
+(6 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_basic TABLESAMPLE SYSTEM (50) REPEATABLE (1)
+WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: f, rows: 20/20, missing: 0, extra: 0
+(1 row)
+
 DROP TABLE lf_basic;

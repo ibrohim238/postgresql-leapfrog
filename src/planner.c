@@ -857,8 +857,9 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (prev_set_rel_pathlist_hook)
 		prev_set_rel_pathlist_hook(root, rel, rti, rte);
 
+	/* a sampled relation is read through its Sample Scan only */
 	if (!intersect_enabled || rte->rtekind != RTE_RELATION ||
-		rte->relkind != RELKIND_RELATION ||
+		rte->relkind != RELKIND_RELATION || rte->tablesample != NULL ||
 		rel->reloptkind != RELOPT_BASEREL || root->query_pathkeys == NIL ||
 		IS_DUMMY_REL(rel) || rel->indexlist == NIL)
 		return;

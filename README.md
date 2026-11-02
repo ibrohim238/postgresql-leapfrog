@@ -807,6 +807,7 @@ Verified against `src/` and the tests.
   work), and the heap correlation of a multicolumn index is taken as its
   leading column's × 0.75, as `btcostestimate` does.
 - One relation per node; no partitioned tables, no parallel execution.
+- `TABLESAMPLE` relations are not supported: they keep their Sample Scan.
 
 **Executor and memory**
 

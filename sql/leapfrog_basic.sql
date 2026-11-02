@@ -250,4 +250,11 @@ SELECT * FROM lf_basic_view WHERE owner_id = 5 ORDER BY id LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic_view WHERE owner_id = 5 ORDER BY id LIMIT 20 $$);
 DROP VIEW lf_basic_view;
 
+-- TABLESAMPLE: the sample decides the rows, so only a Sample Scan may read them.
+SELECT * FROM lf_plan($$
+SELECT * FROM lf_basic TABLESAMPLE SYSTEM (50) REPEATABLE (1)
+WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+SELECT lf_check($$ SELECT * FROM lf_basic TABLESAMPLE SYSTEM (50) REPEATABLE (1)
+WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
+
 DROP TABLE lf_basic;
