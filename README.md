@@ -369,6 +369,29 @@ evicts the other plans' pages (15 to 18 runs per plan, and all runs of
 Details, runs at the default `work_mem` and the caveats (one laptop, a
 50M-row table larger than its memory) are in [BENCHMARKS.md](BENCHMARKS.md#against-bitmapand-as-the-table-grows).
 
+### Compared with a self join
+
+The node gives the same result as a self join written by hand, without changing
+the query:
+
+```sql
+-- with the extension, the query as it is
+SELECT * FROM orders
+WHERE customer_id = 5 AND product_id = 7
+ORDER BY id LIMIT 100;
+
+-- by hand
+SELECT t1.* FROM orders t1 JOIN orders t2 ON t1.id = t2.id
+WHERE t1.customer_id = 5 AND t2.product_id = 7
+ORDER BY t1.id LIMIT 100;
+```
+
+On 1M rows after `VACUUM`, with indexes `(customer_id, id)` and `(product_id, id)`
+and 62 matching rows: 0.75 ms against 3.02 ms (`enable_self_join_elimination = off`,
+as otherwise PostgreSQL turns the join back into a `BitmapAnd`). A self join is not
+always slower: with a sparse index next to a very dense one it took 13.6 ms against
+the node's 24.7.
+
 ## Requirements
 
 - PostgreSQL **18** or **19** (the planner and executor APIs change between
