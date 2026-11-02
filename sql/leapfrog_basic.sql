@@ -232,7 +232,7 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_int4_owner WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 DROP TABLE lf_basic_int4_owner;
 
--- A partitioned table and a view are left alone.
+-- A partitioned table is left alone.
 CREATE TABLE lf_basic_part (id bigint NOT NULL, owner_id bigint NOT NULL, deleted_at timestamptz)
 	PARTITION BY HASH (id);
 CREATE TABLE lf_basic_part_0 PARTITION OF lf_basic_part FOR VALUES WITH (MODULUS 2, REMAINDER 0);
@@ -243,6 +243,7 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_part WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 DROP TABLE lf_basic_part;
 
+-- A plain view is expanded into its query, so the node can serve it.
 CREATE VIEW lf_basic_view AS SELECT * FROM lf_basic WHERE deleted_at IS NULL;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_view WHERE owner_id = 5 ORDER BY id LIMIT 20 $$);
