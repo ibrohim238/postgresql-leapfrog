@@ -31,6 +31,11 @@ versions: [SemVer](https://semver.org/).
   security: a non-leakproof operator of the query ran on every index entry,
   also those of rows the policy hides. Such a clause now stays in `Filter`,
   after the policy's quals. Test in `leapfrog_security`.
+- Cost model: the node was charged for the whole `baserestrictcost` per
+  fetched row, including the equalities its scan keys enforce and the clauses
+  an inner predicate lets it drop from `Filter`. It is now charged for what
+  it evaluates, the same list the plan's `Filter` is made from
+  (`lf_node_quals`), as `cost_index` does.
 - The planner kept the cheapest pair, and in the greedy expansion the
   cheapest set, as a pointer to the path it had passed to `add_path`, and
   read its cost from there afterwards. `add_path` frees a path it rejects or

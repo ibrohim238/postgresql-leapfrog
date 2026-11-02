@@ -1001,31 +1001,28 @@ path_stream_exprs(CustomPath *best_path, int stream, int which)
 }
 
 /*
- * intersect_scan_qual
- *		The quals the node still has to evaluate, as create_indexscan_plan
- *		computes qpqual: the equalities on the columns of every stream are
- *		enforced by the scan keys and rechecked under EvalPlanQual by
- *		intersect_recheck, so they are dropped.  Clauses implied by the
- *		predicate of an inner index are dropped as well, except for a target
- *		relation of UPDATE/DELETE/SELECT FOR UPDATE, where
- *		check_index_predicates keeps them in the plan for EvalPlanQual.
+ * lf_node_quals
+ *		The clauses the node still has to evaluate on a fetched row, as
+ *		create_indexscan_plan computes qpqual: the equalities on the columns
+ *		of every stream are enforced by the scan keys and rechecked under
+ *		EvalPlanQual by intersect_recheck, so they are dropped.  Clauses
+ *		implied by the predicate of an inner index are dropped as well, except
+ *		for a target relation of UPDATE/DELETE/SELECT FOR UPDATE, where
+ *		check_index_predicates keeps them in the plan for EvalPlanQual.  The
+ *		cost model charges exactly these clauses.  indexes[0] is the outer
+ *		index, exprs[i] the value expressions of stream i.
  *
  * Clauses implied by the predicate of a partial outer index are never
  * dropped: the node does not keep that predicate, so under EvalPlanQual
  * only this qual checks it on the new row version (leapfrog_outer_partial).
  */
-static List *
-intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
-					List *clauses)
+List *
+lf_node_quals(PlannerInfo *root, RelOptInfo *rel, IndexOptInfo **indexes,
+			  List **exprs, int nstreams, List *clauses)
 {
-	int			nstreams = path_nstreams(best_path);
-	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
 	bool		is_target_rel;
 	List	   *qpqual = NIL;
 	ListCell   *lc;
-
-	for (int i = 0; i < nstreams; i++)
-		indexes[i] = find_index_info(rel, path_stream_oid(best_path, i));
 
 	is_target_rel = (bms_is_member(rel->relid, root->all_result_relids) ||
 					 get_plan_rowmark(root->rowMarks, rel->relid) != NULL);
@@ -1041,9 +1038,7 @@ intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		{
 			List	   *indpred = i > 0 ? indexes[i]->indpred : NIL;
 
-			if (is_candidate_equality(rinfo, rel->relid, indexes[i],
-									  path_stream_exprs(best_path, i,
-														STREAM_EXPRS_KEYS)))
+			if (is_candidate_equality(rinfo, rel->relid, indexes[i], exprs[i]))
 				enforced = true;
 			else if (!is_target_rel && indpred != NIL &&
 					 !contain_mutable_functions((Node *) rinfo->clause) &&
@@ -1055,7 +1050,30 @@ intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			qpqual = lappend(qpqual, rinfo);
 	}
 
-	return extract_actual_clauses(qpqual, false);
+	return qpqual;
+}
+
+/*
+ * intersect_scan_qual
+ *		The plan's qual: lf_node_quals for the streams of the path.
+ */
+static List *
+intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
+					List *clauses)
+{
+	int			nstreams = path_nstreams(best_path);
+	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
+	List	   *exprs[INTERSECT_MAX_STREAMS];
+
+	for (int i = 0; i < nstreams; i++)
+	{
+		indexes[i] = find_index_info(rel, path_stream_oid(best_path, i));
+		exprs[i] = path_stream_exprs(best_path, i, STREAM_EXPRS_KEYS);
+	}
+
+	return extract_actual_clauses(lf_node_quals(root, rel, indexes, exprs,
+												nstreams, clauses),
+								  false);
 }
 
 /*

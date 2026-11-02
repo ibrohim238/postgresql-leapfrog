@@ -115,6 +115,9 @@ extern int	intersect_min_streams;
 
 /* planner.c */
 extern void lf_planner_init(void);
+extern List *lf_node_quals(PlannerInfo *root, RelOptInfo *rel,
+						   IndexOptInfo **indexes, List **exprs, int nstreams,
+						   List *clauses);
 
 /* costsize.c */
 extern double lf_index_entries(PlannerInfo *root, Index rti,

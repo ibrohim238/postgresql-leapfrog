@@ -282,24 +282,32 @@ loop_count_for(PlannerInfo *root, Relids outer_relids)
 }
 
 /*
- * restriction_qual_cost
- *		Cost of the quals the scan evaluates, as costsize.c's
- *		get_restriction_qual_cost computes it: the rel's own restrictions
- *		plus the clauses pushed down into a parameterized path.
+ * node_qual_cost
+ *		Cost of the quals the node evaluates on a fetched row: the rel's own
+ *		restrictions and the clauses pushed down into a parameterized path,
+ *		less those the streams enforce (lf_node_quals), as cost_index leaves
+ *		out what the index enforces.
  */
 static void
-restriction_qual_cost(PlannerInfo *root, RelOptInfo *rel,
-					  ParamPathInfo *param_info, QualCost *qpqual_cost)
+node_qual_cost(PlannerInfo *root, RelOptInfo *rel, ParamPathInfo *param_info,
+			   IndexCandidate **streams, int nstreams, QualCost *qpqual_cost)
 {
-	if (param_info == NULL)
+	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
+	List	   *exprs[INTERSECT_MAX_STREAMS];
+	List	   *clauses = rel->baserestrictinfo;
+
+	if (param_info != NULL)
+		clauses = list_concat_copy(clauses, param_info->ppi_clauses);
+
+	for (int i = 0; i < nstreams; i++)
 	{
-		*qpqual_cost = rel->baserestrictcost;
-		return;
+		indexes[i] = streams[i]->index;
+		exprs[i] = streams[i]->exprs;
 	}
 
-	cost_qual_eval(qpqual_cost, param_info->ppi_clauses, root);
-	qpqual_cost->startup += rel->baserestrictcost.startup;
-	qpqual_cost->per_tuple += rel->baserestrictcost.per_tuple;
+	cost_qual_eval(qpqual_cost,
+				   lf_node_quals(root, rel, indexes, exprs, nstreams, clauses),
+				   root);
 }
 
 /*
@@ -697,7 +705,7 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	Cost		startup_cost;
 
 	loop_count = loop_count_for(root, PATH_REQ_OUTER(&cpath->path));
-	restriction_qual_cost(root, rel, param_info, &qpqual_cost);
+	node_qual_cost(root, rel, param_info, streams, nstreams, &qpqual_cost);
 
 	/*
 	 * Only the entries inside the overlap of the streams' sortcol ranges are
