@@ -19,11 +19,21 @@
 #define LEAPFROG_H
 
 #include "access/genam.h"
+#include "access/tableam.h"
 #include "nodes/execnodes.h"
 #include "nodes/extensible.h"
 #include "nodes/pathnodes.h"
 
 #define INTERSECT_NAME "Index Merge Intersect"
+
+/* PostgreSQL 19 passes table AM scan options to index_beginscan. */
+#if PG_VERSION_NUM >= 190000
+#define lf_index_beginscan(heap, index, snapshot, nkeys) \
+	index_beginscan(heap, index, snapshot, NULL, nkeys, 0, SO_NONE)
+#else
+#define lf_index_beginscan(heap, index, snapshot, nkeys) \
+	index_beginscan(heap, index, snapshot, NULL, nkeys, 0)
+#endif
 
 /* The most indexes one node may combine (leapfrog.max_indexes). */
 #define INTERSECT_MAX_STREAMS 16

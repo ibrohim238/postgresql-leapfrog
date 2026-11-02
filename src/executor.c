@@ -247,8 +247,9 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 		IndexStream *stream = &state->streams[i];
 
 		/* the equality keys plus the bound on sortcol used for skipping ahead */
-		stream->scan = index_beginscan(heap, stream->index, estate->es_snapshot,
-									   NULL, stream->keys.nequal + 1, 0);
+		stream->scan = lf_index_beginscan(heap, stream->index,
+										  estate->es_snapshot,
+										  stream->keys.nequal + 1);
 		stream->scan->xs_want_itup = true;
 		if (i > 0)
 		{

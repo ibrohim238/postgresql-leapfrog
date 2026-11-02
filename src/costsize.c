@@ -485,7 +485,7 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 	/* the planner holds locks on the table and its indexes */
 	heap = table_open(rte->relid, NoLock);
 	index = index_open(candidate->index->indexoid, NoLock);
-	scan = index_beginscan(heap, index, SnapshotAny, NULL, keys.nequal + 1, 0);
+	scan = lf_index_beginscan(heap, index, SnapshotAny, keys.nequal + 1);
 	scan->xs_want_itup = true;
 
 	lf_rescan_with_keys(scan, &keys, false, lf_no_bound(false));
