@@ -543,18 +543,13 @@ CREATE INDEX ON lf_basic_numeric (owner_id, id);
 CREATE INDEX ON lf_basic_numeric (id) WHERE deleted_at IS NULL;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_numeric WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
-                                    lf_plan                                    
--------------------------------------------------------------------------------
+                            lf_plan                            
+---------------------------------------------------------------
  Limit
-   ->  Sort
-         Sort Key: id
-         ->  Bitmap Heap Scan on lf_basic_numeric
-               Recheck Cond: ((deleted_at IS NULL) AND (owner_id = 5))
-               ->  BitmapAnd
-                     ->  Bitmap Index Scan on lf_basic_numeric_id_idx
-                     ->  Bitmap Index Scan on lf_basic_numeric_owner_id_id_idx
-                           Index Cond: (owner_id = 5)
-(9 rows)
+   ->  Custom Scan (Index Merge Intersect) on lf_basic_numeric
+         Outer Index: lf_basic_numeric_owner_id_id_idx
+         Inner Index: lf_basic_numeric_id_idx
+(4 rows)
 
 DROP TABLE lf_basic_numeric;
 -- An equality column of any type with a btree operator family is accepted.

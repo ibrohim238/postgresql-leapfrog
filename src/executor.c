@@ -15,6 +15,8 @@
 #include <limits.h>
 
 #include "access/relscan.h"
+#include "access/stratnum.h"
+#include "catalog/pg_attribute.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -58,9 +60,11 @@ typedef struct IndexStream
 	ExprState  *pred;			/* predicate of a partial inner index */
 	bool		have;			/* current entry is not consumed yet */
 	bool		eof;
-	int64		value;
+	Datum		value;			/* points into the scan's index tuple */
 	ItemPointerData tid;
 	SkipAhead	skip;
+	MemoryContext bound_cxt;	/* the bound of the last skip, which nbtree
+								 * evaluates until the next rescan */
 
 	/* TID group of the value being matched, sorted (inner streams) */
 	bool		group_overflow; /* group exceeded its share of work_mem */
@@ -91,8 +95,12 @@ typedef struct IntersectScanState
 	bool		fetching_match; /* heap fetch of a matched entry in progress */
 	bool		match_by_pred;	/* some inner group overflowed: check the row */
 	bool		in_group;		/* groups of group_value are collected */
-	int64		group_value;
+	Datum		group_value;	/* copied into group_cxt: the streams move on */
+	MemoryContext group_cxt;	/* reset when the next group starts */
 	int			group_limit;	/* entries of one group that fit into work_mem */
+	SortSupportData ssup;		/* compares values in query order */
+	int16		sort_typlen;
+	bool		sort_typbyval;
 
 	/* instrumentation, summed over all rescans */
 	int64		matched;		/* TIDs found in every stream */
@@ -147,7 +155,8 @@ intersect_create_scan_state(CustomScan *cscan)
  */
 static void
 init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
-				   List *collations, Relation index, int sort_attno,
+				   List *collations, Relation index, Oid sort_type,
+				   Oid sort_opfamily, Oid sort_collation, bool descending,
 				   PlanState *parent)
 {
 	ListCell   *lc;
@@ -166,9 +175,8 @@ init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
 		i++;
 	}
 	keys->nequal = i;
-	lf_init_key_procs(keys,
-					  getBaseType(TupleDescAttr(RelationGetDescr(index),
-												sort_attno - 1)->atttypid));
+	lf_init_key_procs(keys, sort_type, sort_opfamily, sort_collation,
+					  descending);
 }
 
 static Datum
@@ -201,6 +209,12 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	heap = node->ss.ss_currentRelation;
 	List	   *private = cscan->custom_private;
+	Oid			sort_type = DatumGetObjectId(private_datum(private,
+														   PRIVATE_SORT_TYPE));
+	Oid			sort_opfamily = DatumGetObjectId(private_datum(private,
+															   PRIVATE_SORT_OPFAMILY));
+	Oid			sort_collation = DatumGetObjectId(private_datum(private,
+																PRIVATE_SORT_COLLATION));
 
 	state->descending =
 		DatumGetBool(private_datum(private, PRIVATE_DESCENDING));
@@ -226,7 +240,8 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 		init_equality_keys(&stream->keys, keys,
 						   stream_oids(private, i, STREAM_PRIVATE_OPERATORS),
 						   stream_oids(private, i, STREAM_PRIVATE_COLLATIONS),
-						   stream->index, stream->sort_attno, &node->ss.ps);
+						   stream->index, sort_type, sort_opfamily,
+						   sort_collation, state->descending, &node->ss.ps);
 		stream->pred = ExecInitQual(pred, &node->ss.ps);
 	}
 	state->values_cxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -235,6 +250,26 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
+
+	state->ssup.ssup_cxt = CurrentMemoryContext;
+	state->ssup.ssup_collation = sort_collation;
+	PrepareSortSupportFromOrderingOp(get_opfamily_member(sort_opfamily, sort_type,
+														 sort_type,
+														 state->descending ?
+														 BTGreaterStrategyNumber :
+														 BTLessStrategyNumber),
+									 &state->ssup);
+	{
+		Form_pg_attribute attr =
+			TupleDescAttr(RelationGetDescr(state->streams[0].index),
+						  state->streams[0].sort_attno - 1);
+
+		state->sort_typlen = attr->attlen;
+		state->sort_typbyval = attr->attbyval;
+	}
+	state->group_cxt = AllocSetContextCreate(CurrentMemoryContext,
+											 "leapfrog group value",
+											 ALLOCSET_SMALL_SIZES);
 
 	/* the group arrays together never grow past the work_mem budget */
 	state->group_limit = (int) Min((double) INT_MAX / 2,
@@ -251,6 +286,9 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 										  estate->es_snapshot,
 										  stream->keys.nequal + 1);
 		stream->scan->xs_want_itup = true;
+		stream->bound_cxt = AllocSetContextCreate(CurrentMemoryContext,
+												  "leapfrog skip bound",
+												  ALLOCSET_SMALL_SIZES);
 		if (i > 0)
 		{
 			stream->group_capacity = Max(1, Min(16, state->group_limit));
@@ -343,14 +381,22 @@ init_skip(SkipAhead *skip)
  *		leaf page it leaves so that check_landing can tell how far it went.
  */
 static void
-skip_ahead(IntersectScanState *state, IndexStream *stream, int64 bound)
+skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound)
 {
+	MemoryContext oldcxt;
+
 	SkipAhead  *skip = &stream->skip;
 
 	skip->landing = lf_scan_leaf_position(stream->scan, state->descending,
 										  &skip->from_page, &skip->from_next);
 
-	lf_rescan_with_keys(stream->scan, &stream->keys, state->descending, bound);
+	/* bound belongs to another stream, which will move on */
+	MemoryContextReset(stream->bound_cxt);
+	oldcxt = MemoryContextSwitchTo(stream->bound_cxt);
+	bound = datumCopy(bound, state->sort_typbyval, state->sort_typlen);
+	MemoryContextSwitchTo(oldcxt);
+
+	lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_VALUE, bound);
 	skip->behind = 0;
 	state->skips++;
 }
@@ -401,8 +447,8 @@ intersect_start(IntersectScanState *state)
 	{
 		IndexStream *stream = &state->streams[i];
 
-		lf_rescan_with_keys(stream->scan, &stream->keys, state->descending,
-							lf_no_bound(state->descending));
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
+							(Datum) 0);
 		init_skip(&stream->skip);
 	}
 
@@ -468,7 +514,7 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream,
 				  ScanDirection dir)
 {
 	if (lf_read_index_entry(stream->scan, dir, stream->sort_attno,
-							stream->keys.sort_type, &stream->value, &stream->tid, &stream->read))
+							&stream->value, &stream->tid, &stream->read))
 	{
 		stream->have = true;
 		check_landing(state, stream);
@@ -495,7 +541,9 @@ collect_group(IntersectScanState *state, IndexStream *stream,
 	stream->group_overflow = false;
 	stream->group_count = 0;
 
-	while (stream->have && stream->value == state->group_value)
+	while (stream->have &&
+		   ApplySortComparator(stream->value, false, state->group_value, false,
+							   &state->ssup) == 0)
 	{
 		if ((++iterations & 1023) == 0)
 			CHECK_FOR_INTERRUPTS();
@@ -544,16 +592,6 @@ group_contains(IndexStream *stream, ItemPointer tid)
 }
 
 /*
- * value_is_ahead
- *		Is a further along in scan direction than b?
- */
-static inline bool
-value_is_ahead(IntersectScanState *state, int64 a, int64 b)
-{
-	return state->descending ? a < b : a > b;
-}
-
-/*
  * intersect_next
  *		Merge the sorted index streams, the counterpart of MySQL's
  *		RowIDIntersectionIterator::DoRead: advance the lagging streams until
@@ -579,7 +617,7 @@ intersect_next(ScanState *ss)
 
 	while (!state->done)
 	{
-		int64		front;
+		Datum		front;
 		bool		all_equal;
 		bool		pending;
 		bool		exhausted = false;
@@ -638,7 +676,8 @@ intersect_next(ScanState *ss)
 			bool		found = true;
 			bool		by_pred = false;
 
-			if (outer->value != state->group_value)
+			if (ApplySortComparator(outer->value, false, state->group_value, false,
+									&state->ssup) != 0)
 			{
 				state->in_group = false;
 				continue;
@@ -690,18 +729,25 @@ intersect_next(ScanState *ss)
 		all_equal = true;
 		for (int i = 1; i < state->nstreams; i++)
 		{
-			int64		value = state->streams[i].value;
+			int			cmp = ApplySortComparator(state->streams[i].value, false,
+												  front, false, &state->ssup);
 
-			if (value != front)
+			if (cmp != 0)
 				all_equal = false;
-			if (value_is_ahead(state, value, front))
-				front = value;
+			if (cmp > 0)
+				front = state->streams[i].value;
 		}
 
 		if (all_equal)
 		{
+			MemoryContext oldcxt;
+
 			state->in_group = true;
-			state->group_value = front;
+			MemoryContextReset(state->group_cxt);
+			oldcxt = MemoryContextSwitchTo(state->group_cxt);
+			state->group_value = datumCopy(front, state->sort_typbyval,
+										   state->sort_typlen);
+			MemoryContextSwitchTo(oldcxt);
 			for (int i = 0; i < state->nstreams; i++)
 				state->streams[i].skip.behind = 0;
 			for (int i = 1; i < state->nstreams; i++)
@@ -720,7 +766,8 @@ intersect_next(ScanState *ss)
 		{
 			IndexStream *stream = &state->streams[i];
 
-			if (stream->value == front)
+			if (ApplySortComparator(stream->value, false, front, false,
+									&state->ssup) == 0)
 			{
 				stream->skip.behind = 0;
 				continue;
@@ -745,8 +792,8 @@ intersect_next(ScanState *ss)
 		{
 			IndexStream *stream = &state->streams[i];
 
-			lf_rescan_with_keys(stream->scan, &stream->keys, state->descending,
-								lf_no_bound(state->descending));
+			lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
+								(Datum) 0);
 		}
 	}
 	state->done = true;

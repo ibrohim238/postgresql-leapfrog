@@ -600,6 +600,8 @@ Regression tests (`sql/`):
 | `leapfrog_security` | row-level security: leakproof equalities become streams, others stay in `Filter`; the same query without the policy uses them |
 | `leapfrog_cost` | the node is charged for the clauses in its `Filter` and only those; a predicate implied by an equality does not lower the row estimate |
 | `leapfrog_partition` | hash and range partitions, a partition with other attribute numbers, `Merge Append` and ordered `Append`, run-time pruning, `LATERAL`, `FOR UPDATE`, row-level security, `TABLESAMPLE`, a partition without the indexes, inheritance |
+| `leapfrog_sort_types` | `timestamptz`, `date`, `numeric`, `text` in two collations, `varchar`, `char`, `uuid`, arrays, enums, domains and `real` as sort columns, in both directions; skip-ahead with long text, overflow, generic plans, `LATERAL`; other collations, operator families and input types are no streams |
+| `leapfrog_sort_icu` | a sort column in an ICU collation, deterministic or not; skipped where the database's encoding has none |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -624,6 +626,7 @@ Isolation tests (`tests/isolation/specs/`):
 | `leapfrog_nway` | EvalPlanQual with three streams: the second stream's column, the third stream's predicate and an unrelated column changing while `FOR UPDATE` waits |
 | `leapfrog_types` | EvalPlanQual with `text` and `uuid` equalities: the status, the owner and an unrelated column changing while `FOR UPDATE` waits |
 | `leapfrog_partition` | EvalPlanQual under a `Merge Append`: inner and outer equalities failing on the new version, an unrelated column, a row moved to another partition |
+| `leapfrog_sort_types` | EvalPlanQual with a `text` sort column |
 
 ## Benchmarks
 
@@ -743,8 +746,12 @@ Verified against `src/` and the tests.
   family, cross-type ones included (`varchar = text`, `smallint = bigint`); a
   `text` column indexed in another collation than the condition's is not
   used. Expression index columns are not supported.
-- Sort column: `smallint`, `integer` or `bigint` (`integer_ops`). Other sort
-  types (`timestamptz`, `numeric`, `uuid`) are not supported yet.
+- Sort column: any type with a B-tree operator family (`timestamptz`, `date`,
+  `numeric`, `text`, `varchar`, `uuid`, arrays, enums, domains …), compared
+  with the comparator of the query's sort key. Every stream's index column
+  must be in the family, input type and collation of that key: an index
+  in another collation or in `text_pattern_ops` serves another order, and is
+  no stream of this one.
 - Equality (`=`) only on the equality columns; `IN (…)`, ranges and `IS NULL`
   are not supported.
 - The sort column must be `NOT NULL` according to the planner

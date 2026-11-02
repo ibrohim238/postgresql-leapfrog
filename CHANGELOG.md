@@ -7,6 +7,12 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Sort columns of any B-tree type (`timestamptz`, `date`, `numeric`, `text`,
+  `varchar`, `uuid`, arrays, enums, domains …): the merge compares `Datum`s
+  with the comparator of the query's sort key. Every stream's index column
+  must be in that key's operator family, input type and collation. The
+  by-reference value of a group and the bound of a skip are copied, as the
+  stream they came from moves on. Tests in `leapfrog_sort_types`.
 - Partitioned tables and inheritance: a node per child under a `Merge Append`
   or ordered `Append`. Tests in `leapfrog_partition`.
 - `tests/performance/bitmap_bench.sh`: the node against `BitmapAnd`, stock

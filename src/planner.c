@@ -16,7 +16,6 @@
 #include "access/cmptype.h"
 #include "access/nbtree.h"
 #include "catalog/pg_am_d.h"
-#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -74,7 +73,7 @@ typedef struct IntersectSearch
 	RelOptInfo *rel;
 	Index		rti;
 	RangeTblEntry *rte;
-	AttrNumber	sort_attno;
+	SortColumn	sort;
 	PathKey    *pathkey;
 	IndexCandidate *candidates;
 	int			ncandidates;
@@ -357,23 +356,6 @@ pathkey_is_column(PathKey *pathkey, RelOptInfo *rel, Index rti,
 }
 
 /*
- * is_integer_column
- *		The sort column is compared and skipped to as a 64-bit integer:
- *		smallint, integer or bigint, or a domain over one of them.
- */
-static bool
-is_integer_column(RangeTblEntry *rte, AttrNumber attno)
-{
-	Oid			type;
-
-	if (attno <= 0)
-		return false;
-	type = getBaseType(get_atttype(rte->relid, attno));
-
-	return type == INT2OID || type == INT4OID || type == INT8OID;
-}
-
-/*
  * is_notnull_column
  *		NULLs have no place in the merge: values are compared for equality
  *		and the sort column must be NOT NULL.  The planner's notnullattnums
@@ -413,21 +395,23 @@ is_heapkeyspace(IndexCandidate *candidate)
 /*
  * is_usable_btree
  *		A btree whose column at position pos is sorted ascending in the
- *		operator family of the query's sort key, so that every stream of the
- *		merge produces values in the order the query asks for.  NULLs
- *		ordering is not checked: the sort column is NOT NULL.  Whether the
- *		duplicates are ordered by TID is checked last, by is_heapkeyspace,
- *		for the sets that pass everything else: it opens the index.
+ *		operator family, input type and collation of the query's sort key, so
+ *		that every stream of the merge produces values in the order the query
+ *		asks for and they compare alike.  NULLs ordering is not checked: the
+ *		sort column is NOT NULL.  Whether the duplicates are ordered by TID is
+ *		checked last, by is_heapkeyspace, for the sets that pass everything
+ *		else: it opens the index.
  */
 static bool
-is_usable_btree(IndexOptInfo *index, int pos, PathKey *pathkey)
+is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
 {
 	return index->relam == BTREE_AM_OID &&
 		!index->hypothetical &&
 		(index->indpred == NIL || index->predOK) &&
-		index->opfamily[pos] == INTEGER_BTREE_FAM_OID &&
 		index->sortopfamily != NULL &&
-		index->sortopfamily[pos] == pathkey->pk_opfamily &&
+		index->sortopfamily[pos] == sort->opfamily &&
+		index->opcintype[pos] == sort->type &&
+		index->indexcollations[pos] == sort->collation &&
 		!index->reverse_sort[pos];
 }
 
@@ -457,7 +441,7 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{
-		if (index->indexkeys[i] == search->sort_attno)
+		if (index->indexkeys[i] == search->sort.attno)
 		{
 			sortpos = i;
 			break;
@@ -465,7 +449,7 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 	}
 	candidate->sortpos = sortpos;
 
-	if (sortpos < 0 || !is_usable_btree(index, sortpos, search->pathkey))
+	if (sortpos < 0 || !is_usable_btree(index, sortpos, &search->sort))
 		return false;
 
 	for (int i = 0; i < sortpos; i++)
@@ -631,7 +615,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 
 	if (search->ndistinct < 0)
 		search->ndistinct = lf_sortcol_ndistinct(root, rel, search->rti,
-												 search->sort_attno);
+												 search->sort.attno);
 
 	/*
 	 * The TID groups of one value are expected to fit into work_mem together.
@@ -673,7 +657,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	cpath->flags = 0;
 	cpath->methods = &intersect_path_methods;
 
-	lf_cost_intersect_path(cpath, root, search->rte, search->sort_attno,
+	lf_cost_intersect_path(cpath, root, search->rte, &search->sort,
 						   streams, nstreams, search->ndistinct, correlation,
 						   reads);
 
@@ -685,9 +669,11 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	 * the PRIVATE_* and STREAM_* positions.
 	 */
 	cpath->custom_private =
-		list_make2(makeBoolConst(search->pathkey->pk_cmptype == COMPARE_GT,
-								 false),
-				   make_int4_const(nstreams));
+		list_make5(makeBoolConst(search->sort.descending, false),
+				   make_int4_const(nstreams),
+				   make_oid_const(search->sort.type),
+				   make_oid_const(search->sort.opfamily),
+				   make_oid_const(search->sort.collation));
 	for (int i = 0; i < nstreams; i++)
 	{
 		cpath->custom_private = lappend(cpath->custom_private,
@@ -880,10 +866,10 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	search.rel = rel;
 	search.rti = rti;
 	search.rte = rte;
-	search.sort_attno = InvalidAttrNumber;
+	search.sort.attno = InvalidAttrNumber;
 	search.ndistinct = -1.0;
 
-	/* the sort column: an integer NOT NULL column of this relation */
+	/* the sort column: a NOT NULL column of this relation */
 	search.pathkey = linitial_node(PathKey, root->query_pathkeys);
 	setup_eclass_member_iterator(&it, search.pathkey->pk_eclass, rel->relids);
 	while ((em = eclass_member_iterator_next(&it)) != NULL)
@@ -897,14 +883,19 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			continue;
 		attno = ((Var *) expr)->varattno;
 		if (attno > 0 && pathkey_is_column(search.pathkey, rel, rti, attno) &&
-			is_integer_column(rte, attno) && is_notnull_column(rel, attno))
+			is_notnull_column(rel, attno))
 		{
-			search.sort_attno = attno;
+			search.sort.attno = attno;
+			search.sort.type = em->em_datatype;
+			search.sort.opfamily = search.pathkey->pk_opfamily;
+			search.sort.collation = search.pathkey->pk_eclass->ec_collation;
+			search.sort.descending = search.pathkey->pk_cmptype == COMPARE_GT;
+			search.sort.range_ssup_ready = false;
 			break;
 		}
 	}
 
-	if (search.sort_attno == InvalidAttrNumber)
+	if (search.sort.attno == InvalidAttrNumber)
 		return;
 
 	/*

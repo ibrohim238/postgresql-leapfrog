@@ -46,67 +46,62 @@ lf_scan_leaf_position(IndexScanDesc scan, bool descending, BlockNumber *page,
 }
 
 /*
- * lf_datum_get_int64
- *		Return an int2/int4/int8 datum as int64.
- */
-int64
-lf_datum_get_int64(Datum value, Oid type)
-{
-	switch (type)
-	{
-		case INT2OID:
-			return DatumGetInt16(value);
-		case INT4OID:
-			return DatumGetInt32(value);
-		default:
-			return DatumGetInt64(value);
-	}
-}
-
-/*
  * lf_rescan_with_keys
- *		Position an index scan on the current equality values of one side
- *		and on a bound for sortcol (the key column right after them): values
- *		>= bound for a forward scan, <= bound for a backward one.  The scan
- *		was opened with nequal + 1 keys, and index_rescan must get that many.
+ *		Position an index scan on the current equality values of one stream
+ *		and on what is asked of sortcol, the key column right after them.  The
+ *		scan was opened with room for nequal + 1 keys; without a condition on
+ *		sortcol it gets nequal, and no type has a value that lets every entry
+ *		through, so the scan's number of keys follows.
  */
 void
-lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, bool descending,
-					int64 bound)
+lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, SortBound kind,
+					Datum bound)
 {
 	ScanKeyData scankeys[INDEX_MAX_KEYS + 1];
+	int			nkeys = keys->nequal;
 
 	for (int i = 0; i < keys->nequal; i++)
 		ScanKeyEntryInitialize(&scankeys[i], 0, i + 1, BTEqualStrategyNumber,
 							   keys->subtypes[i], keys->collations[i],
 							   keys->procs[i], keys->values[i]);
 
-	if (descending)
-		ScanKeyEntryInitialize(&scankeys[keys->nequal], 0, keys->nequal + 1,
-							   BTLessEqualStrategyNumber, INT8OID, InvalidOid,
-							   keys->bound_le, Int64GetDatum(bound));
-	else
-		ScanKeyEntryInitialize(&scankeys[keys->nequal], 0, keys->nequal + 1,
-							   BTGreaterEqualStrategyNumber, INT8OID,
-							   InvalidOid, keys->bound_ge,
-							   Int64GetDatum(bound));
+	switch (kind)
+	{
+		case SORT_BOUND_NONE:
+			break;
+		case SORT_BOUND_VALUE:
+			ScanKeyEntryInitialize(&scankeys[nkeys], 0, keys->nequal + 1,
+								   keys->bound_strategy, keys->sort_type,
+								   keys->sort_collation, keys->bound_proc,
+								   bound);
+			nkeys++;
+			break;
+		case SORT_BOUND_NOT_NULL:
+			ScanKeyEntryInitialize(&scankeys[nkeys],
+								   SK_ISNULL | SK_SEARCHNOTNULL,
+								   keys->nequal + 1, InvalidStrategy,
+								   InvalidOid, InvalidOid, InvalidOid,
+								   (Datum) 0);
+			nkeys++;
+			break;
+	}
 
-	index_rescan(scan, scankeys, keys->nequal + 1, NULL, 0);
+	scan->numberOfKeys = nkeys;
+	index_rescan(scan, scankeys, nkeys, NULL, 0);
 }
 
 /*
  * lf_init_key_procs
  *		Look up what the scan keys need once the operators are set: each
- *		equality operator's function and right input type, and the integer
- *		family's ">=" and "<=" of the sort column's type against int8 for the
- *		bound.  Every integer type has those cross-type operators in
- *		integer_ops, so a bound is always an int8.
+ *		equality operator's function and right input type, and for the bound
+ *		the operator family's ">=" or "<=" of the sort type, by the direction
+ *		of the pathkey.
  */
 void
-lf_init_key_procs(EqualityKeys *keys, Oid sort_type)
+lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
+				  Oid collation, bool descending)
 {
-	Oid			ge;
-	Oid			le;
+	Oid			bound_op;
 
 	for (int i = 0; i < keys->nequal; i++)
 	{
@@ -117,32 +112,23 @@ lf_init_key_procs(EqualityKeys *keys, Oid sort_type)
 	}
 
 	keys->sort_type = sort_type;
-	ge = get_opfamily_member(INTEGER_BTREE_FAM_OID, sort_type, INT8OID,
-							 BTGreaterEqualStrategyNumber);
-	le = get_opfamily_member(INTEGER_BTREE_FAM_OID, sort_type, INT8OID,
-							 BTLessEqualStrategyNumber);
-	if (!OidIsValid(ge) || !OidIsValid(le))
-		elog(ERROR, "no integer_ops comparison of type %u with bigint",
-			 sort_type);
-	keys->bound_ge = get_opcode(ge);
-	keys->bound_le = get_opcode(le);
-}
-
-/*
- * lf_no_bound
- *		The sortcol bound that lets every value through.
- */
-int64
-lf_no_bound(bool descending)
-{
-	return descending ? PG_INT64_MAX : PG_INT64_MIN;
+	keys->sort_collation = collation;
+	keys->bound_strategy = descending ? BTLessEqualStrategyNumber :
+		BTGreaterEqualStrategyNumber;
+	bound_op = get_opfamily_member(opfamily, sort_type, sort_type,
+								   keys->bound_strategy);
+	if (!OidIsValid(bound_op))
+		elog(ERROR, "missing operator %d(%u,%u) in opfamily %u",
+			 keys->bound_strategy, sort_type, sort_type, opfamily);
+	keys->bound_proc = get_opcode(bound_op);
 }
 
 /*
  * lf_read_index_entry
  *		Fetch the next (sortcol value, heap TID) entry from an index without
  *		visiting the heap.  *entries_read counts every entry taken from the
- *		index, including the skipped ones.
+ *		index, including the skipped ones.  A by-reference value points into
+ *		the scan's index tuple: it stays valid until the scan moves on.
  *
  * The planner accepts the sort column only when it is NOT NULL, but that
  * describes the live rows: an index can still hold dead entries with NULL
@@ -154,8 +140,7 @@ lf_no_bound(bool descending)
  */
 bool
 lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
-					Oid sort_type, int64 *value, ItemPointer tid,
-					int64 *entries_read)
+					Datum *value, ItemPointer tid, int64 *entries_read)
 {
 	for (;;)
 	{
@@ -177,7 +162,7 @@ lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
 			continue;
 		}
 
-		*value = lf_datum_get_int64(datum, sort_type);
+		*value = datum;
 		ItemPointerCopy(&scan->xs_heaptid, tid);
 
 		return true;

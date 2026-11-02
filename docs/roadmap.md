@@ -17,6 +17,8 @@ and CHANGELOG.
 
 ## Step 5. Sort column of any B-tree type
 
+Done; unreleased.
+
 Goal: `ORDER BY created_at` (`timestamptz`), `date`, `numeric`, `uuid`,
 `text`, `varchar` … as the sort column, not only integers.
 

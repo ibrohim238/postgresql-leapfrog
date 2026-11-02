@@ -42,7 +42,9 @@ REGRESS = \
 	leapfrog_types \
 	leapfrog_security \
 	leapfrog_cost \
-	leapfrog_partition
+	leapfrog_partition \
+	leapfrog_sort_types \
+	leapfrog_sort_icu
 
 ISOLATION = \
 	leapfrog_concurrent_update \
@@ -56,7 +58,8 @@ ISOLATION = \
 	leapfrog_overflow_epq \
 	leapfrog_nway \
 	leapfrog_types \
-	leapfrog_partition
+	leapfrog_partition \
+	leapfrog_sort_types
 
 ISOLATION_OPTS = --load-extension=leapfrog
 REGRESS_OPTS = --load-extension=leapfrog

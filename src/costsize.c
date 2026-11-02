@@ -41,14 +41,16 @@
 #include "access/relscan.h"
 #include "access/stratnum.h"
 #include "access/table.h"
-#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_statistic.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/selfuncs.h"
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
@@ -441,11 +443,12 @@ lf_sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		every equality value is a constant at plan time: a parameterized path
  *		or a generic plan is costed without it.  Entries are read regardless
  *		of visibility (SnapshotAny); a dead entry at an end only widens the
- *		range.  The result is cached in the candidate; returns false when the
- *		range cannot be probed.
+ *		range.  The values are copied: they outlive the scan.  The result is
+ *		cached in the candidate; returns false when the range cannot be
+ *		probed.
  */
 static bool
-probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
+probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 {
 	EqualityKeys keys;
 	Relation	heap;
@@ -453,7 +456,8 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 	IndexScanDesc scan;
 	ItemPointerData tid;
 	int64		entries = 0;
-	Oid			sort_type;
+	Form_pg_attribute attr;
+	int			sort_keyno = candidate->sortpos + 1;
 	ListCell   *lc;
 
 	if (candidate->range_known >= 0)
@@ -478,9 +482,8 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 													keys.nequal);
 		keys.nequal++;
 	}
-	sort_type = getBaseType(get_atttype(rte->relid,
-										candidate->index->indexkeys[candidate->sortpos]));
-	lf_init_key_procs(&keys, sort_type);
+	lf_init_key_procs(&keys, sort->type, sort->opfamily, sort->collation,
+					  sort->descending);
 
 	/* the planner holds locks on the table and its indexes */
 	heap = table_open(rte->relid, NoLock);
@@ -488,17 +491,24 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 	scan = lf_index_beginscan(heap, index, SnapshotAny, keys.nequal + 1);
 	scan->xs_want_itup = true;
 
-	lf_rescan_with_keys(scan, &keys, false, lf_no_bound(false));
+	attr = TupleDescAttr(RelationGetDescr(index), sort_keyno - 1);
+
+	/* NULLs are at one end of the index and no end of the range */
+	lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
 	candidate->range_empty = !lf_read_index_entry(scan, ForwardScanDirection,
-												  keys.nequal + 1, sort_type,
+												  sort_keyno,
 												  &candidate->range_lo, &tid,
 												  &entries);
 	if (!candidate->range_empty)
 	{
-		lf_rescan_with_keys(scan, &keys, true, lf_no_bound(true));
-		if (!lf_read_index_entry(scan, BackwardScanDirection, keys.nequal + 1,
-								 sort_type, &candidate->range_hi, &tid,
-								 &entries))
+		candidate->range_lo = datumCopy(candidate->range_lo, attr->attbyval,
+										attr->attlen);
+		lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
+		if (lf_read_index_entry(scan, BackwardScanDirection, sort_keyno,
+								&candidate->range_hi, &tid, &entries))
+			candidate->range_hi = datumCopy(candidate->range_hi, attr->attbyval,
+											attr->attlen);
+		else
 			candidate->range_hi = candidate->range_lo;
 	}
 
@@ -514,36 +524,69 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 /*
  * sortcol_range_selectivity
  *		Share of the table's rows with lo <= sortcol <= hi, from the column's
- *		histogram.
+ *		histogram, with the operators of the type and collation the query
+ *		sorts in.
  */
 static Selectivity
-sortcol_range_selectivity(PlannerInfo *root, Index rti, AttrNumber sort_attno,
-						  int64 lo, int64 hi)
+sortcol_range_selectivity(PlannerInfo *root, Index rti, SortColumn *sort,
+						  Datum lo, Datum hi)
 {
-	Var		   *var = column_var(root, rti, sort_attno);
+	Var		   *var = column_var(root, rti, sort->attno);
+	Expr	   *column = (Expr *) var;
+	Oid			const_type = sort->type;
+	int16		typlen;
+	bool		typbyval;
 	List	   *clauses = NIL;
-	Oid			ge = get_opfamily_member(INTEGER_BTREE_FAM_OID, var->vartype,
-										 INT8OID,
-										 BTGreaterEqualStrategyNumber);
-	Oid			le = get_opfamily_member(INTEGER_BTREE_FAM_OID, var->vartype,
-										 INT8OID, BTLessEqualStrategyNumber);
+
+	/* varchar sorts as text; a polymorphic class takes the column's own type */
+	if (IsPolymorphicType(sort->type))
+		const_type = var->vartype;
+	else if (var->vartype != sort->type)
+		column = (Expr *) makeRelabelType(column, sort->type, -1, sort->collation,
+										  COERCE_IMPLICIT_CAST);
+	get_typlenbyval(const_type, &typlen, &typbyval);
 
 	clauses = lappend(clauses,
-					  make_opclause(ge, BOOLOID, false, (Expr *) var,
-									(Expr *) makeConst(INT8OID, -1, InvalidOid,
-													   sizeof(int64),
-													   Int64GetDatum(lo),
-													   false, FLOAT8PASSBYVAL),
-									InvalidOid, InvalidOid));
+					  make_opclause(get_opfamily_member(sort->opfamily, sort->type,
+														sort->type,
+														BTGreaterEqualStrategyNumber),
+									BOOLOID, false, column,
+									(Expr *) makeConst(const_type, -1, sort->collation,
+													   typlen, lo, false, typbyval),
+									InvalidOid, sort->collation));
 	clauses = lappend(clauses,
-					  make_opclause(le, BOOLOID, false, (Expr *) var,
-									(Expr *) makeConst(INT8OID, -1, InvalidOid,
-													   sizeof(int64),
-													   Int64GetDatum(hi),
-													   false, FLOAT8PASSBYVAL),
-									InvalidOid, InvalidOid));
+					  make_opclause(get_opfamily_member(sort->opfamily, sort->type,
+														sort->type,
+														BTLessEqualStrategyNumber),
+									BOOLOID, false, column,
+									(Expr *) makeConst(const_type, -1, sort->collation,
+													   typlen, hi, false, typbyval),
+									InvalidOid, sort->collation));
 
 	return clauselist_selectivity(root, clauses, rti, JOIN_INNER, NULL);
+}
+
+/*
+ * range_compare
+ *		Compare two sortcol values in ascending order, in the query's
+ *		collation.
+ */
+static int
+range_compare(SortColumn *sort, Datum a, Datum b)
+{
+	if (!sort->range_ssup_ready)
+	{
+		Oid			lt = get_opfamily_member(sort->opfamily, sort->type, sort->type,
+											 BTLessStrategyNumber);
+
+		memset(&sort->range_ssup, 0, sizeof(SortSupportData));
+		sort->range_ssup.ssup_cxt = CurrentMemoryContext;
+		sort->range_ssup.ssup_collation = sort->collation;
+		PrepareSortSupportFromOrderingOp(lt, &sort->range_ssup);
+		sort->range_ssup_ready = true;
+	}
+
+	return ApplySortComparator(a, false, b, false, &sort->range_ssup);
 }
 
 /*
@@ -563,11 +606,12 @@ sortcol_range_selectivity(PlannerInfo *root, Index rti, AttrNumber sort_attno,
  */
 static void
 stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
-			   AttrNumber sort_attno, IndexCandidate **streams, int nstreams,
+			   SortColumn *sort, IndexCandidate **streams, int nstreams,
 			   double *shares, double *rows_factor)
 {
-	int64		lo;
-	int64		hi;
+	Datum		lo = (Datum) 0;
+	Datum		hi = (Datum) 0;
+	bool		empty = false;
 	Selectivity table_share;
 
 	for (int i = 0; i < nstreams; i++)
@@ -576,24 +620,28 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 
 	for (int i = 0; i < nstreams; i++)
 	{
-		if (!probe_range(rte, streams[i]))
+		if (!probe_range(rte, sort, streams[i]))
 			return;
 	}
 
-	lo = PG_INT64_MIN;
-	hi = PG_INT64_MAX;
-	for (int i = 0; i < nstreams; i++)
+	for (int i = 0; i < nstreams && !empty; i++)
 	{
 		if (streams[i]->range_empty)
+			empty = true;
+		else if (i == 0)
 		{
-			lo = 1;
-			hi = 0;
-			break;
+			lo = streams[i]->range_lo;
+			hi = streams[i]->range_hi;
 		}
-		lo = Max(lo, streams[i]->range_lo);
-		hi = Min(hi, streams[i]->range_hi);
+		else
+		{
+			if (range_compare(sort, streams[i]->range_lo, lo) > 0)
+				lo = streams[i]->range_lo;
+			if (range_compare(sort, streams[i]->range_hi, hi) < 0)
+				hi = streams[i]->range_hi;
+		}
 	}
-	if (lo > hi)
+	if (empty || range_compare(sort, lo, hi) > 0)
 	{
 		for (int i = 0; i < nstreams; i++)
 			shares[i] = 0.0;
@@ -611,14 +659,15 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 		IndexCandidate *stream = streams[i];
 
 		if (stream->range_sel < 0)
-			stream->range_sel = sortcol_range_selectivity(root, rti, sort_attno,
+			stream->range_sel = sortcol_range_selectivity(root, rti, sort,
 														  stream->range_lo,
 														  stream->range_hi);
-		if (stream->range_lo == lo && stream->range_hi == hi)
+		if (range_compare(sort, stream->range_lo, lo) == 0 &&
+			range_compare(sort, stream->range_hi, hi) == 0)
 			table_share = stream->range_sel;
 	}
 	if (table_share < 0)
-		table_share = sortcol_range_selectivity(root, rti, sort_attno, lo, hi);
+		table_share = sortcol_range_selectivity(root, rti, sort, lo, hi);
 
 	for (int i = 0; i < nstreams; i++)
 	{
@@ -694,13 +743,14 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		whose parameterization is set and whose rows hold the planner's
  *		estimate for the relation, as cost_index does for an index path.
  *		streams[0] is the outer index; every candidate has its entries set.
- *		ndistinct is lf_sortcol_ndistinct, correlation
+ *		sort is the column the query sorts by.  ndistinct is
+ *		lf_sortcol_ndistinct, correlation
  *		lf_outer_index_correlation of the outer index.  Returns in reads[]
  *		the entries each stream is expected to read, for EXPLAIN VERBOSE.
  */
 void
 lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
-					   RangeTblEntry *rte, AttrNumber sort_attno,
+					   RangeTblEntry *rte, SortColumn *sort,
 					   IndexCandidate **streams, int nstreams,
 					   double ndistinct, double correlation, double *reads)
 {
@@ -726,7 +776,7 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	 * read, and the matches lie there (stream_overlap); a stream that starts
 	 * outside it skips in with one more descent.
 	 */
-	stream_overlap(root, rte, rel->relid, sort_attno, streams, nstreams,
+	stream_overlap(root, rte, rel->relid, sort, streams, nstreams,
 				   shares, &rows_factor);
 	for (int i = 0; i < nstreams; i++)
 	{

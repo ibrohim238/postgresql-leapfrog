@@ -41,9 +41,8 @@
  * The heap is otherwise visited only for matches, walking HOT chains the
  * way index_getnext_slot does.
  *
- * Only the standard integer btree operator family is supported: the scan
- * keys are built with int8 operators, so both the equality columns and the
- * merge column must belong to it.
+ * The merge column may be of any type with a btree operator family: values
+ * are compared with the comparator of the query's sort key.
  *
  * Costing follows ROR_intersect_plan::add, with every component expressed
  * through the planner's own cost functions (costsize.c).
@@ -58,9 +57,8 @@
  * as an index scan rechecks indexqualorig: the equalities on the columns of
  * both indexes and the predicate of the inner index.
  *
- * Limitations: the sort column must be smallint, integer or bigint (or a
- * domain over one); equality columns may be of any type with a B-tree
- * operator family.  The scan covers a single relation only.
+ * Limitations: the scan covers a single relation only; a partitioned table
+ * gets one per partition.
  *
  * The library installs set_rel_pathlist_hook from _PG_init, so it must be
  * loaded into the backend: shared_preload_libraries, session_preload_libraries
