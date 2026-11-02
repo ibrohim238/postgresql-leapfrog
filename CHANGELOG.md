@@ -7,6 +7,7 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- README: the node against a self join written by hand.
 - Sort columns of any B-tree type (`timestamptz`, `date`, `numeric`, `text`,
   `varchar`, `uuid`, arrays, enums, domains …): the merge compares `Datum`s
   with the comparator of the query's sort key. Every stream's index column
