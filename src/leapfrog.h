@@ -138,6 +138,8 @@ extern void lf_init_key_procs(EqualityKeys *keys, Oid sort_type);
 extern void lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys,
 								bool descending, int64 bound);
 extern int64 lf_no_bound(bool descending);
+extern bool lf_scan_leaf_position(IndexScanDesc scan, bool descending,
+								  BlockNumber *page, BlockNumber *next_page);
 extern bool lf_read_index_entry(IndexScanDesc scan, ScanDirection dir,
 								int attno, Oid sort_type, int64 *value,
 								ItemPointer tid, int64 *entries_read);

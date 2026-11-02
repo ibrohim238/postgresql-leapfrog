@@ -15,6 +15,7 @@
 
 #include "access/genam.h"
 #include "access/itup.h"
+#include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/stratnum.h"
 #include "catalog/pg_opfamily_d.h"
@@ -24,6 +25,25 @@
 #include "utils/lsyscache.h"
 
 #include "leapfrog.h"
+
+/*
+ * lf_scan_leaf_position
+ *		The leaf page the scan is positioned on and its neighbour in scan
+ *		direction; false when it is positioned nowhere.  This is the only read
+ *		of nbtree's private scan state, for the skip-ahead's landing check:
+ *		the merge itself needs nothing of it.
+ */
+bool
+lf_scan_leaf_position(IndexScanDesc scan, bool descending, BlockNumber *page,
+					  BlockNumber *next_page)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+
+	*page = so->currPos.currPage;
+	*next_page = descending ? so->currPos.prevPage : so->currPos.nextPage;
+
+	return BTScanPosIsValid(so->currPos);
+}
 
 /*
  * lf_datum_get_int64

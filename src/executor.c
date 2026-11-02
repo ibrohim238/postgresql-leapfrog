@@ -14,7 +14,6 @@
 
 #include <limits.h>
 
-#include "access/nbtree.h"
 #include "access/relscan.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
@@ -345,16 +344,10 @@ init_skip(SkipAhead *skip)
 static void
 skip_ahead(IntersectScanState *state, IndexStream *stream, int64 bound)
 {
-	BTScanOpaque so = (BTScanOpaque) stream->scan->opaque;
 	SkipAhead  *skip = &stream->skip;
 
-	skip->landing = BTScanPosIsValid(so->currPos);
-	if (skip->landing)
-	{
-		skip->from_page = so->currPos.currPage;
-		skip->from_next = state->descending ?
-			so->currPos.prevPage : so->currPos.nextPage;
-	}
+	skip->landing = lf_scan_leaf_position(stream->scan, state->descending,
+										  &skip->from_page, &skip->from_next);
 
 	lf_rescan_with_keys(stream->scan, &stream->keys, state->descending, bound);
 	skip->behind = 0;
@@ -372,15 +365,16 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, int64 bound)
 static void
 check_landing(IntersectScanState *state, IndexStream *stream)
 {
-	BTScanOpaque so = (BTScanOpaque) stream->scan->opaque;
 	SkipAhead  *skip = &stream->skip;
 	BlockNumber page;
+	BlockNumber next_page;
 
 	if (!skip->landing)
 		return;
 	skip->landing = false;
 
-	page = so->currPos.currPage;
+	(void) lf_scan_leaf_position(stream->scan, state->descending, &page,
+								 &next_page);
 	if (page == skip->from_page || page == skip->from_next)
 	{
 		state->short_skips++;

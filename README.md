@@ -823,8 +823,9 @@ Verified against `src/` and the tests.
   before every run (`tests/performance/skip_bench.sh`); a run with the OS page
   cache dropped as well needs root on the database host (`COLD_CMD`) and has
   not been made. The landing check reads nbtree's scan position
-  (`BTScanOpaque`), so it depends on that internal structure of
-  PostgreSQL 18.
+  (`BTScanOpaque`, in `lf_scan_leaf_position` only) and the planner calls
+  `_bt_metaversion`, so both depend on nbtree internals, not on the index
+  AM API. There is no public way to get either.
 
 **Tests and benchmarks**
 
