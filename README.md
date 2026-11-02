@@ -10,10 +10,10 @@ with the current statistics, and `leapfrog.enabled = off` turns it off.
 
 Status: **experimental (0.0.4)**. The executor is covered by regression and
 isolation tests that compare every result with the stock plans
-(see [Tests](#tests)). The cost model is conservative: in the measured
-benchmarks it picked the node where it was slower only in `LIMIT 1` queries,
-by under 0.1 ms, and it misses a part of the cases where the node is faster
-(see
+(see [Tests](#tests)). The cost model counts pages first: with data in memory it
+can pick the node over an Index Scan that touches more buffers but takes less time
+(0.26 ms against 0.07 with `LIMIT 100` and both conditions dense), and it misses a
+part of the cases where the node is faster (see
 [Known limitations](#known-limitations-and-planned-improvements)).
 
 ## Contents
