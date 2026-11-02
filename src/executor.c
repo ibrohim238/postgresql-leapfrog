@@ -57,6 +57,7 @@ typedef struct IndexStream
 	IndexScanDesc scan;
 	EqualityKeys keys;			/* equalities on the columns before sortcol */
 	int			sort_attno;		/* sortcol's position in the index tuple */
+	ScanDirection dir;			/* gives the query's order in this index */
 	ExprState  *pred;			/* predicate of a partial inner index */
 	bool		have;			/* current entry is not consumed yet */
 	bool		eof;
@@ -240,6 +241,9 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 					   AccessShareLock);
 		stream->sort_attno =
 			DatumGetInt32(stream_datum(private, i, STREAM_PRIVATE_SORTPOS)) + 1;
+		stream->dir =
+			DatumGetBool(stream_datum(private, i, STREAM_PRIVATE_BACKWARD)) ?
+			BackwardScanDirection : ForwardScanDirection;
 		stream->estimate =
 			DatumGetFloat8(stream_datum(private, i, STREAM_PRIVATE_ESTIMATE));
 		init_equality_keys(&stream->keys, keys,
@@ -400,7 +404,8 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
 
 	SkipAhead  *skip = &stream->skip;
 
-	skip->landing = lf_scan_leaf_position(stream->scan, state->descending,
+	skip->landing = lf_scan_leaf_position(stream->scan,
+										  ScanDirectionIsBackward(stream->dir),
 										  &skip->from_page, &skip->from_next);
 
 	/* bound belongs to another stream, which will move on */
@@ -442,7 +447,8 @@ check_landing(IntersectScanState *state, IndexStream *stream)
 		return;
 	skip->landing = false;
 
-	(void) lf_scan_leaf_position(stream->scan, state->descending, &page,
+	(void) lf_scan_leaf_position(stream->scan,
+								 ScanDirectionIsBackward(stream->dir), &page,
 								 &next_page);
 	if (page == skip->from_page || page == skip->from_next)
 	{
@@ -535,12 +541,11 @@ tid_compare(const void *a, const void *b)
  *		the values yet.
  */
 static void
-read_stream_entry(IntersectScanState *state, IndexStream *stream,
-				  ScanDirection dir)
+read_stream_entry(IntersectScanState *state, IndexStream *stream)
 {
 	for (;;)
 	{
-		if (lf_read_index_entry(stream->scan, dir, stream->sort_attno,
+		if (lf_read_index_entry(stream->scan, stream->dir, stream->sort_attno,
 								state->sort_notnull, &stream->value,
 								&stream->isnull, &stream->tid, &stream->read))
 		{
@@ -567,8 +572,7 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream,
  * treated as a match for the stream's conditions to be checked on the row.
  */
 static void
-collect_group(IntersectScanState *state, IndexStream *stream,
-			  ScanDirection dir)
+collect_group(IntersectScanState *state, IndexStream *stream)
 {
 	uint32		iterations = 0;
 
@@ -605,7 +609,7 @@ collect_group(IntersectScanState *state, IndexStream *stream,
 		}
 
 		stream->have = false;
-		read_stream_entry(state, stream, dir);
+		read_stream_entry(state, stream);
 	}
 
 	if (stream->group_overflow)
@@ -637,10 +641,7 @@ intersect_next(ScanState *ss)
 	IntersectScanState *state = (IntersectScanState *) ss;
 	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
 	IndexStream *outer = &state->streams[0];
-	ScanDirection dir;
 	uint32		iterations = 0;
-
-	dir = state->descending ? BackwardScanDirection : ForwardScanDirection;
 
 	if (!state->started)
 	{
@@ -700,7 +701,7 @@ intersect_next(ScanState *ss)
 
 		if (!outer->have)
 		{
-			read_stream_entry(state, outer, dir);
+			read_stream_entry(state, outer);
 			if (outer->eof)
 				break;
 		}
@@ -751,7 +752,7 @@ intersect_next(ScanState *ss)
 				if (stream->eof)
 					exhausted = true;
 				else
-					read_stream_entry(state, stream, dir);
+					read_stream_entry(state, stream);
 				pending = true;
 			}
 		}
@@ -793,7 +794,7 @@ intersect_next(ScanState *ss)
 			for (int i = 0; i < state->nstreams; i++)
 				state->streams[i].skip.behind = 0;
 			for (int i = 1; i < state->nstreams; i++)
-				collect_group(state, &state->streams[i], dir);
+				collect_group(state, &state->streams[i]);
 			continue;
 		}
 

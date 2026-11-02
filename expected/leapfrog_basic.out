@@ -465,12 +465,12 @@ DROP INDEX lf_basic_owner_kind_id;
 CREATE INDEX lf_basic_owner_id_desc ON lf_basic (owner_id, id DESC);
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
-                          lf_plan                          
------------------------------------------------------------
+                        lf_plan                        
+-------------------------------------------------------
  Limit
-   ->  Index Scan using lf_basic_owner_id_desc on lf_basic
-         Index Cond: (owner_id = 5)
-         Filter: (deleted_at IS NULL)
+   ->  Custom Scan (Index Merge Intersect) on lf_basic
+         Outer Index: lf_basic_owner_id_desc
+         Inner Index: lf_basic_live_id
 (4 rows)
 
 ROLLBACK;

@@ -459,6 +459,7 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 	Form_pg_attribute attr;
 	int			sort_keyno = candidate->sortpos + 1;
 	bool		isnull;
+	ScanDirection low_end;
 	ListCell   *lc;
 
 	if (candidate->range_known >= 0)
@@ -495,8 +496,10 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 	attr = TupleDescAttr(RelationGetDescr(index), sort_keyno - 1);
 
 	/* NULLs are at one end of the index and no end of the range */
+	low_end = candidate->index->reverse_sort[candidate->sortpos] ?
+		BackwardScanDirection : ForwardScanDirection;
 	lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
-	candidate->range_empty = !lf_read_index_entry(scan, ForwardScanDirection,
+	candidate->range_empty = !lf_read_index_entry(scan, low_end,
 												  sort_keyno, true,
 												  &candidate->range_lo, &isnull,
 												  &tid, &entries);
@@ -505,7 +508,7 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 		candidate->range_lo = datumCopy(candidate->range_lo, attr->attbyval,
 										attr->attlen);
 		lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
-		if (lf_read_index_entry(scan, BackwardScanDirection, sort_keyno, true,
+		if (lf_read_index_entry(scan, -low_end, sort_keyno, true,
 								&candidate->range_hi, &isnull, &tid, &entries))
 			candidate->range_hi = datumCopy(candidate->range_hi, attr->attbyval,
 											attr->attlen);

@@ -392,15 +392,25 @@ is_heapkeyspace(IndexCandidate *candidate)
 }
 
 /*
+ * is_backward_stream
+ *		Does the index give the query's order when scanned backward?
+ */
+static bool
+is_backward_stream(IndexOptInfo *index, int pos, SortColumn *sort)
+{
+	return index->reverse_sort[pos] != sort->descending;
+}
+
+/*
  * is_usable_btree
- *		A btree whose column at position pos is sorted ascending in the
- *		operator family, input type and collation of the query's sort key, so
- *		that every stream of the merge produces values in the order the query
- *		asks for and they compare alike.  So must the NULLs of a nullable
- *		column, in scan direction: a backward scan reads the other end first.
- *		Whether the duplicates are ordered by TID is checked last, by
- *		is_heapkeyspace, for the sets that pass everything else: it opens the
- *		index.
+ *		A btree whose column at position pos is sorted in the operator family,
+ *		input type and collation of the query's sort key, so that its values
+ *		compare alike with the other streams', and which reads the query's
+ *		order in one scan direction or the other.  So must the NULLs of a
+ *		nullable column: an index with them at the wrong end for that direction
+ *		is no stream.  Whether the duplicates are ordered by TID is checked
+ *		last, by is_heapkeyspace, for the sets that pass everything else: it
+ *		opens the index.
  */
 static bool
 is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
@@ -412,10 +422,9 @@ is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
 		index->sortopfamily[pos] == sort->opfamily &&
 		index->opcintype[pos] == sort->type &&
 		index->indexcollations[pos] == sort->collation &&
-		!index->reverse_sort[pos] &&
 		(sort->notnull ||
-		 (sort->descending ? !index->nulls_first[pos] : index->nulls_first[pos]) ==
-		 sort->nulls_first);
+		 (is_backward_stream(index, pos, sort) ? !index->nulls_first[pos] :
+		  index->nulls_first[pos]) == sort->nulls_first);
 }
 
 /*
@@ -474,6 +483,7 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 													equality.outer_relids);
 	}
 
+	candidate->backward = is_backward_stream(index, sortpos, &search->sort);
 	candidate->entries = lf_index_entries(search->root, search->rti, candidate);
 
 	return true;
@@ -693,6 +703,8 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 										list_copy(streams[i]->operators));
 		cpath->custom_private = lappend(cpath->custom_private,
 										list_copy(streams[i]->collations));
+		cpath->custom_private = lappend(cpath->custom_private,
+										makeBoolConst(streams[i]->backward, false));
 	}
 	for (int i = 0; i < nstreams; i++)
 	{

@@ -603,6 +603,7 @@ Regression tests (`sql/`):
 | `leapfrog_sort_types` | `timestamptz`, `date`, `numeric`, `text` in two collations, `varchar`, `char`, `uuid`, arrays, enums, domains and `real` as sort columns, in both directions; skip-ahead with long text, overflow, generic plans, `LATERAL`; other collations, operator families and input types are no streams |
 | `leapfrog_sort_icu` | a sort column in an ICU collation, deterministic or not; skipped where the database's encoding has none |
 | `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions |
+| `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -763,7 +764,9 @@ Verified against `src/` and the tests.
   in its scan direction. For a column `NOT NULL` according to the planner
   (`RelOptInfo.notnullattnums`) the position of NULLs does not matter, and dead
   index entries with NULL are skipped.
-- Both indexes: nbtree v4, `ASC` columns. `ORDER BY … DESC` is a backward scan.
+- Index columns: nbtree v4, `ASC` or `DESC`, `NULLS FIRST` or `LAST`. Every
+  stream scans in the direction that gives the query's order in its own
+  index, so one node may run them in opposite directions.
 
 **Planner and cost model**
 
@@ -870,7 +873,7 @@ and `deleted_at`.
 | P2 | Memory of non-unique keys | open |
 | P2 | Concurrency tests | **done**: EPQ for both pair kinds, partial outer index, overflow fallback; `INSERT`, `VACUUM` |
 | P2 | Write and storage benchmarks | **done**: `write_bench.sh` |
-| P3 | More types and conditions | **partly**: equality columns of any B-tree type, integer sort columns of every width; other sort types and `IN (…)` open |
+| P3 | More types and conditions | **partly**: equality and sort columns of any B-tree type, nullable sort columns, `DESC` and `NULLS FIRST` indexes; `IN (…)` open |
 
 #### Cost model: distribution of matches along the sort column
 
@@ -960,13 +963,12 @@ backward scans and posting lists to be verified against nbtree first).
 Done: equality columns of any type with a B-tree operator family, with the
 operator looked up in the index column's family and the row rechecks
 (EvalPlanQual, overflow fallback) done with that operator and collation;
-sort columns `smallint`, `integer` and `bigint`. Tested in `leapfrog_types`
-(regression and isolation).
+sort columns of any such type, nullable or not, in indexes of any order. Tested
+in `leapfrog_types`, `leapfrog_sort_types`, `leapfrog_nulls` and
+`leapfrog_index_order` (regression and isolation).
 
-Open: sort columns of other types (`timestamptz`, `numeric`), to be measured
-first, since the merge then compares values through the type's comparison
-function instead of as `int64`; `IN (…)` as several outer scans merged in
-`sortcol` order; composite sort keys. A range on a leading column breaks the
+Open: `IN (…)` as several outer scans merged in `sortcol` order; composite
+sort keys. A range on a leading column breaks the
 `sortcol` order and can only be supported as several per-value scans.
 
 ## Known issues

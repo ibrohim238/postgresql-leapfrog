@@ -18,6 +18,9 @@ versions: [SemVer](https://semver.org/).
   that skipped on a value goes back for the NULLs when they come after the
   values; the NULL group can be a skip's target. The cost model counts the
   null fraction in the overlap of the streams. Tests in `leapfrog_nulls`.
+- `DESC` and `NULLS FIRST` index columns: each stream scans in the direction
+  that gives the query's order in its own index. Tests in
+  `leapfrog_index_order`.
 - Partitioned tables and inheritance: a node per child under a `Merge Append`
   or ordered `Append`. Tests in `leapfrog_partition`.
 - `tests/performance/bitmap_bench.sh`: the node against `BitmapAnd`, stock

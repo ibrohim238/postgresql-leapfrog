@@ -34,13 +34,13 @@
  *		the merge itself needs nothing of it.
  */
 bool
-lf_scan_leaf_position(IndexScanDesc scan, bool descending, BlockNumber *page,
+lf_scan_leaf_position(IndexScanDesc scan, bool backward, BlockNumber *page,
 					  BlockNumber *next_page)
 {
 	BTScanOpaque so = (BTScanOpaque) scan->opaque;
 
 	*page = so->currPos.currPage;
-	*next_page = descending ? so->currPos.prevPage : so->currPos.nextPage;
+	*next_page = backward ? so->currPos.prevPage : so->currPos.nextPage;
 
 	return BTScanPosIsValid(so->currPos);
 }

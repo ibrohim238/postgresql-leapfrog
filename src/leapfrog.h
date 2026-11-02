@@ -64,7 +64,9 @@
 									 * EXPLAIN VERBOSE */
 #define STREAM_PRIVATE_OPERATORS 3	/* OID list: equality operator per key */
 #define STREAM_PRIVATE_COLLATIONS 4 /* OID list: its collation per key */
-#define STREAM_PRIVATE_COUNT	5
+#define STREAM_PRIVATE_BACKWARD 5	/* the index reads the query's order
+									 * backward */
+#define STREAM_PRIVATE_COUNT	6
 #define STREAM_EXPRS_KEYS		0
 #define STREAM_EXPRS_PRED		1
 #define STREAM_EXPRS_COUNT		2
@@ -145,6 +147,7 @@ typedef struct IndexCandidate
 	List	   *collations;		/* OIDs: its collation per column */
 	Relids		required_outer;
 	int			sortpos;
+	bool		backward;		/* scan direction giving the query's order */
 	double		entries;		/* entries matching the equalities */
 	int			heapkeyspace;
 	int			range_known;	/* -1 not probed yet, 0 cannot be probed */
@@ -186,7 +189,7 @@ extern void lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
 							  Oid collation, bool descending);
 extern void lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys,
 								SortBound kind, Datum bound);
-extern bool lf_scan_leaf_position(IndexScanDesc scan, bool descending,
+extern bool lf_scan_leaf_position(IndexScanDesc scan, bool backward,
 								  BlockNumber *page, BlockNumber *next_page);
 extern bool lf_read_index_entry(IndexScanDesc scan, ScanDirection dir,
 								int attno, bool skip_nulls, Datum *value,
