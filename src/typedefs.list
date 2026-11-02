@@ -5,7 +5,9 @@ IndexEquality
 IndexStream
 IntersectScanState
 IntersectSearch
+PlannerTrace
 SkipAhead
 SortBound
 SortColumn
 SortCompareKind
+SortStats

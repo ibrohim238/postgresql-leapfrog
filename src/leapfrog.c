@@ -107,6 +107,8 @@ PG_MODULE_MAGIC_EXT(
 bool		intersect_enabled = true;
 bool		intersect_force = false;
 int			intersect_skip_after = INTERSECT_SKIP_AFTER;
+bool		intersect_trace_planner = false;
+PlannerTrace lf_trace;
 int			intersect_max_streams = 4;
 int			intersect_min_streams = 2;
 
@@ -131,6 +133,17 @@ _PG_init(void)
 							 true,
 							 PGC_USERSET,
 							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("leapfrog.trace_planner",
+							 "Reports what planning an Index Merge Intersect did.",
+							 "A developer setting: the tests check the work of the planner by these counts.",
+							 &intersect_trace_planner,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
 							 NULL,
 							 NULL,
 							 NULL);

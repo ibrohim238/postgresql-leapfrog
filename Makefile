@@ -47,7 +47,8 @@ REGRESS = \
 	leapfrog_sort_icu \
 	leapfrog_nulls \
 	leapfrog_index_order \
-	leapfrog_merge_order
+	leapfrog_merge_order \
+	leapfrog_planner
 
 ISOLATION = \
 	leapfrog_concurrent_update \

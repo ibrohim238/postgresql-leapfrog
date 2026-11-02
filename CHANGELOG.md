@@ -37,6 +37,13 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- Planning: the share of a sort range comes from the column's statistics, read
+  once per relation, instead of a selectivity call each time, which read and
+  detoasted them again; a stream that cannot pay for itself is not costed or
+  probed; the correlation is read once per index. With 6 equalities and 10
+  indexes the node adds 0.07 ms to planning instead of 0.59. Shares can differ
+  from the selectivity functions', within a histogram bin. `leapfrog.trace_planner`
+  reports the counts. Tests in `leapfrog_planner`; numbers in BENCHMARKS.md.
 - The planner and the merge follow a MySQL index merge. One pass over the
   candidates, fewest entries first, keeps the cheapest set, instead of every
   pair and a greedy growth from the cheapest. The streams catch up with a

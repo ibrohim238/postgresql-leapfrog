@@ -5,6 +5,8 @@ extension that lets the planner combine general B-tree indexes at query time
 — `(customer_id, id)` with `(product_id, id)`, or with a shared
 `(id) WHERE deleted_at IS NULL` — into one ordered stream, so that a table does
 not need a dedicated composite or partial index for every filter combination.
+No query changes: the planner picks the node where it is cheaper, per query and
+with the current statistics, and `leapfrog.enabled = off` turns it off.
 
 Status: **experimental (0.0.3)**. The executor is covered by regression and
 isolation tests that compare every result with the stock plans
@@ -506,6 +508,7 @@ replaces the file instead of rewriting it.
 | `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search. |
 | `leapfrog.min_indexes` | `2` | `USERSET` | Developer setting: smaller sets are not offered and the set that reaches the size is offered whatever its cost, so that a larger set can be run against the stock plans (the tests use it). Not in `postgresql.conf.sample`. |
 | `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by `tests/performance/skip_bench.sh`; not in `postgresql.conf.sample`. |
+| `leapfrog.trace_planner` | `off` | `USERSET` | Developer setting: a `NOTICE` with what planning did (candidates, sets costed, range scans, statistics reads, fallbacks, correlations, candidates pruned); the tests check the planner by these counts. |
 
 The node is costed with PostgreSQL's own page and CPU costs, so the usual
 tuning applies. In particular, with the default `random_page_cost = 4` (spinning
@@ -608,6 +611,7 @@ Regression tests (`sql/`):
 | `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions |
 | `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 | `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
+| `leapfrog_planner` | by the counts of `leapfrog.trace_planner`: statistics, ranges and correlations read once, a stream that cannot pay for itself pruned; the estimate from the statistics read once, also inside one histogram bin |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -782,39 +786,33 @@ Verified against `src/` and the tests.
   query that uses 2 of them, 48 are dropped this way and never costed,
   probed or combined.
 
-  The expensive work — reading each candidate's sort range from its B-tree,
-  the histogram lookups, costing the sets — is done only for the remaining
-  candidates. Every pair of candidates is costed; only the cheapest pair is
-  then grown, one stream per round, so a set of k streams costs k − 2 more
-  rounds over the candidates, not every combination.
+  The expensive work — reading each candidate's sort range from its B-tree and
+  costing the sets — is done only for the streams of the one pass over the
+  candidates, at most `leapfrog.max_indexes` of them, and not for a stream that
+  cannot pay for itself: when the current set, less all it spends on the heap,
+  plus the stream's descent and one leaf page is no cheaper than the cheapest
+  set so far. That leaves out what a narrower overlap of the ranges could save,
+  which only the probe would tell.
 
-  Measured with `tests/performance/planning_bench.sh` (median of 100 plans,
-  20,000 rows, constants in the query, laptop). Every query also has
+  Measured with `tests/performance/planning_bench.sh` (median of 200 plans,
+  20,000 rows, constants in the query). Every query also has
   `deleted_at IS NULL`, so the indexes it can use are one per equality plus
-  `(id) WHERE deleted_at IS NULL`. That column is what the time follows; the
-  number of indexes on the table barely changes it:
+  `(id) WHERE deleted_at IS NULL`:
 
   | Indexes on the table | Equalities | Indexes the query can use | Stock, ms | With leapfrog, ms |
   |---:|---:|---:|---:|---:|
-  | 10 | 1 | 2 | 0.05 | 0.27 |
-  | 50 | 1 | 2 | 0.13 | 0.25 |
-  | 10 | 2 | 3 | 0.10 | 0.35 |
-  | 50 | 2 | 3 | 0.15 | 0.30 |
-  | 10 | 6 | 7 | 0.11 | 0.86 |
-  | 50 | 6 | 7 | 0.19 | 0.94 |
+  | 10 | 1 | 2 | 0.04 | 0.07 |
+  | 50 | 1 | 2 | 0.11 | 0.14 |
+  | 10 | 2 | 3 | 0.05 | 0.10 |
+  | 50 | 2 | 3 | 0.12 | 0.17 |
+  | 10 | 6 | 7 | 0.07 | 0.15 |
+  | 50 | 6 | 7 | 0.16 | 0.26 |
 
-  Where the time goes, from a profile of one plan on another table: 4
-  equalities and `deleted_at IS NULL`, 5 usable indexes (the primary key
-  passes the metadata check too but forms no set), 16 pairs and 5 larger
-  sets costed. Of the 0.66 ms leapfrog adds, 0.17 ms read the candidates'
-  sort ranges from their B-trees, 0.40 ms turn those ranges into shares of
-  the table through the histogram, 0.04 ms cost all 21 sets, and the
-  metadata loop over all of the table's indexes takes 0.003 ms. A generic
-  plan, whose parameters leave no range to read, adds 0.06 ms with the same
-  candidates. Timings vary up to 2× between runs.
-
-  The previous version recomputed the histogram shares for every pair:
-  with 7 usable indexes it took 5.2 ms (10 on the table) and 2.7 ms (50).
+  Most of what remains is reading the sort ranges from the B-trees. The share of
+  a range comes from the column's histogram and most common values, read once per
+  relation, not from a selectivity call each time; the selectivity functions
+  answer when the statistics are not in the query's order or the range lies
+  inside one bin of a type that cannot interpolate. BENCHMARKS.md, "Planning".
 - Only the first key of the query's `ORDER BY` is considered.
 - The cost model is conservative. On the 1M-row benchmark (192 queries,
   `tests/performance/choices.sql`) the planner picks the node 2 times at
@@ -951,10 +949,10 @@ soft-delete rate) the planner keeps the pair and the `Filter`. Measured in
 
 Done: indexes are checked once per relation and only those the query can use
 go on to costing; `ndistinct`, correlation, nbtree version, sort ranges and
-their shares are cached per index. Planning time is measured on tables with
-10, 20 and 50 indexes and follows the number the query can use, not the
-table's total. Open: the histogram shares of the sort ranges (most of what
-remains), and useful pathkeys beyond the query's `ORDER BY`.
+their shares are cached per index, the statistics per relation. Planning time
+is measured on tables with 10, 20 and 50 indexes and follows the number the query
+can use, not the table's total. Open: the range probes (most of what remains),
+and useful pathkeys beyond the query's `ORDER BY`.
 
 #### Memory of non-unique keys
 

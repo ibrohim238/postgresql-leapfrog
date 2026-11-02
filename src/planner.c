@@ -453,6 +453,7 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 	candidate->required_outer = NULL;
 	candidate->heapkeyspace = -1;
 	candidate->range_known = -1;
+	candidate->correlation = -2.0;
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{
@@ -606,7 +607,7 @@ is_inner_candidate(IndexCandidate **streams, int nstreams,
  */
 static CustomPath *
 build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
-					 int nstreams, double correlation)
+					 int nstreams, Cost *fetch_cost, double correlation)
 {
 	PlannerInfo *root = search->root;
 	RelOptInfo *rel = search->rel;
@@ -663,7 +664,8 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 
 	lf_cost_intersect_path(cpath, root, search->rte, &search->sort,
 						   streams, nstreams, search->ndistinct, correlation,
-						   reads, ranks);
+						   reads, ranks, fetch_cost);
+	lf_trace.sets++;
 
 	/*
 	 * A CustomPath has no custom_exprs; the value expressions and the index
@@ -758,7 +760,8 @@ candidate_entries_cmp(const void *a, const void *b)
  *		have to stay in the Filter.
  */
 static CustomPath *
-build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams)
+build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams,
+			   Cost *fetch_cost)
 {
 	IndexCandidate *ordered[INTERSECT_MAX_STREAMS];
 	int			outer = 0;
@@ -772,10 +775,13 @@ build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams)
 	ordered[0] = streams[outer];
 	ordered[outer] = streams[0];
 
-	return build_intersect_path(search, ordered, nstreams,
-								lf_outer_index_correlation(search->root,
-														   search->rti,
-														   ordered[0]->index));
+	if (ordered[0]->correlation < -1.5)
+		ordered[0]->correlation = lf_outer_index_correlation(search->root,
+															 search->rti,
+															 ordered[0]->index);
+
+	return build_intersect_path(search, ordered, nstreams, fetch_cost,
+								ordered[0]->correlation);
 }
 
 /*
@@ -795,6 +801,8 @@ search_intersection(IntersectSearch *search, bool plain_only)
 	int			nstreams = 0;
 	CustomPath *best = NULL;
 	Cost		best_cost = 0;
+	Cost		fetch_cost = 0;
+	Cost		last_cost = 0;
 
 	for (int j = 0; j < search->ncandidates &&
 		 nstreams < intersect_max_streams; j++)
@@ -812,11 +820,29 @@ search_intersection(IntersectSearch *search, bool plain_only)
 		if (!is_inner_candidate(streams, nstreams, candidate))
 			continue;
 
+		/*
+		 * A stream saves at most the rows fetched from the heap and adds at
+		 * least its descent and a leaf page.  When the set cannot get below
+		 * the cheapest one that way, the costing and the range probe of this
+		 * stream are of no use.  There is no cheapest set before
+		 * leapfrog.min_indexes is reached.  This leaves out what a narrower
+		 * overlap of the ranges could save on the other streams, which only
+		 * the probe would tell.
+		 */
+		if (best != NULL &&
+			last_cost - fetch_cost + lf_stream_min_cost(candidate->index) >=
+			best_cost)
+		{
+			lf_trace.pruned++;
+			continue;
+		}
+
 		streams[nstreams] = candidate;
-		cpath = build_set_path(search, streams, nstreams + 1);
+		cpath = build_set_path(search, streams, nstreams + 1, &fetch_cost);
 		if (cpath == NULL)
 			continue;
 		nstreams++;
+		last_cost = cpath->path.total_cost;
 
 		if (nstreams >= intersect_min_streams &&
 			(best == NULL || cpath->path.total_cost < best_cost))
@@ -888,6 +914,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			search.sort.notnull = is_notnull_column(rel, attno);
 			search.sort.null_frac = -1.0;
 			search.sort.range_ssup_ready = false;
+			search.sort.stats = NULL;
 			break;
 		}
 	}
@@ -902,6 +929,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	search.candidates = palloc(list_length(rel->indexlist) *
 							   sizeof(IndexCandidate));
 	search.ncandidates = 0;
+	memset(&lf_trace, 0, sizeof(lf_trace));
 	foreach(lc, rel->indexlist)
 	{
 		IndexCandidate *candidate = &search.candidates[search.ncandidates];
@@ -925,6 +953,14 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			break;
 		}
 	}
+
+	lf_trace.candidates = search.ncandidates;
+	if (intersect_trace_planner)
+		elog(NOTICE,
+			 "leapfrog planner: %d candidates, %d sets, %d range scans, %d statistics reads, %d range fallbacks, %d correlations, %d pruned",
+			 lf_trace.candidates, lf_trace.sets, lf_trace.range_scans,
+			 lf_trace.stat_loads, lf_trace.range_fallbacks,
+			 lf_trace.correlations, lf_trace.pruned);
 
 	pfree(search.candidates);
 }

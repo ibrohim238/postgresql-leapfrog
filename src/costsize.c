@@ -47,6 +47,7 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "parser/parse_oper.h"
 #include "parser/parsetree.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -113,6 +114,7 @@ lf_outer_index_correlation(PlannerInfo *root, Index rti, IndexOptInfo *outer)
 {
 	double		correlation;
 
+	lf_trace.correlations++;
 	correlation = column_correlation(root, rti, outer->indexkeys[0]);
 	if (outer->nkeycolumns > 1)
 		correlation *= 0.75;
@@ -329,6 +331,20 @@ descent_cost(IndexOptInfo *index)
 }
 
 /*
+ * lf_stream_min_cost
+ *		The least a stream adds to a set: its descent and one leaf page.
+ */
+Cost
+lf_stream_min_cost(IndexOptInfo *index)
+{
+	double		spc_random_page_cost;
+
+	get_tablespace_page_costs(index->reltablespace, &spc_random_page_cost, NULL);
+
+	return descent_cost(index) + spc_random_page_cost;
+}
+
+/*
  * merge_read_cost
  *		Cost of reading the index streams through the merge, with the
  *		skip-ahead of find_common_value.  reads[] holds the entries of each
@@ -478,6 +494,7 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 	/* the planner holds locks on the table and its indexes */
 	heap = table_open(rte->relid, NoLock);
 	index = index_open(candidate->index->indexoid, NoLock);
+	lf_trace.range_scans++;
 	scan = lf_index_beginscan(heap, index, SnapshotAny, keys.nequal + 1);
 	scan->xs_want_itup = true;
 
@@ -559,6 +576,202 @@ sortcol_range_selectivity(PlannerInfo *root, Index rti, SortColumn *sort,
 }
 
 /*
+ * range_compare
+ *		Compare two sortcol values in ascending order, in the query's
+ *		collation.
+ */
+static int
+range_compare(SortColumn *sort, Datum a, Datum b)
+{
+	if (!sort->range_ssup_ready)
+	{
+		Oid			lt = get_opfamily_member(sort->opfamily, sort->type, sort->type,
+											 BTLessStrategyNumber);
+
+		memset(&sort->range_ssup, 0, sizeof(SortSupportData));
+		sort->range_ssup.ssup_cxt = CurrentMemoryContext;
+		sort->range_ssup.ssup_collation = sort->collation;
+		PrepareSortSupportFromOrderingOp(lt, &sort->range_ssup);
+		sort->range_ssup_ready = true;
+	}
+
+	return ApplySortComparator(a, false, b, false, &sort->range_ssup);
+}
+
+/*
+ * sort_stats
+ *		The sort column's statistics, read on first use.  The histogram and the
+ *		most common values are in the column's default order and collation, and
+ *		serve only a query that sorts in those.
+ */
+static SortStats *
+sort_stats(PlannerInfo *root, Index rti, SortColumn *sort)
+{
+	SortStats  *stats;
+	Var		   *var;
+	VariableStatData vardata;
+	Oid			sortop;
+	Oid			eqop;
+	AttStatsSlot hist;
+	AttStatsSlot mcv;
+	double		mcv_total = 0.0;
+	double		null_frac;
+
+	if (sort->stats != NULL)
+		return sort->stats;
+
+	lf_trace.stat_loads++;
+	stats = palloc0(sizeof(SortStats));
+	sort->stats = stats;
+	var = column_var(root, rti, sort->attno);
+	examine_variable(root, (Node *) var, 0, &vardata);
+	if (!HeapTupleIsValid(vardata.statsTuple))
+	{
+		ReleaseVariableStats(vardata);
+		return stats;
+	}
+
+	get_sort_group_operators(var->vartype, true, false, false, &sortop, &eqop,
+							 NULL, NULL);
+	null_frac = ((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;
+
+	if (sortop == get_opfamily_member(sort->opfamily, sort->type, sort->type,
+									  BTLessStrategyNumber) &&
+		get_attstatsslot(&hist, vardata.statsTuple, STATISTIC_KIND_HISTOGRAM,
+						 sortop, ATTSTATSSLOT_VALUES) &&
+		hist.nvalues >= 2 && hist.stacoll == sort->collation)
+	{
+		stats->hist = hist.values;
+		stats->nhist = hist.nvalues;
+		stats->usable = true;
+		if (get_attstatsslot(&mcv, vardata.statsTuple, STATISTIC_KIND_MCV,
+							 InvalidOid,
+							 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+		{
+			if (mcv.stacoll == sort->collation)
+			{
+				stats->mcv = mcv.values;
+				stats->mcv_freq = mcv.numbers;
+				stats->nmcv = mcv.nvalues;
+				for (int i = 0; i < mcv.nvalues; i++)
+					mcv_total += mcv.numbers[i];
+			}
+			else
+				stats->usable = false;
+		}
+		stats->hist_frac = Max(1.0 - null_frac - mcv_total, 0.0);
+
+		/* the comparators that compare plain integers */
+		range_compare(sort, stats->hist[0], stats->hist[0]);
+#if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
+		if (sort->range_ssup.comparator == ssup_datum_signed_cmp)
+		{
+			stats->interpolate = true;
+			stats->signed64 = true;
+		}
+#endif
+		if (sort->range_ssup.comparator == ssup_datum_int32_cmp)
+			stats->interpolate = true;
+	}
+
+	ReleaseVariableStats(vardata);
+
+	return stats;
+}
+
+/*
+ * histogram_position
+ *		Share of the histogram's rows below the value, and in *bin the bin it
+ *		falls in.  Within a bin by value for integers, its middle for the rest.
+ */
+static double
+histogram_position(SortColumn *sort, SortStats *stats, Datum value, int *bin)
+{
+	int			lo = 0;
+	int			hi = stats->nhist - 1;
+	double		within = 0.5;
+
+	if (range_compare(sort, value, stats->hist[0]) < 0)
+	{
+		*bin = -1;
+		return 0.0;
+	}
+	if (range_compare(sort, value, stats->hist[hi]) >= 0)
+	{
+		*bin = stats->nhist;
+		return 1.0;
+	}
+
+	while (hi - lo > 1)
+	{
+		int			mid = (lo + hi) / 2;
+
+		if (range_compare(sort, value, stats->hist[mid]) < 0)
+			hi = mid;
+		else
+			lo = mid;
+	}
+	*bin = lo;
+
+	if (stats->interpolate)
+	{
+		double		a = stats->signed64 ? (double) DatumGetInt64(stats->hist[lo]) :
+			(double) DatumGetInt32(stats->hist[lo]);
+		double		b = stats->signed64 ? (double) DatumGetInt64(stats->hist[hi]) :
+			(double) DatumGetInt32(stats->hist[hi]);
+		double		v = stats->signed64 ? (double) DatumGetInt64(value) :
+			(double) DatumGetInt32(value);
+
+		if (b > a)
+			within = (v - a) / (b - a);
+	}
+
+	return (lo + within) / (stats->nhist - 1);
+}
+
+/*
+ * sortcol_range_share
+ *		Share of the table's rows with lo <= sortcol <= hi.  From the statistics
+ *		read once when they can tell; otherwise, and for a range inside one bin
+ *		of a type without interpolation, by the selectivity functions.
+ */
+static Selectivity
+sortcol_range_share(PlannerInfo *root, Index rti, SortColumn *sort, Datum lo,
+					Datum hi)
+{
+	SortStats  *stats = sort_stats(root, rti, sort);
+	int			lo_bin;
+	int			hi_bin;
+	double		lo_pos;
+	double		hi_pos;
+	double		share;
+
+	if (!stats->usable)
+	{
+		lf_trace.range_fallbacks++;
+		return sortcol_range_selectivity(root, rti, sort, lo, hi);
+	}
+
+	lo_pos = histogram_position(sort, stats, lo, &lo_bin);
+	hi_pos = histogram_position(sort, stats, hi, &hi_bin);
+	if (lo_bin == hi_bin && !stats->interpolate)
+	{
+		lf_trace.range_fallbacks++;
+		return sortcol_range_selectivity(root, rti, sort, lo, hi);
+	}
+
+	share = stats->hist_frac * Max(hi_pos - lo_pos, 0.0);
+	for (int i = 0; i < stats->nmcv; i++)
+	{
+		if (range_compare(sort, stats->mcv[i], lo) >= 0 &&
+			range_compare(sort, stats->mcv[i], hi) <= 0)
+			share += stats->mcv_freq[i];
+	}
+
+	return Max(Min(share, 1.0), 1e-10);
+}
+
+/*
  * sortcol_null_frac
  *		Share of the table's rows with a NULL in the sort column, from its
  *		statistics; 0 for a NOT NULL column.
@@ -583,29 +796,6 @@ sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)
 	}
 
 	return sort->null_frac;
-}
-
-/*
- * range_compare
- *		Compare two sortcol values in ascending order, in the query's
- *		collation.
- */
-static int
-range_compare(SortColumn *sort, Datum a, Datum b)
-{
-	if (!sort->range_ssup_ready)
-	{
-		Oid			lt = get_opfamily_member(sort->opfamily, sort->type, sort->type,
-											 BTLessStrategyNumber);
-
-		memset(&sort->range_ssup, 0, sizeof(SortSupportData));
-		sort->range_ssup.ssup_cxt = CurrentMemoryContext;
-		sort->range_ssup.ssup_collation = sort->collation;
-		PrepareSortSupportFromOrderingOp(lt, &sort->range_ssup);
-		sort->range_ssup_ready = true;
-	}
-
-	return ApplySortComparator(a, false, b, false, &sort->range_ssup);
 }
 
 /*
@@ -688,15 +878,15 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 			continue;
 		}
 		if (stream->range_sel < 0)
-			stream->range_sel = sortcol_range_selectivity(root, rti, sort,
-														  stream->range_lo,
-														  stream->range_hi);
+			stream->range_sel = sortcol_range_share(root, rti, sort,
+													stream->range_lo,
+													stream->range_hi);
 		if (!empty && range_compare(sort, stream->range_lo, lo) == 0 &&
 			range_compare(sort, stream->range_hi, hi) == 0)
 			table_share = stream->range_sel;
 	}
 	if (table_share < 0)
-		table_share = sortcol_range_selectivity(root, rti, sort, lo, hi);
+		table_share = sortcol_range_share(root, rti, sort, lo, hi);
 	table_share += null_frac;
 
 	for (int i = 0; i < nstreams; i++)
@@ -777,14 +967,15 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		lf_sortcol_ndistinct, correlation
  *		lf_outer_index_correlation of the outer index.  Returns in reads[]
  *		the entries each stream is expected to read, for EXPLAIN VERBOSE, and
- *		in ranks[] its turn in the merge.
+ *		in ranks[] its turn in the merge, and in *fetch_cost what the rows
+ *		fetched from the heap cost: all a further stream can save.
  */
 void
 lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 					   RangeTblEntry *rte, SortColumn *sort,
 					   IndexCandidate **streams, int nstreams,
 					   double ndistinct, double correlation, double *reads,
-					   int *ranks)
+					   int *ranks, Cost *fetch_cost)
 {
 	RelOptInfo *rel = cpath->path.parent;
 	ParamPathInfo *param_info = cpath->path.param_info;
@@ -839,10 +1030,10 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	for (int i = 1; i < nstreams; i++)
 		run_cost += group_cost(reads[0], reads[i],
 							   Max(1.0, streams[i]->entries / ndistinct));
-	run_cost += heap_fetch_cost(root, rel, fetched, loop_count, correlation,
-								pages_scanned) +
-		fetched * (cpu_tuple_cost + qpqual_cost.per_tuple) +
-		matches * rel->reltarget->cost.per_tuple;
+	*fetch_cost = heap_fetch_cost(root, rel, fetched, loop_count, correlation,
+								  pages_scanned) +
+		fetched * (cpu_tuple_cost + qpqual_cost.per_tuple);
+	run_cost += *fetch_cost + matches * rel->reltarget->cost.per_tuple;
 	for (int i = 0; i < nstreams; i++)
 	{
 		if (shares[i] < 1.0)
