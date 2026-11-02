@@ -19,6 +19,27 @@ versions: [SemVer](https://semver.org/).
   Scan at 0.1 ms. Startup now counts that group, the value being known from the
   range probe and its share from the most common values; the total cost does not
   change. Test in `leapfrog_planner`; numbers in BENCHMARKS.md.
+- Cost model: the charge for the first group looked only at the value at the very
+  end of the overlap, so one row or dead entry ahead of a common value hid it. It
+  now takes the largest group within the share of the overlap before the rows
+  wanted, by the `LIMIT` of a query on the relation alone.
+- Cost model: generic plans and parameterized paths kept the old charge, with no
+  probe to tell the value: the overlap is now taken for the whole column, as in
+  the rest of their costing, and the NULLs that come first count without a probe.
+- Cost model: the share of the group in a stream was that of the table; a stream
+  with a narrow range holds more of it. A value or NULLs some stream does not hold
+  are passed, as the merge passes them, and such a value is looked up in the index.
+- Cost model: the groups of the NULLs and the most common values inside the overlap
+  count at their own size, not the average, in sorting; one that overflows
+  `work_mem` is not sorted, and fetching the outer entries of its value counts.
+- Cost model: a partial index that rules out the NULLs of the sort column is not
+  charged for their group, nor charged for their share of its entries.
+- Cost model: a value out of the most common ones holds its share of what they and
+  the NULLs leave, not 1/ndistinct. The charge has no floor of a page per stream,
+  which a unique sort column paid for nothing.
+- Planner: the set quickest to its first row is offered next to the cheapest: a
+  stream that lowered the total but added a first group decided for a `LIMIT` too.
+  Tests of all of these in `leapfrog_first_group`; numbers in BENCHMARKS.md.
 
 ## [0.0.4] — 2026-11-02
 

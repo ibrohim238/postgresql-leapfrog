@@ -454,6 +454,8 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 	candidate->heapkeyspace = -1;
 	candidate->range_known = -1;
 	candidate->correlation = -2.0;
+	candidate->holds_nulls = -1;
+	candidate->group_probes = NIL;
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{
@@ -788,11 +790,13 @@ build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams,
  * search_intersection
  *		One pass over the candidates, as get_best_ror_intersect in MySQL: a
  *		stream joins the set when it adds a restriction, even if the set costs
- *		more with it, and the cheapest set seen is offered.  A set smaller than
- *		leapfrog.min_indexes is not offered, and the first to reach it is
- *		whatever its cost: that lets a test run a larger set against the stock
- *		plans.  With plain_only the candidates that need a parameter stay out,
- *		so that the unparameterized set has its own chance.
+ *		more with it, and the cheapest set seen is offered, along with the one
+ *		quickest to its first row when that is another: a stream that lowers the
+ *		total can make the query wait for one more first group, which a LIMIT
+ *		pays for.  A set smaller than leapfrog.min_indexes is not offered, and
+ *		the first to reach it is whatever its cost: that lets a test run a larger
+ *		set against the stock plans.  With plain_only the candidates that need a
+ *		parameter stay out, so that the unparameterized set has its own chance.
  */
 static void
 search_intersection(IntersectSearch *search, bool plain_only)
@@ -800,6 +804,7 @@ search_intersection(IntersectSearch *search, bool plain_only)
 	IndexCandidate *streams[INTERSECT_MAX_STREAMS];
 	int			nstreams = 0;
 	CustomPath *best = NULL;
+	CustomPath *quickest = NULL;
 	Cost		best_cost = 0;
 	Cost		fetch_cost = 0;
 	Cost		last_cost = 0;
@@ -850,8 +855,14 @@ search_intersection(IntersectSearch *search, bool plain_only)
 			best = cpath;
 			best_cost = cpath->path.total_cost;
 		}
+		if (nstreams >= intersect_min_streams &&
+			(quickest == NULL ||
+			 cpath->path.startup_cost < quickest->path.startup_cost))
+			quickest = cpath;
 	}
 
+	if (quickest != NULL && quickest != best)
+		add_intersect_path(search->rel, quickest);
 	if (best != NULL)
 		add_intersect_path(search->rel, best);
 }

@@ -125,6 +125,8 @@ typedef struct SortStats
 	Datum	   *mcv;
 	float4	   *mcv_freq;
 	int			nmcv;
+	int		   *mcv_order;		/* positions in mcv, by ascending value */
+	double		mcv_total;		/* share of the rows the mcv stand for */
 	double		hist_frac;		/* share of the rows the histogram stands for */
 } SortStats;
 
@@ -178,6 +180,9 @@ typedef struct IndexCandidate
 	Selectivity range_sel;		/* table share inside the range, -1 until
 								 * computed */
 	double		correlation;	/* of the leading column, -2 until looked up */
+	int			holds_nulls;	/* NULLs of sortcol can be in the index, -1
+								 * until looked up */
+	List	   *group_probes;	/* GroupProbe: values looked up in the index */
 } IndexCandidate;
 
 /* What one planning did, for leapfrog.trace_planner. */

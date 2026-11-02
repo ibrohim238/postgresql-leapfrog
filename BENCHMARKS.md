@@ -662,6 +662,50 @@ in median, cost 0.95-1.17. `run.sh`: 1.00 in median. Three cases (`uniform`, 10 
 deleted, deleted rows, `LIMIT 100`) change plan between runs in both builds.
 `planning_bench.sh`: no change above the spread between runs.
 
+## First group behind a row, in a generic plan (against `b03a8d9`)
+
+`SELECT * … WHERE user_id = 7 AND status = 2 ORDER BY created_at DESC LIMIT 100`,
+1.2M rows, `user_id` 50 values, `status` 4, indexes `(user_id, created_at)` and
+`(status, created_at)`, data in memory, ABBA, the median of 7 of each run, ms, the
+planner's choice:
+
+| `created_at` | `b03a8d9` | Change |
+|---|---:|---:|
+| 1M rows on the newest value, one row ahead of them | 3.8, 5.7 (node, 103 buffers) | 0.14, 0.14 (Index Scan, 144 buffers) |
+| 1M rows on the newest value, generic plan | 6.6, 5.5 (node, 103 buffers) | 0.23, 0.21 (Index Scan, 144 buffers) |
+| The same, one row ahead of them | 6.6, 6.1 (node, 103 buffers) | 0.21, 0.22 (Index Scan, 144 buffers) |
+| 1M rows on the newest value | 6.6, 6.6 (node, 103 buffers) | 0.17, 0.17 (Index Scan, 144 buffers) |
+| unique, `LIMIT 100` | 0.69, 0.66 (node, 89 buffers) | 0.54, 0.57 (node, 89 buffers) |
+| unique, `LIMIT 1` | 0.03, 0.03 (Index Scan) | 0.04, 0.03 (Index Scan) |
+
+The fourth row is near the point where `b03a8d9` changes plan: on another `ANALYZE`
+sample of the same data it chose the Index Scan (0.17-0.23 ms).
+
+With `shared_buffers` emptied by a restart before each query (the median of 5, the
+files still in the page cache of the system): 8.8, 9.2 against 3.0, 3.2 with a row
+ahead; 8.8, 8.9 against 3.1, 3.0 on the value alone; unique 2.6, 2.5 against 2.4, 2.4.
+
+With rows 60 bytes wider and `user_id` of 1,000 values, measured before the groups
+further on were costed, neither build left the node (7-13 ms, 186 buffers, against
+an Index Scan of more buffers): reading the outer stream through that value is the
+time there, the case of "slower with the data in memory" above. No group overflowed
+in any of these.
+
+`cost_bench.sh` (32 queries, ABBA, a database per build): the node's buffers do not
+change, the median time of the planner's choice is 0.77, 0.79 against 0.80, 0.81 ms.
+One choice differs: `customer+deleted`, `desc 10`, left in one of the two runs of the
+change and kept in the other (the two plans cost within a few units); a run of a build
+loads its data anew.
+
+`run.sh` (1M rows, 10 % deleted, 44 rows of the summary, ABBA): 1.00-1.02 of `b03a8d9`
+in median in every column, and no query apart by more than 30 % in both runs above
+0.2 ms. `planning_bench.sh` (100 repeats, ABBA), time on minus time off, 6 equalities,
+ms: 10 indexes 0.168, 0.130 against 0.183, 0.179; 20 indexes 0.117, 0.082 against
+0.182, 0.176; 50 indexes 0.083, 0.087 against 0.085, 0.091. The time off, which the
+change cannot affect, moves as much between runs with 20 indexes (0.114-0.225), so
+this bounds the cost and does not settle it. These tables have no common values
+to look up.
+
 ## Not done
 
 - 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).
