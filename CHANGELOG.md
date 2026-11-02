@@ -5,6 +5,14 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.4] — 2026-11-02
+
+Still experimental. The shared library changes; the SQL functions do not:
+`ALTER EXTENSION leapfrog UPDATE` after installing the new files (the update
+script `leapfrog--0.0.3--0.0.4.sql` is empty). Reload or restart the backends
+so that they load the new library. Plans change: which index is the outer one, and
+sets that were not possible before.
+
 ### Added
 
 - README: the node against a self join written by hand.
@@ -470,7 +478,8 @@ output may still change.
   end of the `ExecScan` call. Replaced with `ExecQualAndReset`.
 - A shadowed variable declaration (`-Wshadow=compatible-local`).
 
-[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.3...HEAD
+[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.4...HEAD
+[0.0.4]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/ibrohim238/postgresql-leapfrog/releases/tag/v0.0.1
