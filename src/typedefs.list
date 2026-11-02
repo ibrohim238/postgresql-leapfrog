@@ -9,3 +9,4 @@ IntersectSearch
 SkipAhead
 SortBound
 SortColumn
+SortCompareKind

@@ -12,7 +12,9 @@ versions: [SemVer](https://semver.org/).
   with the comparator of the query's sort key. Every stream's index column
   must be in that key's operator family, input type and collation. The
   by-reference value of a group and the bound of a skip are copied, as the
-  stream they came from moves on. Tests in `leapfrog_sort_types`.
+  stream they came from moves on. Types that compare as plain integers
+  (`bigint`, `integer`, `timestamptz`, `date` …) do it inline. Tests in
+  `leapfrog_sort_types`.
 - Nullable sort columns, in all four `ASC/DESC × NULLS FIRST/LAST` orders. A
   NULL is a value of the merge and its group is intersected by TID. A stream
   that skipped on a value goes back for the NULLs when they come after the

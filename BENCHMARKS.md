@@ -549,6 +549,41 @@ in both builds. The other two stay on the bitmap in both `f30cf7a` runs and
 take the node in one of the two runs of the change, so the change may tip such
 near-equal costs; two runs per build do not settle it.
 
+## Sort columns of any type (against `f30cf7a`)
+
+The merge compares `Datum`s instead of `int64`, on a `bigint` sort column here.
+PostgreSQL 18.6, one container, the two builds in ABBA order (`f30cf7a`, change,
+change, `f30cf7a`); each run loads its data and runs `ANALYZE` again. With the
+core comparator called through its pointer the node took 9 % longer (median,
+`cost_bench.sh`); so the types that compare as plain integers do it inline
+(`compare_values`), which gives the numbers below.
+
+`cost_bench.sh` (1M rows, 32 queries, 9 repeats, the node forced):
+
+| | Result |
+|---|---|
+| Queries where the planner's choice differs between the builds | 0 of 32 |
+| Queries with other shared buffers | 0 of 32 |
+| Median time, change / `f30cf7a`, median over the queries | 1.04 |
+| The same, range over the queries | 0.65–1.21 |
+| The stock plans under the same comparison, median and range | 0.96, 0.74–1.35 |
+
+The full merges of about 100,000 entries pay the most: `region0+deleted`
+7.9–8.4 ms against 8.7–8.8 (+8 %), `region5+archived` 5.1–5.2 against 6.1–6.2
+(+19 %), `region9+customer` 5.0–5.2 against 5.5 (+8 %), with the same buffers.
+The spread of the stock plans shows how much of the range is noise; the medians
+of the heavy merges are not.
+
+`run.sh` (1M rows, `uniform` and `skewed`, 10 and 50 % deleted, `LIMIT 100` and
+none, 48 cases of strategy B, 5 repeats per run): median `exec_ms` 1.06 of
+`f30cf7a`, range 0.88–1.13; on the two cases that use the node in every run,
+1.02 and 1.07. Three cases (`uniform`, 10 % deleted, deleted rows, `LIMIT 100`)
+change plan between runs, here in one run of `f30cf7a` only.
+
+`planning_bench.sh`, median of the two runs per build: no difference above the
+spread with 1 or 2 equalities; with 6, 0.670 against 0.642 ms at 10 indexes,
+0.684 against 0.652 at 20, 0.839 against 0.787 at 50 (4–7 %).
+
 ## Not done
 
 - 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).

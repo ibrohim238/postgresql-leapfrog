@@ -81,6 +81,14 @@ typedef struct IndexStream
 	double		estimate;		/* entries the cost model expected */
 } IndexStream;
 
+/* How two values compare: inline for the comparators that are plain integers. */
+typedef enum SortCompareKind
+{
+	SORT_COMPARE_GENERIC,
+	SORT_COMPARE_INT64,
+	SORT_COMPARE_INT32,
+} SortCompareKind;
+
 /*
  * Execution state of an Index Merge Intersect scan.
  */
@@ -103,6 +111,7 @@ typedef struct IntersectScanState
 	MemoryContext group_cxt;	/* reset when the next group starts */
 	int			group_limit;	/* entries of one group that fit into work_mem */
 	SortSupportData ssup;		/* compares values in query order */
+	SortCompareKind compare_kind;	/* what compare_values does with them */
 	int16		sort_typlen;
 	bool		sort_typbyval;
 	bool		sort_notnull;	/* NULL entries are dead: skip them */
@@ -273,6 +282,13 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 														 BTGreaterStrategyNumber :
 														 BTLessStrategyNumber),
 									 &state->ssup);
+	state->compare_kind = SORT_COMPARE_GENERIC;
+#if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
+	if (state->ssup.comparator == ssup_datum_signed_cmp)
+		state->compare_kind = SORT_COMPARE_INT64;
+#endif
+	if (state->ssup.comparator == ssup_datum_int32_cmp)
+		state->compare_kind = SORT_COMPARE_INT32;
 	{
 		Form_pg_attribute attr =
 			TupleDescAttr(RelationGetDescr(state->streams[0].index),
@@ -374,6 +390,47 @@ evaluate_equal_values(IntersectScanState *state)
 	}
 
 	return !state->values_null;
+}
+
+/*
+ * compare_values
+ *		Compare two values of the merge in query order: above zero when a is
+ *		further along than b.  bigint, timestamptz and the like compare as
+ *		plain integers, inline: on a merge of bigint values the indirect call
+ *		costs about a tenth of the node's time (BENCHMARKS.md).
+ */
+static inline int
+compare_values(IntersectScanState *state, Datum a, bool a_isnull, Datum b,
+			   bool b_isnull)
+{
+	SortSupport ssup = &state->ssup;
+	int			compare;
+
+	if (a_isnull || b_isnull)
+	{
+		if (a_isnull && b_isnull)
+			return 0;
+		return (a_isnull == ssup->ssup_nulls_first) ? -1 : 1;
+	}
+
+	switch (state->compare_kind)
+	{
+		case SORT_COMPARE_INT64:
+			compare = (DatumGetInt64(a) > DatumGetInt64(b)) -
+				(DatumGetInt64(a) < DatumGetInt64(b));
+			break;
+		case SORT_COMPARE_INT32:
+			compare = (DatumGetInt32(a) > DatumGetInt32(b)) -
+				(DatumGetInt32(a) < DatumGetInt32(b));
+			break;
+		default:
+			compare = ssup->comparator(a, b, ssup);
+			break;
+	}
+	if (ssup->ssup_reverse)
+		INVERT_COMPARE_RESULT(compare);
+
+	return compare;
 }
 
 /*
@@ -580,8 +637,8 @@ collect_group(IntersectScanState *state, IndexStream *stream)
 	stream->group_count = 0;
 
 	while (stream->have &&
-		   ApplySortComparator(stream->value, stream->isnull, state->group_value,
-							   state->group_isnull, &state->ssup) == 0)
+		   compare_values(state, stream->value, stream->isnull,
+						  state->group_value, state->group_isnull) == 0)
 	{
 		if ((++iterations & 1023) == 0)
 			CHECK_FOR_INTERRUPTS();
@@ -712,9 +769,8 @@ intersect_next(ScanState *ss)
 			bool		found = true;
 			bool		by_pred = false;
 
-			if (ApplySortComparator(outer->value, outer->isnull,
-									state->group_value, state->group_isnull,
-									&state->ssup) != 0)
+			if (compare_values(state, outer->value, outer->isnull,
+							   state->group_value, state->group_isnull) != 0)
 			{
 				state->in_group = false;
 				continue;
@@ -767,9 +823,9 @@ intersect_next(ScanState *ss)
 		all_equal = true;
 		for (int i = 1; i < state->nstreams; i++)
 		{
-			int			cmp = ApplySortComparator(state->streams[i].value,
-												  state->streams[i].isnull,
-												  front, front_isnull, &state->ssup);
+			int			cmp = compare_values(state, state->streams[i].value,
+											 state->streams[i].isnull,
+											 front, front_isnull);
 
 			if (cmp != 0)
 				all_equal = false;
@@ -809,8 +865,8 @@ intersect_next(ScanState *ss)
 		{
 			IndexStream *stream = &state->streams[i];
 
-			if (ApplySortComparator(stream->value, stream->isnull, front,
-									front_isnull, &state->ssup) == 0)
+			if (compare_values(state, stream->value, stream->isnull, front,
+							   front_isnull) == 0)
 			{
 				stream->skip.behind = 0;
 				continue;
