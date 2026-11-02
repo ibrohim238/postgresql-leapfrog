@@ -639,6 +639,29 @@ and 2,000 entries with 40,000: 0.80 against 0.27; with 460,000: 0.87 against 0.2
 20,000, 40,000 and 460,000: 31 against 24. Before the order from the sparsest stream,
 the circle of `RowIDIntersectionIterator::DoRead` took 2.0 and 22 in the first two.
 
+## Duplicates of the sort value (against `v0.0.4`)
+
+The node reads the whole group of a value before its first row. Startup now counts
+the group of the first value. `SELECT * … WHERE user_id = 7 AND status = 2 ORDER BY
+created_at DESC LIMIT 100`, 1.2M rows, indexes `(user_id, created_at)` and
+`(status, created_at)`, data in memory, median of 7, ABBA, ms:
+
+| `created_at` | `v0.0.4`, the planner's choice | Change, the planner's choice | Stock |
+|---|---:|---:|---:|
+| 1M rows on the newest value | 2.8 (node, 102 buffers) | 0.08-0.13 (Index Scan, 143 buffers) | 0.08-0.13 |
+| 10 values | 0.6-0.7 (node, 110 buffers) | 0.6-0.9 (node) | 0.10-0.27 (335 buffers) |
+| unique | 0.26 (node, 93 buffers) | 0.26-0.40 (node) | 0.07-0.10 (114 buffers) |
+
+The same at `random_page_cost` 1.1. The last two rows do not change: the node
+touches fewer buffers there and costs less, and is slower with the data in memory.
+None of this was measured with cold data. The group fits in `work_mem` in all of
+them; no group overflowed.
+
+`cost_bench.sh` (32 queries): the choice differs in none; node time 1.01 of `v0.0.4`
+in median, cost 0.95-1.17. `run.sh`: 1.00 in median. Three cases (`uniform`, 10 %
+deleted, deleted rows, `LIMIT 100`) change plan between runs in both builds.
+`planning_bench.sh`: no change above the spread between runs.
+
 ## Not done
 
 - 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).

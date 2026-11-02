@@ -6,14 +6,15 @@ and 19 extension that lets the planner combine general B-tree indexes at query t
 `(id) WHERE deleted_at IS NULL` — into one ordered stream, so that a table does
 not need a dedicated composite or partial index for every filter combination.
 No query changes: the planner picks the node where it is cheaper, per query and
-with the current statistics, and `leapfrog.enabled = off` turns it off.
+with the current statistics, and `leapfrog.enabled = off` stops new plans from
+using it (see [Operational safety](#operational-safety) for plans already cached).
 
 Status: **experimental (0.0.4)**. The executor is covered by regression and
 isolation tests that compare every result with the stock plans
-(see [Tests](#tests)). The cost model is conservative: in the measured
-benchmarks it picked the node where it was slower only in `LIMIT 1` queries,
-by under 0.1 ms, and it misses a part of the cases where the node is faster
-(see
+(see [Tests](#tests)). The cost model counts pages first: with data in memory it
+can pick the node over an Index Scan that touches more buffers but takes less time
+(0.26 ms against 0.07 with `LIMIT 100` and both conditions dense), and it misses a
+part of the cases where the node is faster (see
 [Known limitations](#known-limitations-and-planned-improvements)).
 
 ## Contents
@@ -515,7 +516,8 @@ without loading the library the planner does not offer the node.
 PostgreSQL **never unloads** shared libraries: after `LOAD` the hook stays
 until the session ends, and `DROP EXTENSION` does not remove it. To switch it
 off use `SET leapfrog.enabled = off` (or `postgresql.conf`, or
-`ALTER DATABASE … SET`).
+`ALTER DATABASE … SET`), which applies to new plans; see
+[Operational safety](#operational-safety) for cached ones.
 
 Upgrade the library with `make install` (or a package manager), never by
 copying over the installed `leapfrog.so`: overwriting a shared library in place
@@ -1006,10 +1008,12 @@ sort keys. A range on a leading column breaks the
   identical output for the node and the stock plan.
 - **VACUUM waits for a scan in progress.** The node reads the sort value from
   the index tuple, so nbtree keeps the scan's current leaf page pinned, as for
-  an Index Only Scan. `VACUUM` of that index waits until the scan moves to the
-  next page or ends — for example behind a cursor left open in the middle of
-  its result. When the merge ends both scans release their pages, so an
-  exhausted cursor does not hold `VACUUM` (`leapfrog_insert_vacuum`).
+  an Index Only Scan. Every stream holds its own pin, so a node with four
+  streams can hold four pages of four indexes. `VACUUM` of such an index waits
+  until the scan moves to the next page or ends — for example behind a cursor
+  left open in the middle of its result. When the merge ends the scans release
+  their pages, so an exhausted cursor does not hold `VACUUM`
+  (`leapfrog_insert_vacuum`).
 - **Misses of the cost model**, see above. `leapfrog.force` shows what the node
   would do; it does not guarantee the node is chosen (a parameterization the
   join order cannot provide, for example).
@@ -1019,6 +1023,17 @@ sort keys. A range on a leading column breaks the
 - Planner: the hook only adds paths through `add_path`; stock paths are never
   removed or changed. With `leapfrog.enabled = off` the hook returns
   immediately.
+- Switching it off: `leapfrog.enabled = off` applies to new plans only, as any
+  planner setting. A plan already cached, such as the generic plan of a prepared
+  statement, keeps using the node. To switch it off for certain in a session:
+
+  ```sql
+  SET leapfrog.enabled = off;
+  DISCARD PLANS;
+  ```
+
+  With a connection pool, do this on every connection or open new ones. A query
+  already running is not affected.
 - Executor: index scans use the standard `index_beginscan` / `index_rescan` /
   `index_getnext_tid` / `index_fetch_heap` with the query's snapshot;
   visibility, HOT chains and `kill_prior_tuple` work as for `Index Scan`.

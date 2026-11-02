@@ -62,6 +62,42 @@ RESET leapfrog.force;
 RESET leapfrog.trace_planner;
 DROP TABLE lf_pl;
 
+-- No row comes before the inner stream has read the whole group of the first
+-- value: at the newest end one value has most of the rows.
+CREATE TABLE lf_pl_group (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, ts integer NOT NULL)
+	WITH (autovacuum_enabled = false);
+INSERT INTO lf_pl_group
+SELECT g, abs(hashint8(g)) % 50, abs(hashint8(g * 3)) % 4,
+	CASE WHEN g <= 200000 THEN 1000000 ELSE g END
+FROM generate_series(1, 240000) g;
+CREATE INDEX lf_pl_group_a ON lf_pl_group (a, ts);
+CREATE INDEX lf_pl_group_b ON lf_pl_group (b, ts);
+ANALYZE lf_pl_group;
+CREATE FUNCTION lf_pl_startup(query text) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+	plan jsonb;
+BEGIN
+	EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+	RETURN (jsonb_path_query_first(plan,
+		'$.** ? (@."Custom Plan Provider" == "Index Merge Intersect")')->>'Startup Cost')::float8;
+END
+$$;
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET enable_sort = off;
+SELECT lf_pl_startup($$ SELECT id FROM lf_pl_group WHERE a = 7 AND b = 2 ORDER BY ts DESC LIMIT 100 $$) >
+	5 * lf_pl_startup($$ SELECT id FROM lf_pl_group WHERE a = 7 AND b = 2 ORDER BY ts LIMIT 100 $$)
+	AS first_group_is_charged;
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+RESET enable_sort;
+SELECT lf_check($$ SELECT id FROM lf_pl_group WHERE a = 7 AND b = 2 ORDER BY ts DESC, id LIMIT 100 $$);
+DROP FUNCTION lf_pl_startup(text);
+DROP TABLE lf_pl_group;
+
 -- The estimate from the statistics read once, where the streams hold parts of
 -- the sort column's range: 40000 rows, a = 1 in the first 40 %, b = 1 in the last
 -- 80 %, each every other row of its part in a pattern that keeps them independent.

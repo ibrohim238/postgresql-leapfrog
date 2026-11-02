@@ -5,6 +5,21 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- README: `leapfrog.enabled = off` does not change plans already cached, and
+  `DISCARD PLANS` does; every stream holds its own buffer pin.
+
+### Fixed
+
+- Cost model: no row comes before the inner streams have read the whole group of
+  the first value, however few rows a `LIMIT` wants, but the node's startup cost
+  took an even share of the merge. With one value holding most of the rows at the
+  end the query starts from, the planner chose the node at 2.8 ms over an Index
+  Scan at 0.1 ms. Startup now counts that group, the value being known from the
+  range probe and its share from the most common values; the total cost does not
+  change. Test in `leapfrog_planner`; numbers in BENCHMARKS.md.
+
 ## [0.0.4] — 2026-11-02
 
 Still experimental. The shared library changes; the SQL functions do not:

@@ -636,14 +636,10 @@ sort_stats(PlannerInfo *root, Index rti, SortColumn *sort)
 	null_frac = ((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;
 
 	if (sortop == get_opfamily_member(sort->opfamily, sort->type, sort->type,
-									  BTLessStrategyNumber) &&
-		get_attstatsslot(&hist, vardata.statsTuple, STATISTIC_KIND_HISTOGRAM,
-						 sortop, ATTSTATSSLOT_VALUES) &&
-		hist.nvalues >= 2 && hist.stacoll == sort->collation)
+									  BTLessStrategyNumber))
 	{
-		stats->hist = hist.values;
-		stats->nhist = hist.nvalues;
-		stats->usable = true;
+		bool		mcv_usable = true;
+
 		if (get_attstatsslot(&mcv, vardata.statsTuple, STATISTIC_KIND_MCV,
 							 InvalidOid,
 							 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
@@ -657,21 +653,34 @@ sort_stats(PlannerInfo *root, Index rti, SortColumn *sort)
 					mcv_total += mcv.numbers[i];
 			}
 			else
-				stats->usable = false;
+				mcv_usable = false;
 		}
-		stats->hist_frac = Max(1.0 - null_frac - mcv_total, 0.0);
+
+		if (mcv_usable &&
+			get_attstatsslot(&hist, vardata.statsTuple, STATISTIC_KIND_HISTOGRAM,
+							 sortop, ATTSTATSSLOT_VALUES) &&
+			hist.nvalues >= 2 && hist.stacoll == sort->collation)
+		{
+			stats->hist = hist.values;
+			stats->nhist = hist.nvalues;
+			stats->usable = true;
+			stats->hist_frac = Max(1.0 - null_frac - mcv_total, 0.0);
+		}
 
 		/* the comparators that compare plain integers */
-		range_compare(sort, stats->hist[0], stats->hist[0]);
-#if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
-		if (sort->range_ssup.comparator == ssup_datum_signed_cmp)
+		if (stats->usable)
 		{
-			stats->interpolate = true;
-			stats->signed64 = true;
-		}
+			range_compare(sort, stats->hist[0], stats->hist[0]);
+#if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
+			if (sort->range_ssup.comparator == ssup_datum_signed_cmp)
+			{
+				stats->interpolate = true;
+				stats->signed64 = true;
+			}
 #endif
-		if (sort->range_ssup.comparator == ssup_datum_int32_cmp)
-			stats->interpolate = true;
+			if (sort->range_ssup.comparator == ssup_datum_int32_cmp)
+				stats->interpolate = true;
+		}
 	}
 
 	ReleaseVariableStats(vardata);
@@ -799,6 +808,35 @@ sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)
 }
 
 /*
+ * first_group_share
+ *		Share of the table's rows in the group the merge reaches first: the
+ *		NULLs when they come first, else the value the overlap of the ranges
+ *		starts with, from the most common values, or an average group.  A value
+ *		common enough to matter is among them.
+ */
+static double
+first_group_share(PlannerInfo *root, Index rti, SortColumn *sort, Datum first,
+				  bool has_value, double ndistinct)
+{
+	double		null_frac = sortcol_null_frac(root, rti, sort);
+	SortStats  *stats;
+
+	if (null_frac > 0 && sort->nulls_first)
+		return null_frac;
+	if (!has_value)
+		return null_frac;
+
+	stats = sort_stats(root, rti, sort);
+	for (int i = 0; i < stats->nmcv; i++)
+	{
+		if (range_compare(sort, stats->mcv[i], first) == 0)
+			return stats->mcv_freq[i];
+	}
+
+	return 1.0 / Max(ndistinct, 1.0);
+}
+
+/*
  * stream_overlap
  *		Where the streams can meet: the merge reads only the entries inside
  *		the overlap of their sortcol ranges, skipping ahead into it, and
@@ -818,7 +856,8 @@ sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)
 static void
 stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 			   SortColumn *sort, IndexCandidate **streams, int nstreams,
-			   double *shares, double *rows_factor)
+			   double ndistinct, double *shares, double *rows_factor,
+			   double *first_share)
 {
 	Datum		lo = (Datum) 0;
 	Datum		hi = (Datum) 0;
@@ -829,6 +868,7 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 	for (int i = 0; i < nstreams; i++)
 		shares[i] = 1.0;
 	*rows_factor = 1.0;
+	*first_share = 1.0 / Max(ndistinct, 1.0);
 
 	for (int i = 0; i < nstreams; i++)
 	{
@@ -855,6 +895,9 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 	}
 	empty = empty || range_compare(sort, lo, hi) > 0;
 	null_frac = sortcol_null_frac(root, rti, sort);
+	*first_share = first_group_share(root, rti, sort,
+									 sort->descending ? hi : lo, !empty,
+									 ndistinct);
 	if (empty && null_frac <= 0)
 	{
 		for (int i = 0; i < nstreams; i++)
@@ -982,6 +1025,8 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	double		rows = cpath->path.rows;
 	double		shares[INTERSECT_MAX_STREAMS];
 	double		rows_factor;
+	double		first_share;
+	Cost		first_group = 0;
 	double		loop_count;
 	double		fetched;
 	double		matches;
@@ -999,8 +1044,8 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	 * read, and the matches lie there (stream_overlap); a stream that starts
 	 * outside it skips in with one more descent.
 	 */
-	stream_overlap(root, rte, rel->relid, sort, streams, nstreams,
-				   shares, &rows_factor);
+	stream_overlap(root, rte, rel->relid, sort, streams, nstreams, ndistinct,
+				   shares, &rows_factor, &first_share);
 	for (int i = 0; i < nstreams; i++)
 	{
 		reads[i] = streams[i]->entries * shares[i];
@@ -1043,9 +1088,16 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	/*
 	 * Every stream advances through run/(matches+1) of the merge before the
 	 * first match: that share is startup, the rest is the run after it, and
-	 * the total is the descents plus the whole merge.
+	 * the total is the descents plus the whole merge.  No row comes before
+	 * the inner streams have read the whole group of the first value, however
+	 * few rows a Limit wants, and a value with most of the rows makes that
+	 * more than the even share.
 	 */
-	first_match = run_cost / (matches + 1);
+	for (int i = 1; i < nstreams; i++)
+		first_group += index_read_cost(root, streams[i]->index,
+									   streams[i]->entries * first_share,
+									   loop_count);
+	first_match = Max(run_cost / (matches + 1), Min(first_group, run_cost));
 	startup_cost = qpqual_cost.startup + rel->reltarget->cost.startup +
 		first_match;
 	for (int i = 0; i < nstreams; i++)
