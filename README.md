@@ -597,6 +597,7 @@ Regression tests (`sql/`):
 | `leapfrog_outer_partial` | partial index on the outer side: its predicate's conditions stay in the `Filter`, plain and `FOR UPDATE`, rows that left the index |
 | `leapfrog_nway` | three, four and five streams against the stock plans, both directions, `LIMIT`; the planner adding a third stream only where it is estimated cheaper and never beyond `leapfrog.max_indexes`; generic plans and `LATERAL` rescans; a non-unique sort column across three groups; two groups overflowing `work_mem`; rows moving between the streams; `FOR UPDATE` |
 | `leapfrog_types` | `uuid`, `text`, `varchar` (with a `text` constant), `smallint` (with a `bigint` constant) and `timestamptz` equality columns, three streams of three types; generic plans with `text` and `uuid` parameters and `NULL`; `LATERAL` rescans with changing `text` and `uuid` values; an inner `text` group overflowing `work_mem`; `smallint` and `integer` sort columns in both directions; values computed from parameters, from a join's other side and from `LATERAL` columns, a volatile value left to the stock plan; long `text` values compressed in the index, HOT updates of matched rows; sort columns of domains over `bigint` and `integer`; an index in another collation than the condition's |
+| `leapfrog_security` | row-level security: leakproof equalities become streams, others stay in `Filter`; the same query without the policy uses them |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -808,6 +809,9 @@ Verified against `src/` and the tests.
   leading column's × 0.75, as `btcostestimate` does.
 - One relation per node; no partitioned tables, no parallel execution.
 - `TABLESAMPLE` relations are not supported: they keep their Sample Scan.
+- Under row-level security an equality whose operator is not leakproof
+  (`numeric =`) and that does not come from the policy cannot be a stream's
+  condition, as it cannot be an `Index Cond`: it stays in `Filter`.
 
 **Executor and memory**
 

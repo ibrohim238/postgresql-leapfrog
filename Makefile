@@ -39,7 +39,8 @@ REGRESS = \
 	leapfrog_skip \
 	leapfrog_outer_partial \
 	leapfrog_nway \
-	leapfrog_types
+	leapfrog_types \
+	leapfrog_security
 
 ISOLATION = \
 	leapfrog_concurrent_update \

@@ -26,6 +26,11 @@ versions: [SemVer](https://semver.org/).
   returned rows outside the sample. Such a relation is now left to its
   Sample Scan. Test in `leapfrog_basic`; without the check the node is used
   and the rows differ from the stock plan's.
+- The equalities of a stream were taken without
+  `restriction_is_securely_promotable`, as scan keys, under row-level
+  security: a non-leakproof operator of the query ran on every index entry,
+  also those of rows the policy hides. Such a clause now stays in `Filter`,
+  after the policy's quals. Test in `leapfrog_security`.
 - The planner kept the cheapest pair, and in the greedy expansion the
   cheapest set, as a pointer to the path it had passed to `add_path`, and
   read its cost from there afterwards. `add_path` frees a path it rejects or

@@ -162,7 +162,9 @@ is_column_var(Node *node, Index rti, AttrNumber attno)
  *		Fills *equality with the value y, the operator with x on the left
  *		(the commutator when the clause has x on the right) and the
  *		collation the clause compares in.  As for an Index Cond, the index
- *		column must be sorted in that collation, unless it has none.
+ *		column must be sorted in that collation, unless it has none, and the
+ *		clause must be safe to run before the row security quals: a scan key
+ *		sees every entry of the index, also those of rows the quals hide.
  */
 static bool
 match_index_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
@@ -174,7 +176,8 @@ match_index_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
 	Node	   *right;
 	Oid			opno;
 
-	if (rinfo->pseudoconstant || !IsA(rinfo->clause, OpExpr))
+	if (rinfo->pseudoconstant || !IsA(rinfo->clause, OpExpr) ||
+		!restriction_is_securely_promotable(rinfo, index->rel))
 		return false;
 
 	op = (OpExpr *) rinfo->clause;
