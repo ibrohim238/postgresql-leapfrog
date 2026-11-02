@@ -75,6 +75,11 @@ make test-isolation; cp tests/isolation/results/<name>.out tests/isolation/expec
 
 Read the diffs in full: `regression.diffs`, `tests/isolation/regression.diffs`.
 
+`expected/<name>_1.out`, where it exists, is the same output under another
+server: `leapfrog_basic`, `leapfrog_parameters` and `leapfrog_mvcc` have one for
+the core `EXPLAIN` format of PostgreSQL 19, `leapfrog_sort_icu` for a database
+without ICU collations. A change to such a test changes both files.
+
 ## Source layout
 
 | File | Contents |

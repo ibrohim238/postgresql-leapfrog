@@ -25,6 +25,9 @@ versions: [SemVer](https://semver.org/).
   `leapfrog_index_order`.
 - Partitioned tables and inheritance: a node per child under a `Merge Append`
   or ordered `Append`. Tests in `leapfrog_partition`.
+- PostgreSQL 19 (`REL_19_STABLE`): `index_beginscan` takes table AM flags;
+  alternative expected output for the changes in the core `EXPLAIN` format;
+  an assertion build in CI.
 - `tests/performance/bitmap_bench.sh`: the node against `BitmapAnd`, stock
   PostgreSQL and PostgreSQL with leapfrog at 100k to 50M rows, with and
   without `LIMIT`, the modes in ABBA order; `WORK_MEM` for exact bitmaps;

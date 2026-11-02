@@ -368,8 +368,10 @@ Details, runs at the default `work_mem` and the caveats (one laptop, a
 
 ## Requirements
 
-- PostgreSQL **18** (the planner and executor APIs change between major
-  versions; other versions are not supported).
+- PostgreSQL **18** or **19** (the planner and executor APIs change between
+  major versions; other versions are not supported). PostgreSQL 19 is built
+  and tested only against `REL_19_STABLE` with assertions, in CI; the Docker
+  images and the benchmarks use 18.
 - Server headers (`postgresql-server-dev-18` on Debian/Ubuntu,
   `postgresql18-devel` on the RHEL family), `gcc` or `clang`, `make`.
 - For `make installcheck`: `pg_regress` and `pg_isolation_regress` from the
@@ -847,7 +849,8 @@ Verified against `src/` and the tests.
   not been made. The landing check reads nbtree's scan position
   (`BTScanOpaque`, in `lf_scan_leaf_position` only) and the planner calls
   `_bt_metaversion`, so both depend on nbtree internals, not on the index
-  AM API. There is no public way to get either.
+  AM API. There is no public way to get either; both are unchanged in
+  PostgreSQL 19.
 
 **Tests and benchmarks**
 

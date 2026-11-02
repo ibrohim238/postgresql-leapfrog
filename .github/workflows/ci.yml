@@ -116,13 +116,17 @@ jobs:
           cat tests/isolation/results/*.diff 2>/dev/null || true
 
   cassert:
-    name: PostgreSQL 18 with --enable-cassert
+    name: PostgreSQL ${{ matrix.pg }} with --enable-cassert
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [18, 19]
     steps:
       - uses: actions/checkout@v4
       - name: Build PostgreSQL from source with assertions and the extension
-        run: docker build -f docker/cassert.Dockerfile -t leapfrog-cassert .
+        run: docker build --build-arg PG_BRANCH=REL_${{ matrix.pg }}_STABLE -f docker/cassert.Dockerfile -t leapfrog-cassert .
       - name: Regression and isolation tests, assertion failures in the log
         run: docker run --rm leapfrog-cassert
 
