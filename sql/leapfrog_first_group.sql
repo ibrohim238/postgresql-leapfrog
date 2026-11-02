@@ -79,6 +79,14 @@ RESET plan_cache_mode;
 DEALLOCATE lf_fg_desc;
 DEALLOCATE lf_fg_asc;
 
+-- A set with one stream more can be cheaper in total and dearer to start:
+-- without a LIMIT the node takes all three, a LIMIT is better served by two.
+SET cpu_tuple_cost = 1;
+SELECT lf_fg_streams($$ SELECT * FROM lf_fg WHERE b = 2 AND c = 1 AND d = 3 ORDER BY ts DESC $$) AS whole,
+	lf_fg_streams($$ SELECT * FROM lf_fg WHERE b = 2 AND c = 1 AND d = 3 ORDER BY ts DESC LIMIT 100 $$) AS with_limit;
+RESET cpu_tuple_cost;
+SELECT lf_check($$ SELECT id FROM lf_fg WHERE b = 2 AND c = 1 AND d = 3 ORDER BY ts DESC, id LIMIT 100 $$);
+
 -- A group that overflows work_mem: every outer entry of the value is fetched.  With
 -- comparisons at no cost, the sort it saves does not hide that.
 SET cpu_operator_cost = 0;

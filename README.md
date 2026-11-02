@@ -148,8 +148,8 @@ with `kind = 2` and `(id) WHERE kind = 2`. A plain `(id)` never joins a set.
 The planner works as `get_best_ror_intersect` does in MySQL: one pass over the
 candidates, fewest entries first. A stream joins the set when it adds a
 restriction, up to `leapfrog.max_indexes` (default 4), and the cheapest set seen
-in the pass becomes the path; PostgreSQL picks between it and the stock plans
-as usual. A condition left out of the set becomes a `Filter`. The outer stream,
+in the pass becomes the path, along with the set quickest to its first row when
+that is another one; PostgreSQL picks between them and the stock plans as usual. A condition left out of the set becomes a `Filter`. The outer stream,
 whose entries are fetched from the heap, is the densest one without a
 predicate: the others are held in memory value by value.
 
@@ -637,7 +637,7 @@ Regression tests (`sql/`):
 | `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 | `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
 | `leapfrog_planner` | by the counts of `leapfrog.trace_planner`: statistics, ranges and correlations read once, a stream that cannot pay for itself pruned; the estimate from the statistics read once, also inside one histogram bin |
-| `leapfrog_first_group` | startup cost against the group read first: a common value at the end of the range, behind a row or a dead entry (the Index Scan then chosen), in a generic plan, without a histogram, within reach of a `LIMIT`; a value or NULLs one stream does not hold; a group overflowing `work_mem`, first or further on; sorting a later group; a stream with a narrow range; the group of the NULLs, also with ranges that do not meet, and partial indexes without NULLs; a value out of the most common ones; a unique sort column |
+| `leapfrog_first_group` | startup cost against the group read first: a common value at the end of the range, behind a row or a dead entry (the Index Scan then chosen), in a generic plan, without a histogram, within reach of a `LIMIT`; a value or NULLs one stream does not hold; a group overflowing `work_mem`, first or further on; sorting a later group; a stream with a narrow range; the group of the NULLs, also with ranges that do not meet, and partial indexes without NULLs; a value out of the most common ones; a unique sort column; a set quicker to start offered next to the cheapest |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions

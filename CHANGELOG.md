@@ -37,6 +37,8 @@ versions: [SemVer](https://semver.org/).
 - Cost model: a value out of the most common ones holds its share of what they and
   the NULLs leave, not 1/ndistinct. The charge has no floor of a page per stream,
   which a unique sort column paid for nothing.
+- Planner: the set quickest to its first row is offered next to the cheapest: a
+  stream that lowered the total but added a first group decided for a `LIMIT` too.
   Tests of all of these in `leapfrog_first_group`; numbers in BENCHMARKS.md.
 
 ## [0.0.4] — 2026-11-02
