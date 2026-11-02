@@ -7,3 +7,6 @@ IndexStream
 IntersectScanState
 IntersectSearch
 SkipAhead
+SortBound
+SortColumn
+SortCompareKind

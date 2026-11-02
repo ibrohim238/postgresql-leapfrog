@@ -368,8 +368,10 @@ Details, runs at the default `work_mem` and the caveats (one laptop, a
 
 ## Requirements
 
-- PostgreSQL **18** (the planner and executor APIs change between major
-  versions; other versions are not supported).
+- PostgreSQL **18** or **19** (the planner and executor APIs change between
+  major versions; other versions are not supported). PostgreSQL 19 is built
+  and tested only against `REL_19_STABLE` with assertions, in CI; the Docker
+  images and the benchmarks use 18.
 - Server headers (`postgresql-server-dev-18` on Debian/Ubuntu,
   `postgresql18-devel` on the RHEL family), `gcc` or `clang`, `make`.
 - For `make installcheck`: `pg_regress` and `pg_isolation_regress` from the
@@ -597,6 +599,13 @@ Regression tests (`sql/`):
 | `leapfrog_outer_partial` | partial index on the outer side: its predicate's conditions stay in the `Filter`, plain and `FOR UPDATE`, rows that left the index |
 | `leapfrog_nway` | three, four and five streams against the stock plans, both directions, `LIMIT`; the planner adding a third stream only where it is estimated cheaper and never beyond `leapfrog.max_indexes`; generic plans and `LATERAL` rescans; a non-unique sort column across three groups; two groups overflowing `work_mem`; rows moving between the streams; `FOR UPDATE` |
 | `leapfrog_types` | `uuid`, `text`, `varchar` (with a `text` constant), `smallint` (with a `bigint` constant) and `timestamptz` equality columns, three streams of three types; generic plans with `text` and `uuid` parameters and `NULL`; `LATERAL` rescans with changing `text` and `uuid` values; an inner `text` group overflowing `work_mem`; `smallint` and `integer` sort columns in both directions; values computed from parameters, from a join's other side and from `LATERAL` columns, a volatile value left to the stock plan; long `text` values compressed in the index, HOT updates of matched rows; sort columns of domains over `bigint` and `integer`; an index in another collation than the condition's |
+| `leapfrog_security` | row-level security: leakproof equalities become streams, others stay in `Filter`; the same query without the policy uses them |
+| `leapfrog_cost` | the node is charged for the clauses in its `Filter` and only those; a predicate implied by an equality does not lower the row estimate |
+| `leapfrog_partition` | hash and range partitions, a partition with other attribute numbers, `Merge Append` and ordered `Append`, run-time pruning, `LATERAL`, `FOR UPDATE`, row-level security, `TABLESAMPLE`, a partition without the indexes, inheritance |
+| `leapfrog_sort_types` | `timestamptz`, `date`, `numeric`, `text` in two collations, `varchar`, `char`, `uuid`, arrays, enums, domains and `real` as sort columns, in both directions; skip-ahead with long text, overflow, generic plans, `LATERAL`; other collations, operator families and input types are no streams |
+| `leapfrog_sort_icu` | a sort column in an ICU collation, deterministic or not; skipped where the database's encoding has none |
+| `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions |
+| `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -620,6 +629,9 @@ Isolation tests (`tests/isolation/specs/`):
 | `leapfrog_overflow_epq` | EvalPlanQual through the overflow fallback (`work_mem = 64kB`): rows leaving and joining the inner side |
 | `leapfrog_nway` | EvalPlanQual with three streams: the second stream's column, the third stream's predicate and an unrelated column changing while `FOR UPDATE` waits |
 | `leapfrog_types` | EvalPlanQual with `text` and `uuid` equalities: the status, the owner and an unrelated column changing while `FOR UPDATE` waits |
+| `leapfrog_partition` | EvalPlanQual under a `Merge Append`: inner and outer equalities failing on the new version, an unrelated column, a row moved to another partition |
+| `leapfrog_sort_types` | EvalPlanQual with a `text` sort column |
+| `leapfrog_nulls` | EvalPlanQual with a sort value becoming NULL and a row of the NULL group no longer matching |
 
 ## Benchmarks
 
@@ -658,10 +670,10 @@ matches = rows × outer share × inner share / table share of the overlap
 run     = merge_read_cost(outer read, inner read)
         + group_cost(outer + inner read, log2(group size))
         + heap_fetch_cost(matches)
-        + matches × (cpu_tuple_cost + qual cost + tlist cost)
+        + matches × (cpu_tuple_cost + cost of the Filter + tlist cost)
         + one descent per stream that skips into the overlap
 startup = descent into both B-trees (as in btcostestimate)
-        + startup cost of qual and tlist
+        + startup cost of Filter and tlist
         + run / (matches + 1)       -- both streams advance to the first match
 total   = startup + run
 ```
@@ -684,7 +696,9 @@ total   = startup + run
   histogram, with each stream assumed to follow the table's distribution
   within its own range; the planner's row estimate (conditions independent
   over the whole table) becomes one where they are independent inside the
-  overlap. Disjoint ranges cost next to nothing. A parameterized path or a
+  overlap. Disjoint ranges cost next to nothing, unless the column has NULLs:
+  they form one more group, whose share from the statistics counts in every
+  stream and in the table. A parameterized path or a
   generic plan is costed without the probe. Like any plan built on actual
   values, a cached plan with constants keeps this estimate until it is
   replanned.
@@ -739,13 +753,22 @@ Verified against `src/` and the tests.
   family, cross-type ones included (`varchar = text`, `smallint = bigint`); a
   `text` column indexed in another collation than the condition's is not
   used. Expression index columns are not supported.
-- Sort column: `smallint`, `integer` or `bigint` (`integer_ops`). Other sort
-  types (`timestamptz`, `numeric`, `uuid`) are not supported yet.
+- Sort column: any type with a B-tree operator family (`timestamptz`, `date`,
+  `numeric`, `text`, `varchar`, `uuid`, arrays, enums, domains …), compared
+  with the comparator of the query's sort key. Every stream's index column
+  must be in the family, input type and collation of that key: an index
+  in another collation or in `text_pattern_ops` serves another order, and is
+  no stream of this one.
 - Equality (`=`) only on the equality columns; `IN (…)`, ranges and `IS NULL`
   are not supported.
-- The sort column must be `NOT NULL` according to the planner
-  (`RelOptInfo.notnullattnums`); dead index entries with NULL are skipped.
-- Both indexes: nbtree v4, `ASC` columns. `ORDER BY … DESC` is a backward scan.
+- A nullable sort column: NULL is a value of the merge, in the query's
+  `NULLS FIRST`/`LAST` order, and every stream must have its NULLs at that end
+  in its scan direction. For a column `NOT NULL` according to the planner
+  (`RelOptInfo.notnullattnums`) the position of NULLs does not matter, and dead
+  index entries with NULL are skipped.
+- Index columns: nbtree v4, `ASC` or `DESC`, `NULLS FIRST` or `LAST`. Every
+  stream scans in the direction that gives the query's order in its own
+  index, so one node may run them in opposite directions.
 
 **Planner and cost model**
 
@@ -806,7 +829,14 @@ Verified against `src/` and the tests.
   partial index scan filtering the customer is estimated at 4 for 2 ms of
   work), and the heap correlation of a multicolumn index is taken as its
   leading column's × 0.75, as `btcostestimate` does.
-- One relation per node; no partitioned tables, no parallel execution.
+- One relation per node, no parallel execution. A partitioned table or an
+  inheritance tree gets one node per child, on the child's own indexes, under
+  a `Merge Append` or ordered `Append`; a child without suitable indexes gets a
+  stock plan there.
+- `TABLESAMPLE` relations are not supported: they keep their Sample Scan.
+- Under row-level security an equality whose operator is not leakproof
+  (`numeric =`) and that does not come from the policy cannot be a stream's
+  condition, as it cannot be an `Index Cond`: it stays in `Filter`.
 
 **Executor and memory**
 
@@ -817,8 +847,10 @@ Verified against `src/` and the tests.
   before every run (`tests/performance/skip_bench.sh`); a run with the OS page
   cache dropped as well needs root on the database host (`COLD_CMD`) and has
   not been made. The landing check reads nbtree's scan position
-  (`BTScanOpaque`), so it depends on that internal structure of
-  PostgreSQL 18.
+  (`BTScanOpaque`, in `lf_scan_leaf_position` only) and the planner calls
+  `_bt_metaversion`, so both depend on nbtree internals, not on the index
+  AM API. There is no public way to get either; both are unchanged in
+  PostgreSQL 19.
 
 **Tests and benchmarks**
 
@@ -844,7 +876,7 @@ and `deleted_at`.
 | P2 | Memory of non-unique keys | open |
 | P2 | Concurrency tests | **done**: EPQ for both pair kinds, partial outer index, overflow fallback; `INSERT`, `VACUUM` |
 | P2 | Write and storage benchmarks | **done**: `write_bench.sh` |
-| P3 | More types and conditions | **partly**: equality columns of any B-tree type, integer sort columns of every width; other sort types and `IN (…)` open |
+| P3 | More types and conditions | **partly**: equality and sort columns of any B-tree type, nullable sort columns, `DESC` and `NULLS FIRST` indexes; `IN (…)` open |
 
 #### Cost model: distribution of matches along the sort column
 
@@ -934,13 +966,12 @@ backward scans and posting lists to be verified against nbtree first).
 Done: equality columns of any type with a B-tree operator family, with the
 operator looked up in the index column's family and the row rechecks
 (EvalPlanQual, overflow fallback) done with that operator and collation;
-sort columns `smallint`, `integer` and `bigint`. Tested in `leapfrog_types`
-(regression and isolation).
+sort columns of any such type, nullable or not, in indexes of any order. Tested
+in `leapfrog_types`, `leapfrog_sort_types`, `leapfrog_nulls` and
+`leapfrog_index_order` (regression and isolation).
 
-Open: sort columns of other types (`timestamptz`, `numeric`), to be measured
-first, since the merge then compares values through the type's comparison
-function instead of as `int64`; `IN (…)` as several outer scans merged in
-`sortcol` order; composite sort keys. A range on a leading column breaks the
+Open: `IN (…)` as several outer scans merged in `sortcol` order; composite
+sort keys. A range on a leading column breaks the
 `sortcol` order and can only be supported as several per-value scans.
 
 ## Known issues

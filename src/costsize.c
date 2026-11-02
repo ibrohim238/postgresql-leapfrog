@@ -41,14 +41,16 @@
 #include "access/relscan.h"
 #include "access/stratnum.h"
 #include "access/table.h"
-#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_statistic.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/selfuncs.h"
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
@@ -282,24 +284,32 @@ loop_count_for(PlannerInfo *root, Relids outer_relids)
 }
 
 /*
- * restriction_qual_cost
- *		Cost of the quals the scan evaluates, as costsize.c's
- *		get_restriction_qual_cost computes it: the rel's own restrictions
- *		plus the clauses pushed down into a parameterized path.
+ * node_qual_cost
+ *		Cost of the quals the node evaluates on a fetched row: the rel's own
+ *		restrictions and the clauses pushed down into a parameterized path,
+ *		less those the streams enforce (lf_node_quals), as cost_index leaves
+ *		out what the index enforces.
  */
 static void
-restriction_qual_cost(PlannerInfo *root, RelOptInfo *rel,
-					  ParamPathInfo *param_info, QualCost *qpqual_cost)
+node_qual_cost(PlannerInfo *root, RelOptInfo *rel, ParamPathInfo *param_info,
+			   IndexCandidate **streams, int nstreams, QualCost *qpqual_cost)
 {
-	if (param_info == NULL)
+	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
+	List	   *exprs[INTERSECT_MAX_STREAMS];
+	List	   *clauses = rel->baserestrictinfo;
+
+	if (param_info != NULL)
+		clauses = list_concat_copy(clauses, param_info->ppi_clauses);
+
+	for (int i = 0; i < nstreams; i++)
 	{
-		*qpqual_cost = rel->baserestrictcost;
-		return;
+		indexes[i] = streams[i]->index;
+		exprs[i] = streams[i]->exprs;
 	}
 
-	cost_qual_eval(qpqual_cost, param_info->ppi_clauses, root);
-	qpqual_cost->startup += rel->baserestrictcost.startup;
-	qpqual_cost->per_tuple += rel->baserestrictcost.per_tuple;
+	cost_qual_eval(qpqual_cost,
+				   lf_node_quals(root, rel, indexes, exprs, nstreams, clauses),
+				   root);
 }
 
 /*
@@ -433,11 +443,12 @@ lf_sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		every equality value is a constant at plan time: a parameterized path
  *		or a generic plan is costed without it.  Entries are read regardless
  *		of visibility (SnapshotAny); a dead entry at an end only widens the
- *		range.  The result is cached in the candidate; returns false when the
- *		range cannot be probed.
+ *		range.  The values are copied: they outlive the scan.  The result is
+ *		cached in the candidate; returns false when the range cannot be
+ *		probed.
  */
 static bool
-probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
+probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 {
 	EqualityKeys keys;
 	Relation	heap;
@@ -445,7 +456,10 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 	IndexScanDesc scan;
 	ItemPointerData tid;
 	int64		entries = 0;
-	Oid			sort_type;
+	Form_pg_attribute attr;
+	int			sort_keyno = candidate->sortpos + 1;
+	bool		isnull;
+	ScanDirection low_end;
 	ListCell   *lc;
 
 	if (candidate->range_known >= 0)
@@ -470,27 +484,35 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 													keys.nequal);
 		keys.nequal++;
 	}
-	sort_type = getBaseType(get_atttype(rte->relid,
-										candidate->index->indexkeys[candidate->sortpos]));
-	lf_init_key_procs(&keys, sort_type);
+	lf_init_key_procs(&keys, sort->type, sort->opfamily, sort->collation,
+					  sort->descending);
 
 	/* the planner holds locks on the table and its indexes */
 	heap = table_open(rte->relid, NoLock);
 	index = index_open(candidate->index->indexoid, NoLock);
-	scan = index_beginscan(heap, index, SnapshotAny, NULL, keys.nequal + 1, 0);
+	scan = lf_index_beginscan(heap, index, SnapshotAny, keys.nequal + 1);
 	scan->xs_want_itup = true;
 
-	lf_rescan_with_keys(scan, &keys, false, lf_no_bound(false));
-	candidate->range_empty = !lf_read_index_entry(scan, ForwardScanDirection,
-												  keys.nequal + 1, sort_type,
-												  &candidate->range_lo, &tid,
-												  &entries);
+	attr = TupleDescAttr(RelationGetDescr(index), sort_keyno - 1);
+
+	/* NULLs are at one end of the index and no end of the range */
+	low_end = candidate->index->reverse_sort[candidate->sortpos] ?
+		BackwardScanDirection : ForwardScanDirection;
+	lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
+	candidate->range_empty = !lf_read_index_entry(scan, low_end,
+												  sort_keyno, true,
+												  &candidate->range_lo, &isnull,
+												  &tid, &entries);
 	if (!candidate->range_empty)
 	{
-		lf_rescan_with_keys(scan, &keys, true, lf_no_bound(true));
-		if (!lf_read_index_entry(scan, BackwardScanDirection, keys.nequal + 1,
-								 sort_type, &candidate->range_hi, &tid,
-								 &entries))
+		candidate->range_lo = datumCopy(candidate->range_lo, attr->attbyval,
+										attr->attlen);
+		lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
+		if (lf_read_index_entry(scan, -low_end, sort_keyno, true,
+								&candidate->range_hi, &isnull, &tid, &entries))
+			candidate->range_hi = datumCopy(candidate->range_hi, attr->attbyval,
+											attr->attlen);
+		else
 			candidate->range_hi = candidate->range_lo;
 	}
 
@@ -506,36 +528,96 @@ probe_range(RangeTblEntry *rte, IndexCandidate *candidate)
 /*
  * sortcol_range_selectivity
  *		Share of the table's rows with lo <= sortcol <= hi, from the column's
- *		histogram.
+ *		histogram, with the operators of the type and collation the query
+ *		sorts in.
  */
 static Selectivity
-sortcol_range_selectivity(PlannerInfo *root, Index rti, AttrNumber sort_attno,
-						  int64 lo, int64 hi)
+sortcol_range_selectivity(PlannerInfo *root, Index rti, SortColumn *sort,
+						  Datum lo, Datum hi)
 {
-	Var		   *var = column_var(root, rti, sort_attno);
+	Var		   *var = column_var(root, rti, sort->attno);
+	Expr	   *column = (Expr *) var;
+	Oid			const_type = sort->type;
+	int16		typlen;
+	bool		typbyval;
 	List	   *clauses = NIL;
-	Oid			ge = get_opfamily_member(INTEGER_BTREE_FAM_OID, var->vartype,
-										 INT8OID,
-										 BTGreaterEqualStrategyNumber);
-	Oid			le = get_opfamily_member(INTEGER_BTREE_FAM_OID, var->vartype,
-										 INT8OID, BTLessEqualStrategyNumber);
+
+	/* varchar sorts as text; a polymorphic class takes the column's own type */
+	if (IsPolymorphicType(sort->type))
+		const_type = var->vartype;
+	else if (var->vartype != sort->type)
+		column = (Expr *) makeRelabelType(column, sort->type, -1, sort->collation,
+										  COERCE_IMPLICIT_CAST);
+	get_typlenbyval(const_type, &typlen, &typbyval);
 
 	clauses = lappend(clauses,
-					  make_opclause(ge, BOOLOID, false, (Expr *) var,
-									(Expr *) makeConst(INT8OID, -1, InvalidOid,
-													   sizeof(int64),
-													   Int64GetDatum(lo),
-													   false, FLOAT8PASSBYVAL),
-									InvalidOid, InvalidOid));
+					  make_opclause(get_opfamily_member(sort->opfamily, sort->type,
+														sort->type,
+														BTGreaterEqualStrategyNumber),
+									BOOLOID, false, column,
+									(Expr *) makeConst(const_type, -1, sort->collation,
+													   typlen, lo, false, typbyval),
+									InvalidOid, sort->collation));
 	clauses = lappend(clauses,
-					  make_opclause(le, BOOLOID, false, (Expr *) var,
-									(Expr *) makeConst(INT8OID, -1, InvalidOid,
-													   sizeof(int64),
-													   Int64GetDatum(hi),
-													   false, FLOAT8PASSBYVAL),
-									InvalidOid, InvalidOid));
+					  make_opclause(get_opfamily_member(sort->opfamily, sort->type,
+														sort->type,
+														BTLessEqualStrategyNumber),
+									BOOLOID, false, column,
+									(Expr *) makeConst(const_type, -1, sort->collation,
+													   typlen, hi, false, typbyval),
+									InvalidOid, sort->collation));
 
 	return clauselist_selectivity(root, clauses, rti, JOIN_INNER, NULL);
+}
+
+/*
+ * sortcol_null_frac
+ *		Share of the table's rows with a NULL in the sort column, from its
+ *		statistics; 0 for a NOT NULL column.
+ */
+static double
+sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)
+{
+	if (sort->null_frac < 0)
+	{
+		sort->null_frac = 0.0;
+		if (!sort->notnull)
+		{
+			VariableStatData vardata;
+
+			examine_variable(root, (Node *) column_var(root, rti, sort->attno),
+							 0, &vardata);
+			if (HeapTupleIsValid(vardata.statsTuple))
+				sort->null_frac =
+					((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;
+			ReleaseVariableStats(vardata);
+		}
+	}
+
+	return sort->null_frac;
+}
+
+/*
+ * range_compare
+ *		Compare two sortcol values in ascending order, in the query's
+ *		collation.
+ */
+static int
+range_compare(SortColumn *sort, Datum a, Datum b)
+{
+	if (!sort->range_ssup_ready)
+	{
+		Oid			lt = get_opfamily_member(sort->opfamily, sort->type, sort->type,
+											 BTLessStrategyNumber);
+
+		memset(&sort->range_ssup, 0, sizeof(SortSupportData));
+		sort->range_ssup.ssup_cxt = CurrentMemoryContext;
+		sort->range_ssup.ssup_collation = sort->collation;
+		PrepareSortSupportFromOrderingOp(lt, &sort->range_ssup);
+		sort->range_ssup_ready = true;
+	}
+
+	return ApplySortComparator(a, false, b, false, &sort->range_ssup);
 }
 
 /*
@@ -551,15 +633,19 @@ sortcol_range_selectivity(PlannerInfo *root, Index rti, AttrNumber sort_attno,
  *
  *		A stream is assumed to follow the table's distribution of sortcol
  *		within its own range.  All are 1 when a range cannot be probed; an
- *		empty overlap gives 0.
+ *		empty overlap gives 0.  The range holds values only: the NULLs of a
+ *		nullable column form one more group, which every stream may reach, so
+ *		their share counts in every stream's and in the table's.
  */
 static void
 stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
-			   AttrNumber sort_attno, IndexCandidate **streams, int nstreams,
+			   SortColumn *sort, IndexCandidate **streams, int nstreams,
 			   double *shares, double *rows_factor)
 {
-	int64		lo;
-	int64		hi;
+	Datum		lo = (Datum) 0;
+	Datum		hi = (Datum) 0;
+	bool		empty = false;
+	double		null_frac;
 	Selectivity table_share;
 
 	for (int i = 0; i < nstreams; i++)
@@ -568,24 +654,30 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 
 	for (int i = 0; i < nstreams; i++)
 	{
-		if (!probe_range(rte, streams[i]))
+		if (!probe_range(rte, sort, streams[i]))
 			return;
 	}
 
-	lo = PG_INT64_MIN;
-	hi = PG_INT64_MAX;
-	for (int i = 0; i < nstreams; i++)
+	for (int i = 0; i < nstreams && !empty; i++)
 	{
 		if (streams[i]->range_empty)
+			empty = true;
+		else if (i == 0)
 		{
-			lo = 1;
-			hi = 0;
-			break;
+			lo = streams[i]->range_lo;
+			hi = streams[i]->range_hi;
 		}
-		lo = Max(lo, streams[i]->range_lo);
-		hi = Min(hi, streams[i]->range_hi);
+		else
+		{
+			if (range_compare(sort, streams[i]->range_lo, lo) > 0)
+				lo = streams[i]->range_lo;
+			if (range_compare(sort, streams[i]->range_hi, hi) < 0)
+				hi = streams[i]->range_hi;
+		}
 	}
-	if (lo > hi)
+	empty = empty || range_compare(sort, lo, hi) > 0;
+	null_frac = sortcol_null_frac(root, rti, sort);
+	if (empty && null_frac <= 0)
 	{
 		for (int i = 0; i < nstreams; i++)
 			shares[i] = 0.0;
@@ -597,24 +689,31 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 	 * The share of each stream's own range is computed once per candidate;
 	 * the overlap is usually the range of the narrowest stream.
 	 */
-	table_share = -1.0;
+	table_share = empty ? 0.0 : -1.0;
 	for (int i = 0; i < nstreams; i++)
 	{
 		IndexCandidate *stream = streams[i];
 
+		if (stream->range_empty)
+		{
+			stream->range_sel = 0.0;
+			continue;
+		}
 		if (stream->range_sel < 0)
-			stream->range_sel = sortcol_range_selectivity(root, rti, sort_attno,
+			stream->range_sel = sortcol_range_selectivity(root, rti, sort,
 														  stream->range_lo,
 														  stream->range_hi);
-		if (stream->range_lo == lo && stream->range_hi == hi)
+		if (!empty && range_compare(sort, stream->range_lo, lo) == 0 &&
+			range_compare(sort, stream->range_hi, hi) == 0)
 			table_share = stream->range_sel;
 	}
 	if (table_share < 0)
-		table_share = sortcol_range_selectivity(root, rti, sort_attno, lo, hi);
+		table_share = sortcol_range_selectivity(root, rti, sort, lo, hi);
+	table_share += null_frac;
 
 	for (int i = 0; i < nstreams; i++)
 	{
-		Selectivity sel = streams[i]->range_sel;
+		Selectivity sel = streams[i]->range_sel + null_frac;
 
 		if (sel > 0)
 			shares[i] = Min(table_share / sel, 1.0);
@@ -647,6 +746,10 @@ lf_index_entries(PlannerInfo *root, Index rti, IndexCandidate *candidate)
  *		partial indexes, estimated the way the planner estimates the
  *		relation's rows from its restrictions.  The node fetches these rows
  *		from the heap; the remaining restrictions filter them afterwards.
+ *		A predicate the other conditions imply restricts nothing further and
+ *		is left out, as btcostestimate's add_predicate_to_index_quals does:
+ *		kind = 2 would otherwise count twice for an equality kind = 2 and a
+ *		predicate kind = 2.
  */
 static double
 stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -656,9 +759,19 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	/* two streams on the same column share the clause: count it once */
 	for (int i = 0; i < nstreams; i++)
-	{
 		clauses = list_concat_unique_ptr(clauses, streams[i]->clauses);
-		clauses = list_concat_unique(clauses, streams[i]->index->indpred);
+
+	for (int i = 0; i < nstreams; i++)
+	{
+		ListCell   *lc;
+
+		foreach(lc, streams[i]->index->indpred)
+		{
+			Node	   *pred = (Node *) lfirst(lc);
+
+			if (!predicate_implied_by(list_make1(pred), clauses, false))
+				clauses = lappend(clauses, pred);
+		}
 	}
 
 	return clamp_row_est(rel->tuples *
@@ -672,13 +785,14 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		whose parameterization is set and whose rows hold the planner's
  *		estimate for the relation, as cost_index does for an index path.
  *		streams[0] is the outer index; every candidate has its entries set.
- *		ndistinct is lf_sortcol_ndistinct, correlation
+ *		sort is the column the query sorts by.  ndistinct is
+ *		lf_sortcol_ndistinct, correlation
  *		lf_outer_index_correlation of the outer index.  Returns in reads[]
  *		the entries each stream is expected to read, for EXPLAIN VERBOSE.
  */
 void
 lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
-					   RangeTblEntry *rte, AttrNumber sort_attno,
+					   RangeTblEntry *rte, SortColumn *sort,
 					   IndexCandidate **streams, int nstreams,
 					   double ndistinct, double correlation, double *reads)
 {
@@ -697,14 +811,14 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	Cost		startup_cost;
 
 	loop_count = loop_count_for(root, PATH_REQ_OUTER(&cpath->path));
-	restriction_qual_cost(root, rel, param_info, &qpqual_cost);
+	node_qual_cost(root, rel, param_info, streams, nstreams, &qpqual_cost);
 
 	/*
 	 * Only the entries inside the overlap of the streams' sortcol ranges are
 	 * read, and the matches lie there (stream_overlap); a stream that starts
 	 * outside it skips in with one more descent.
 	 */
-	stream_overlap(root, rte, rel->relid, sort_attno, streams, nstreams,
+	stream_overlap(root, rte, rel->relid, sort, streams, nstreams,
 				   shares, &rows_factor);
 	for (int i = 0; i < nstreams; i++)
 	{

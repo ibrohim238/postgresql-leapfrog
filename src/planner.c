@@ -16,7 +16,6 @@
 #include "access/cmptype.h"
 #include "access/nbtree.h"
 #include "catalog/pg_am_d.h"
-#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -74,7 +73,7 @@ typedef struct IntersectSearch
 	RelOptInfo *rel;
 	Index		rti;
 	RangeTblEntry *rte;
-	AttrNumber	sort_attno;
+	SortColumn	sort;
 	PathKey    *pathkey;
 	IndexCandidate *candidates;
 	int			ncandidates;
@@ -162,7 +161,9 @@ is_column_var(Node *node, Index rti, AttrNumber attno)
  *		Fills *equality with the value y, the operator with x on the left
  *		(the commutator when the clause has x on the right) and the
  *		collation the clause compares in.  As for an Index Cond, the index
- *		column must be sorted in that collation, unless it has none.
+ *		column must be sorted in that collation, unless it has none, and the
+ *		clause must be safe to run before the row security quals: a scan key
+ *		sees every entry of the index, also those of rows the quals hide.
  */
 static bool
 match_index_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
@@ -174,7 +175,8 @@ match_index_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
 	Node	   *right;
 	Oid			opno;
 
-	if (rinfo->pseudoconstant || !IsA(rinfo->clause, OpExpr))
+	if (rinfo->pseudoconstant || !IsA(rinfo->clause, OpExpr) ||
+		!restriction_is_securely_promotable(rinfo, index->rel))
 		return false;
 
 	op = (OpExpr *) rinfo->clause;
@@ -330,16 +332,20 @@ find_equality_clause(PlannerInfo *root, RelOptInfo *rel, Index rti,
  * pathkey_is_column
  *		Is the given pathkey a sort on column attno of relation rti?  A
  *		member nulled by an outer join is a different expression, as
- *		get_eclass_for_sort_expr treats it when building index pathkeys.
+ *		get_eclass_for_sort_expr treats it when building index pathkeys.  The
+ *		column of a partition is a child member of the class, which only the
+ *		iterator shows, with the partition's own attribute number.
  */
 static bool
-pathkey_is_column(PathKey *pathkey, Index rti, AttrNumber attno)
+pathkey_is_column(PathKey *pathkey, RelOptInfo *rel, Index rti,
+				  AttrNumber attno)
 {
-	ListCell   *lc;
+	EquivalenceMemberIterator it;
+	EquivalenceMember *em;
 
-	foreach(lc, pathkey->pk_eclass->ec_members)
+	setup_eclass_member_iterator(&it, pathkey->pk_eclass, rel->relids);
+	while ((em = eclass_member_iterator_next(&it)) != NULL)
 	{
-		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
 		Var		   *var = match_column_var((Node *) em->em_expr, rti, attno);
 
 		if (var != NULL && var->varnullingrels == NULL)
@@ -350,29 +356,11 @@ pathkey_is_column(PathKey *pathkey, Index rti, AttrNumber attno)
 }
 
 /*
- * is_integer_column
- *		The sort column is compared and skipped to as a 64-bit integer:
- *		smallint, integer or bigint, or a domain over one of them.
- */
-static bool
-is_integer_column(RangeTblEntry *rte, AttrNumber attno)
-{
-	Oid			type;
-
-	if (attno <= 0)
-		return false;
-	type = getBaseType(get_atttype(rte->relid, attno));
-
-	return type == INT2OID || type == INT4OID || type == INT8OID;
-}
-
-/*
  * is_notnull_column
- *		NULLs have no place in the merge: values are compared for equality
- *		and the sort column must be NOT NULL.  The planner's notnullattnums
- *		is the source of truth: a NOT NULL constraint added NOT VALID sets
- *		pg_attribute.attnotnull while NULLs may still be in the column, and
- *		get_relation_info leaves such columns out of the set.
+ *		Can the sort column hold NULLs in the live rows?  The planner's
+ *		notnullattnums is the source of truth: a NOT NULL constraint added NOT
+ *		VALID sets pg_attribute.attnotnull while NULLs may still be in the
+ *		column, and get_relation_info leaves such columns out of the set.
  */
 static bool
 is_notnull_column(RelOptInfo *rel, AttrNumber attno)
@@ -404,24 +392,39 @@ is_heapkeyspace(IndexCandidate *candidate)
 }
 
 /*
- * is_usable_btree
- *		A btree whose column at position pos is sorted ascending in the
- *		operator family of the query's sort key, so that every stream of the
- *		merge produces values in the order the query asks for.  NULLs
- *		ordering is not checked: the sort column is NOT NULL.  Whether the
- *		duplicates are ordered by TID is checked last, by is_heapkeyspace,
- *		for the sets that pass everything else: it opens the index.
+ * is_backward_stream
+ *		Does the index give the query's order when scanned backward?
  */
 static bool
-is_usable_btree(IndexOptInfo *index, int pos, PathKey *pathkey)
+is_backward_stream(IndexOptInfo *index, int pos, SortColumn *sort)
+{
+	return index->reverse_sort[pos] != sort->descending;
+}
+
+/*
+ * is_usable_btree
+ *		A btree whose column at position pos is sorted in the operator family,
+ *		input type and collation of the query's sort key, so that its values
+ *		compare alike with the other streams', and which reads the query's
+ *		order in one scan direction or the other.  So must the NULLs of a
+ *		nullable column: an index with them at the wrong end for that direction
+ *		is no stream.  Whether the duplicates are ordered by TID is checked
+ *		last, by is_heapkeyspace, for the sets that pass everything else: it
+ *		opens the index.
+ */
+static bool
+is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
 {
 	return index->relam == BTREE_AM_OID &&
 		!index->hypothetical &&
 		(index->indpred == NIL || index->predOK) &&
-		index->opfamily[pos] == INTEGER_BTREE_FAM_OID &&
 		index->sortopfamily != NULL &&
-		index->sortopfamily[pos] == pathkey->pk_opfamily &&
-		!index->reverse_sort[pos];
+		index->sortopfamily[pos] == sort->opfamily &&
+		index->opcintype[pos] == sort->type &&
+		index->indexcollations[pos] == sort->collation &&
+		(sort->notnull ||
+		 (is_backward_stream(index, pos, sort) ? !index->nulls_first[pos] :
+		  index->nulls_first[pos]) == sort->nulls_first);
 }
 
 /*
@@ -450,7 +453,7 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{
-		if (index->indexkeys[i] == search->sort_attno)
+		if (index->indexkeys[i] == search->sort.attno)
 		{
 			sortpos = i;
 			break;
@@ -458,7 +461,7 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 	}
 	candidate->sortpos = sortpos;
 
-	if (sortpos < 0 || !is_usable_btree(index, sortpos, search->pathkey))
+	if (sortpos < 0 || !is_usable_btree(index, sortpos, &search->sort))
 		return false;
 
 	for (int i = 0; i < sortpos; i++)
@@ -480,6 +483,7 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 													equality.outer_relids);
 	}
 
+	candidate->backward = is_backward_stream(index, sortpos, &search->sort);
 	candidate->entries = lf_index_entries(search->root, search->rti, candidate);
 
 	return true;
@@ -624,7 +628,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 
 	if (search->ndistinct < 0)
 		search->ndistinct = lf_sortcol_ndistinct(root, rel, search->rti,
-												 search->sort_attno);
+												 search->sort.attno);
 
 	/*
 	 * The TID groups of one value are expected to fit into work_mem together.
@@ -666,7 +670,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	cpath->flags = 0;
 	cpath->methods = &intersect_path_methods;
 
-	lf_cost_intersect_path(cpath, root, search->rte, search->sort_attno,
+	lf_cost_intersect_path(cpath, root, search->rte, &search->sort,
 						   streams, nstreams, search->ndistinct, correlation,
 						   reads);
 
@@ -678,9 +682,15 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	 * the PRIVATE_* and STREAM_* positions.
 	 */
 	cpath->custom_private =
-		list_make2(makeBoolConst(search->pathkey->pk_cmptype == COMPARE_GT,
-								 false),
-				   make_int4_const(nstreams));
+		list_make5(makeBoolConst(search->sort.descending, false),
+				   make_int4_const(nstreams),
+				   make_oid_const(search->sort.type),
+				   make_oid_const(search->sort.opfamily),
+				   make_oid_const(search->sort.collation));
+	cpath->custom_private = lappend(cpath->custom_private,
+									makeBoolConst(search->sort.nulls_first, false));
+	cpath->custom_private = lappend(cpath->custom_private,
+									makeBoolConst(search->sort.notnull, false));
 	for (int i = 0; i < nstreams; i++)
 	{
 		cpath->custom_private = lappend(cpath->custom_private,
@@ -693,6 +703,8 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 										list_copy(streams[i]->operators));
 		cpath->custom_private = lappend(cpath->custom_private,
 										list_copy(streams[i]->collations));
+		cpath->custom_private = lappend(cpath->custom_private,
+										makeBoolConst(streams[i]->backward, false));
 	}
 	for (int i = 0; i < nstreams; i++)
 	{
@@ -844,7 +856,10 @@ expand_best_pair(IntersectSearch *search, BestPair *best)
 /*
  * intersect_set_rel_pathlist
  *		set_rel_pathlist_hook: offer Index Merge Intersect paths for every
- *		suitable set of indexes of the relation.
+ *		suitable set of indexes of the relation.  A partition is a relation of
+ *		its own here: its sorted path goes into the parent's MergeAppend or
+ *		ordered Append, and a partition without one is sorted there instead.
+ *		The partitioned parent itself has no storage and is left to those.
  */
 static void
 intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -852,14 +867,17 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 {
 	IntersectSearch search;
 	BestPair	best;
+	EquivalenceMemberIterator it;
+	EquivalenceMember *em;
 	ListCell   *lc;
 
 	if (prev_set_rel_pathlist_hook)
 		prev_set_rel_pathlist_hook(root, rel, rti, rte);
 
+	/* a sampled relation is read through its Sample Scan only */
 	if (!intersect_enabled || rte->rtekind != RTE_RELATION ||
-		rte->relkind != RELKIND_RELATION ||
-		rel->reloptkind != RELOPT_BASEREL || root->query_pathkeys == NIL ||
+		rte->relkind != RELKIND_RELATION || rte->tablesample != NULL ||
+		!IS_SIMPLE_REL(rel) || root->query_pathkeys == NIL ||
 		IS_DUMMY_REL(rel) || rel->indexlist == NIL)
 		return;
 
@@ -867,14 +885,14 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	search.rel = rel;
 	search.rti = rti;
 	search.rte = rte;
-	search.sort_attno = InvalidAttrNumber;
+	search.sort.attno = InvalidAttrNumber;
 	search.ndistinct = -1.0;
 
-	/* the sort column: an integer NOT NULL column of this relation */
+	/* the sort column: a column of this relation */
 	search.pathkey = linitial_node(PathKey, root->query_pathkeys);
-	foreach(lc, search.pathkey->pk_eclass->ec_members)
+	setup_eclass_member_iterator(&it, search.pathkey->pk_eclass, rel->relids);
+	while ((em = eclass_member_iterator_next(&it)) != NULL)
 	{
-		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
 		Node	   *expr = (Node *) em->em_expr;
 		AttrNumber	attno;
 
@@ -883,15 +901,22 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		if (!IsA(expr, Var))
 			continue;
 		attno = ((Var *) expr)->varattno;
-		if (attno > 0 && pathkey_is_column(search.pathkey, rti, attno) &&
-			is_integer_column(rte, attno) && is_notnull_column(rel, attno))
+		if (attno > 0 && pathkey_is_column(search.pathkey, rel, rti, attno))
 		{
-			search.sort_attno = attno;
+			search.sort.attno = attno;
+			search.sort.type = em->em_datatype;
+			search.sort.opfamily = search.pathkey->pk_opfamily;
+			search.sort.collation = search.pathkey->pk_eclass->ec_collation;
+			search.sort.descending = search.pathkey->pk_cmptype == COMPARE_GT;
+			search.sort.nulls_first = search.pathkey->pk_nulls_first;
+			search.sort.notnull = is_notnull_column(rel, attno);
+			search.sort.null_frac = -1.0;
+			search.sort.range_ssup_ready = false;
 			break;
 		}
 	}
 
-	if (search.sort_attno == InvalidAttrNumber)
+	if (search.sort.attno == InvalidAttrNumber)
 		return;
 
 	/*
@@ -997,31 +1022,28 @@ path_stream_exprs(CustomPath *best_path, int stream, int which)
 }
 
 /*
- * intersect_scan_qual
- *		The quals the node still has to evaluate, as create_indexscan_plan
- *		computes qpqual: the equalities on the columns of every stream are
- *		enforced by the scan keys and rechecked under EvalPlanQual by
- *		intersect_recheck, so they are dropped.  Clauses implied by the
- *		predicate of an inner index are dropped as well, except for a target
- *		relation of UPDATE/DELETE/SELECT FOR UPDATE, where
- *		check_index_predicates keeps them in the plan for EvalPlanQual.
+ * lf_node_quals
+ *		The clauses the node still has to evaluate on a fetched row, as
+ *		create_indexscan_plan computes qpqual: the equalities on the columns
+ *		of every stream are enforced by the scan keys and rechecked under
+ *		EvalPlanQual by intersect_recheck, so they are dropped.  Clauses
+ *		implied by the predicate of an inner index are dropped as well, except
+ *		for a target relation of UPDATE/DELETE/SELECT FOR UPDATE, where
+ *		check_index_predicates keeps them in the plan for EvalPlanQual.  The
+ *		cost model charges exactly these clauses.  indexes[0] is the outer
+ *		index, exprs[i] the value expressions of stream i.
  *
  * Clauses implied by the predicate of a partial outer index are never
  * dropped: the node does not keep that predicate, so under EvalPlanQual
  * only this qual checks it on the new row version (leapfrog_outer_partial).
  */
-static List *
-intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
-					List *clauses)
+List *
+lf_node_quals(PlannerInfo *root, RelOptInfo *rel, IndexOptInfo **indexes,
+			  List **exprs, int nstreams, List *clauses)
 {
-	int			nstreams = path_nstreams(best_path);
-	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
 	bool		is_target_rel;
 	List	   *qpqual = NIL;
 	ListCell   *lc;
-
-	for (int i = 0; i < nstreams; i++)
-		indexes[i] = find_index_info(rel, path_stream_oid(best_path, i));
 
 	is_target_rel = (bms_is_member(rel->relid, root->all_result_relids) ||
 					 get_plan_rowmark(root->rowMarks, rel->relid) != NULL);
@@ -1037,9 +1059,7 @@ intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		{
 			List	   *indpred = i > 0 ? indexes[i]->indpred : NIL;
 
-			if (is_candidate_equality(rinfo, rel->relid, indexes[i],
-									  path_stream_exprs(best_path, i,
-														STREAM_EXPRS_KEYS)))
+			if (is_candidate_equality(rinfo, rel->relid, indexes[i], exprs[i]))
 				enforced = true;
 			else if (!is_target_rel && indpred != NIL &&
 					 !contain_mutable_functions((Node *) rinfo->clause) &&
@@ -1051,7 +1071,30 @@ intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			qpqual = lappend(qpqual, rinfo);
 	}
 
-	return extract_actual_clauses(qpqual, false);
+	return qpqual;
+}
+
+/*
+ * intersect_scan_qual
+ *		The plan's qual: lf_node_quals for the streams of the path.
+ */
+static List *
+intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
+					List *clauses)
+{
+	int			nstreams = path_nstreams(best_path);
+	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
+	List	   *exprs[INTERSECT_MAX_STREAMS];
+
+	for (int i = 0; i < nstreams; i++)
+	{
+		indexes[i] = find_index_info(rel, path_stream_oid(best_path, i));
+		exprs[i] = path_stream_exprs(best_path, i, STREAM_EXPRS_KEYS);
+	}
+
+	return extract_actual_clauses(lf_node_quals(root, rel, indexes, exprs,
+												nstreams, clauses),
+								  false);
 }
 
 /*

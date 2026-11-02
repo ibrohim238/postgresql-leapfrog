@@ -14,8 +14,9 @@
 
 #include <limits.h>
 
-#include "access/nbtree.h"
 #include "access/relscan.h"
+#include "access/stratnum.h"
+#include "catalog/pg_attribute.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -56,12 +57,17 @@ typedef struct IndexStream
 	IndexScanDesc scan;
 	EqualityKeys keys;			/* equalities on the columns before sortcol */
 	int			sort_attno;		/* sortcol's position in the index tuple */
+	ScanDirection dir;			/* gives the query's order in this index */
 	ExprState  *pred;			/* predicate of a partial inner index */
 	bool		have;			/* current entry is not consumed yet */
 	bool		eof;
-	int64		value;
+	Datum		value;			/* points into the scan's index tuple */
+	bool		isnull;
+	bool		bounded;		/* a skip's bound keeps NULLs still ahead out */
 	ItemPointerData tid;
 	SkipAhead	skip;
+	MemoryContext bound_cxt;	/* the bound of the last skip, which nbtree
+								 * evaluates until the next rescan */
 
 	/* TID group of the value being matched, sorted (inner streams) */
 	bool		group_overflow; /* group exceeded its share of work_mem */
@@ -74,6 +80,14 @@ typedef struct IndexStream
 	int64		group_overflows;
 	double		estimate;		/* entries the cost model expected */
 } IndexStream;
+
+/* How two values compare: inline for the comparators that are plain integers. */
+typedef enum SortCompareKind
+{
+	SORT_COMPARE_GENERIC,
+	SORT_COMPARE_INT64,
+	SORT_COMPARE_INT32,
+} SortCompareKind;
 
 /*
  * Execution state of an Index Merge Intersect scan.
@@ -92,8 +106,16 @@ typedef struct IntersectScanState
 	bool		fetching_match; /* heap fetch of a matched entry in progress */
 	bool		match_by_pred;	/* some inner group overflowed: check the row */
 	bool		in_group;		/* groups of group_value are collected */
-	int64		group_value;
+	Datum		group_value;	/* copied into group_cxt: the streams move on */
+	bool		group_isnull;
+	MemoryContext group_cxt;	/* reset when the next group starts */
 	int			group_limit;	/* entries of one group that fit into work_mem */
+	SortSupportData ssup;		/* compares values in query order */
+	SortCompareKind compare_kind;	/* what compare_values does with them */
+	int16		sort_typlen;
+	bool		sort_typbyval;
+	bool		sort_notnull;	/* NULL entries are dead: skip them */
+	bool		nulls_ahead;	/* NULLs come after every value in the merge */
 
 	/* instrumentation, summed over all rescans */
 	int64		matched;		/* TIDs found in every stream */
@@ -148,7 +170,8 @@ intersect_create_scan_state(CustomScan *cscan)
  */
 static void
 init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
-				   List *collations, Relation index, int sort_attno,
+				   List *collations, Relation index, Oid sort_type,
+				   Oid sort_opfamily, Oid sort_collation, bool descending,
 				   PlanState *parent)
 {
 	ListCell   *lc;
@@ -167,9 +190,8 @@ init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
 		i++;
 	}
 	keys->nequal = i;
-	lf_init_key_procs(keys,
-					  getBaseType(TupleDescAttr(RelationGetDescr(index),
-												sort_attno - 1)->atttypid));
+	lf_init_key_procs(keys, sort_type, sort_opfamily, sort_collation,
+					  descending);
 }
 
 static Datum
@@ -202,6 +224,12 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	heap = node->ss.ss_currentRelation;
 	List	   *private = cscan->custom_private;
+	Oid			sort_type = DatumGetObjectId(private_datum(private,
+														   PRIVATE_SORT_TYPE));
+	Oid			sort_opfamily = DatumGetObjectId(private_datum(private,
+															   PRIVATE_SORT_OPFAMILY));
+	Oid			sort_collation = DatumGetObjectId(private_datum(private,
+																PRIVATE_SORT_COLLATION));
 
 	state->descending =
 		DatumGetBool(private_datum(private, PRIVATE_DESCENDING));
@@ -222,12 +250,16 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 					   AccessShareLock);
 		stream->sort_attno =
 			DatumGetInt32(stream_datum(private, i, STREAM_PRIVATE_SORTPOS)) + 1;
+		stream->dir =
+			DatumGetBool(stream_datum(private, i, STREAM_PRIVATE_BACKWARD)) ?
+			BackwardScanDirection : ForwardScanDirection;
 		stream->estimate =
 			DatumGetFloat8(stream_datum(private, i, STREAM_PRIVATE_ESTIMATE));
 		init_equality_keys(&stream->keys, keys,
 						   stream_oids(private, i, STREAM_PRIVATE_OPERATORS),
 						   stream_oids(private, i, STREAM_PRIVATE_COLLATIONS),
-						   stream->index, stream->sort_attno, &node->ss.ps);
+						   stream->index, sort_type, sort_opfamily,
+						   sort_collation, state->descending, &node->ss.ps);
 		stream->pred = ExecInitQual(pred, &node->ss.ps);
 	}
 	state->values_cxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -236,6 +268,38 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
+
+	state->ssup.ssup_cxt = CurrentMemoryContext;
+	state->ssup.ssup_collation = sort_collation;
+	state->ssup.ssup_nulls_first = DatumGetBool(private_datum(private,
+															  PRIVATE_SORT_NULLS_FIRST));
+	state->sort_notnull = DatumGetBool(private_datum(private,
+													 PRIVATE_SORT_NOTNULL));
+	state->nulls_ahead = !state->sort_notnull && !state->ssup.ssup_nulls_first;
+	PrepareSortSupportFromOrderingOp(get_opfamily_member(sort_opfamily, sort_type,
+														 sort_type,
+														 state->descending ?
+														 BTGreaterStrategyNumber :
+														 BTLessStrategyNumber),
+									 &state->ssup);
+	state->compare_kind = SORT_COMPARE_GENERIC;
+#if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
+	if (state->ssup.comparator == ssup_datum_signed_cmp)
+		state->compare_kind = SORT_COMPARE_INT64;
+#endif
+	if (state->ssup.comparator == ssup_datum_int32_cmp)
+		state->compare_kind = SORT_COMPARE_INT32;
+	{
+		Form_pg_attribute attr =
+			TupleDescAttr(RelationGetDescr(state->streams[0].index),
+						  state->streams[0].sort_attno - 1);
+
+		state->sort_typlen = attr->attlen;
+		state->sort_typbyval = attr->attbyval;
+	}
+	state->group_cxt = AllocSetContextCreate(CurrentMemoryContext,
+											 "leapfrog group value",
+											 ALLOCSET_SMALL_SIZES);
 
 	/* the group arrays together never grow past the work_mem budget */
 	state->group_limit = (int) Min((double) INT_MAX / 2,
@@ -248,9 +312,13 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 		IndexStream *stream = &state->streams[i];
 
 		/* the equality keys plus the bound on sortcol used for skipping ahead */
-		stream->scan = index_beginscan(heap, stream->index, estate->es_snapshot,
-									   NULL, stream->keys.nequal + 1, 0);
+		stream->scan = lf_index_beginscan(heap, stream->index,
+										  estate->es_snapshot,
+										  stream->keys.nequal + 1);
 		stream->scan->xs_want_itup = true;
+		stream->bound_cxt = AllocSetContextCreate(CurrentMemoryContext,
+												  "leapfrog skip bound",
+												  ALLOCSET_SMALL_SIZES);
 		if (i > 0)
 		{
 			stream->group_capacity = Max(1, Min(16, state->group_limit));
@@ -325,6 +393,47 @@ evaluate_equal_values(IntersectScanState *state)
 }
 
 /*
+ * compare_values
+ *		Compare two values of the merge in query order: above zero when a is
+ *		further along than b.  bigint, timestamptz and the like compare as
+ *		plain integers, inline: on a merge of bigint values the indirect call
+ *		costs about a tenth of the node's time (BENCHMARKS.md).
+ */
+static inline int
+compare_values(IntersectScanState *state, Datum a, bool a_isnull, Datum b,
+			   bool b_isnull)
+{
+	SortSupport ssup = &state->ssup;
+	int			compare;
+
+	if (a_isnull || b_isnull)
+	{
+		if (a_isnull && b_isnull)
+			return 0;
+		return (a_isnull == ssup->ssup_nulls_first) ? -1 : 1;
+	}
+
+	switch (state->compare_kind)
+	{
+		case SORT_COMPARE_INT64:
+			compare = (DatumGetInt64(a) > DatumGetInt64(b)) -
+				(DatumGetInt64(a) < DatumGetInt64(b));
+			break;
+		case SORT_COMPARE_INT32:
+			compare = (DatumGetInt32(a) > DatumGetInt32(b)) -
+				(DatumGetInt32(a) < DatumGetInt32(b));
+			break;
+		default:
+			compare = ssup->comparator(a, b, ssup);
+			break;
+	}
+	if (ssup->ssup_reverse)
+		INVERT_COMPARE_RESULT(compare);
+
+	return compare;
+}
+
+/*
  * init_skip
  *		Start a stream's skip-ahead at leapfrog.skip_after; 0 never skips.
  */
@@ -341,22 +450,37 @@ init_skip(SkipAhead *skip)
  * skip_ahead
  *		Re-position a lagging stream on the frontmost value, remembering the
  *		leaf page it leaves so that check_landing can tell how far it went.
+ *		A bound on a value excludes NULLs, which read_stream_entry goes back
+ *		for when they come later in the merge; a NULL bound is the last group.
  */
 static void
-skip_ahead(IntersectScanState *state, IndexStream *stream, int64 bound)
+skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
+		   bool bound_isnull)
 {
-	BTScanOpaque so = (BTScanOpaque) stream->scan->opaque;
+	MemoryContext oldcxt;
+
 	SkipAhead  *skip = &stream->skip;
 
-	skip->landing = BTScanPosIsValid(so->currPos);
-	if (skip->landing)
-	{
-		skip->from_page = so->currPos.currPage;
-		skip->from_next = state->descending ?
-			so->currPos.prevPage : so->currPos.nextPage;
-	}
+	skip->landing = lf_scan_leaf_position(stream->scan,
+										  ScanDirectionIsBackward(stream->dir),
+										  &skip->from_page, &skip->from_next);
 
-	lf_rescan_with_keys(stream->scan, &stream->keys, state->descending, bound);
+	/* bound belongs to another stream, which will move on */
+	MemoryContextReset(stream->bound_cxt);
+	if (bound_isnull)
+	{
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NULL,
+							(Datum) 0);
+		stream->bounded = false;
+	}
+	else
+	{
+		oldcxt = MemoryContextSwitchTo(stream->bound_cxt);
+		bound = datumCopy(bound, state->sort_typbyval, state->sort_typlen);
+		MemoryContextSwitchTo(oldcxt);
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_VALUE, bound);
+		stream->bounded = state->nulls_ahead;
+	}
 	skip->behind = 0;
 	state->skips++;
 }
@@ -372,15 +496,17 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, int64 bound)
 static void
 check_landing(IntersectScanState *state, IndexStream *stream)
 {
-	BTScanOpaque so = (BTScanOpaque) stream->scan->opaque;
 	SkipAhead  *skip = &stream->skip;
 	BlockNumber page;
+	BlockNumber next_page;
 
 	if (!skip->landing)
 		return;
 	skip->landing = false;
 
-	page = so->currPos.currPage;
+	(void) lf_scan_leaf_position(stream->scan,
+								 ScanDirectionIsBackward(stream->dir), &page,
+								 &next_page);
 	if (page == skip->from_page || page == skip->from_next)
 	{
 		state->short_skips++;
@@ -406,8 +532,9 @@ intersect_start(IntersectScanState *state)
 	{
 		IndexStream *stream = &state->streams[i];
 
-		lf_rescan_with_keys(stream->scan, &stream->keys, state->descending,
-							lf_no_bound(state->descending));
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
+							(Datum) 0);
+		stream->bounded = false;
 		init_skip(&stream->skip);
 	}
 
@@ -466,20 +593,30 @@ tid_compare(const void *a, const void *b)
 
 /*
  * read_stream_entry
- *		Advance a stream by one entry; remembers when it is exhausted.
+ *		Advance a stream by one entry; remembers when it is exhausted.  A
+ *		stream that ran out under a skip's bound has not seen the NULLs after
+ *		the values yet.
  */
 static void
-read_stream_entry(IntersectScanState *state, IndexStream *stream,
-				  ScanDirection dir)
+read_stream_entry(IntersectScanState *state, IndexStream *stream)
 {
-	if (lf_read_index_entry(stream->scan, dir, stream->sort_attno,
-							stream->keys.sort_type, &stream->value, &stream->tid, &stream->read))
+	for (;;)
 	{
-		stream->have = true;
-		check_landing(state, stream);
+		if (lf_read_index_entry(stream->scan, stream->dir, stream->sort_attno,
+								state->sort_notnull, &stream->value,
+								&stream->isnull, &stream->tid, &stream->read))
+		{
+			stream->have = true;
+			check_landing(state, stream);
+			return;
+		}
+		if (!stream->bounded)
+			break;
+		stream->bounded = false;
+		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NULL,
+							(Datum) 0);
 	}
-	else
-		stream->eof = true;
+	stream->eof = true;
 }
 
 /*
@@ -492,15 +629,16 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream,
  * treated as a match for the stream's conditions to be checked on the row.
  */
 static void
-collect_group(IntersectScanState *state, IndexStream *stream,
-			  ScanDirection dir)
+collect_group(IntersectScanState *state, IndexStream *stream)
 {
 	uint32		iterations = 0;
 
 	stream->group_overflow = false;
 	stream->group_count = 0;
 
-	while (stream->have && stream->value == state->group_value)
+	while (stream->have &&
+		   compare_values(state, stream->value, stream->isnull,
+						  state->group_value, state->group_isnull) == 0)
 	{
 		if ((++iterations & 1023) == 0)
 			CHECK_FOR_INTERRUPTS();
@@ -528,7 +666,7 @@ collect_group(IntersectScanState *state, IndexStream *stream,
 		}
 
 		stream->have = false;
-		read_stream_entry(state, stream, dir);
+		read_stream_entry(state, stream);
 	}
 
 	if (stream->group_overflow)
@@ -549,16 +687,6 @@ group_contains(IndexStream *stream, ItemPointer tid)
 }
 
 /*
- * value_is_ahead
- *		Is a further along in scan direction than b?
- */
-static inline bool
-value_is_ahead(IntersectScanState *state, int64 a, int64 b)
-{
-	return state->descending ? a < b : a > b;
-}
-
-/*
  * intersect_next
  *		Merge the sorted index streams, the counterpart of MySQL's
  *		RowIDIntersectionIterator::DoRead: advance the lagging streams until
@@ -570,10 +698,7 @@ intersect_next(ScanState *ss)
 	IntersectScanState *state = (IntersectScanState *) ss;
 	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
 	IndexStream *outer = &state->streams[0];
-	ScanDirection dir;
 	uint32		iterations = 0;
-
-	dir = state->descending ? BackwardScanDirection : ForwardScanDirection;
 
 	if (!state->started)
 	{
@@ -584,7 +709,8 @@ intersect_next(ScanState *ss)
 
 	while (!state->done)
 	{
-		int64		front;
+		Datum		front;
+		bool		front_isnull;
 		bool		all_equal;
 		bool		pending;
 		bool		exhausted = false;
@@ -632,7 +758,7 @@ intersect_next(ScanState *ss)
 
 		if (!outer->have)
 		{
-			read_stream_entry(state, outer, dir);
+			read_stream_entry(state, outer);
 			if (outer->eof)
 				break;
 		}
@@ -643,7 +769,8 @@ intersect_next(ScanState *ss)
 			bool		found = true;
 			bool		by_pred = false;
 
-			if (outer->value != state->group_value)
+			if (compare_values(state, outer->value, outer->isnull,
+							   state->group_value, state->group_isnull) != 0)
 			{
 				state->in_group = false;
 				continue;
@@ -681,7 +808,7 @@ intersect_next(ScanState *ss)
 				if (stream->eof)
 					exhausted = true;
 				else
-					read_stream_entry(state, stream, dir);
+					read_stream_entry(state, stream);
 				pending = true;
 			}
 		}
@@ -692,25 +819,38 @@ intersect_next(ScanState *ss)
 
 		/* the frontmost value in scan direction */
 		front = outer->value;
+		front_isnull = outer->isnull;
 		all_equal = true;
 		for (int i = 1; i < state->nstreams; i++)
 		{
-			int64		value = state->streams[i].value;
+			int			cmp = compare_values(state, state->streams[i].value,
+											 state->streams[i].isnull,
+											 front, front_isnull);
 
-			if (value != front)
+			if (cmp != 0)
 				all_equal = false;
-			if (value_is_ahead(state, value, front))
-				front = value;
+			if (cmp > 0)
+			{
+				front = state->streams[i].value;
+				front_isnull = state->streams[i].isnull;
+			}
 		}
 
 		if (all_equal)
 		{
+			MemoryContext oldcxt;
+
 			state->in_group = true;
-			state->group_value = front;
+			MemoryContextReset(state->group_cxt);
+			oldcxt = MemoryContextSwitchTo(state->group_cxt);
+			state->group_isnull = front_isnull;
+			state->group_value = front_isnull ? (Datum) 0 :
+				datumCopy(front, state->sort_typbyval, state->sort_typlen);
+			MemoryContextSwitchTo(oldcxt);
 			for (int i = 0; i < state->nstreams; i++)
 				state->streams[i].skip.behind = 0;
 			for (int i = 1; i < state->nstreams; i++)
-				collect_group(state, &state->streams[i], dir);
+				collect_group(state, &state->streams[i]);
 			continue;
 		}
 
@@ -725,14 +865,15 @@ intersect_next(ScanState *ss)
 		{
 			IndexStream *stream = &state->streams[i];
 
-			if (stream->value == front)
+			if (compare_values(state, stream->value, stream->isnull, front,
+							   front_isnull) == 0)
 			{
 				stream->skip.behind = 0;
 				continue;
 			}
 			stream->have = false;
 			if (++stream->skip.behind >= stream->skip.threshold)
-				skip_ahead(state, stream, front);
+				skip_ahead(state, stream, front, front_isnull);
 		}
 	}
 
@@ -750,8 +891,8 @@ intersect_next(ScanState *ss)
 		{
 			IndexStream *stream = &state->streams[i];
 
-			lf_rescan_with_keys(stream->scan, &stream->keys, state->descending,
-								lf_no_bound(state->descending));
+			lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
+								(Datum) 0);
 		}
 	}
 	state->done = true;

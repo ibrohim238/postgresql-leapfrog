@@ -4,18 +4,13 @@ Working plan for the next changes, with the design decisions already taken.
 Update this file in the commit that finishes or changes a step; delete a
 step once it is released and described in README.md and CHANGELOG.md.
 
-State at 0.0.3 (`a6c91f9`): equality columns of any B-tree type, equality
-values that are expressions of parameters and outer columns, sort columns
-`smallint`/`integer`/`bigint` and domains over them, `NOT NULL` and `ASC`
-only. Baseline measurements: BENCHMARKS.md, "Equality types".
-
-Order: 5, then 6, then 7 — each depends on the previous one. One step per
-change set: code in planner, cost model and executor, tests (regression and
-isolation, each verified by reverting the change), the cassert image,
-`types_bench.sh`-style measurements against the previous build (ABBA), README
-and CHANGELOG.
+State: steps 5, 6 and 7 are done and unreleased (CHANGELOG.md, README.md); their
+designs stay here until the release, as this file's rule says. Baseline
+measurements: BENCHMARKS.md, "Equality types".
 
 ## Step 5. Sort column of any B-tree type
+
+Done; unreleased.
 
 Goal: `ORDER BY created_at` (`timestamptz`), `date`, `numeric`, `uuid`,
 `text`, `varchar` … as the sort column, not only integers.
@@ -61,6 +56,8 @@ Design:
 
 ## Step 6. Nullable sort column
 
+Done; unreleased.
+
 Goal: drop the `NOT NULL` requirement (`is_notnull_column`,
 `RelOptInfo.notnullattnums`) with correct `NULLS FIRST`/`NULLS LAST`.
 
@@ -83,6 +80,8 @@ Design:
   it, MVCC/EPQ (a row whose sort value becomes NULL), HOT.
 
 ## Step 7. `DESC` and `NULLS FIRST` index columns
+
+Done; unreleased.
 
 Goal: use indexes like `(customer_id, id DESC)` or `(id DESC NULLS LAST)`.
 

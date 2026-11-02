@@ -1,0 +1,77 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2_plan
+step s2_plan: EXPLAIN (COSTS OFF) SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE;
+QUERY PLAN                                                  
+------------------------------------------------------------
+Limit                                                       
+  ->  LockRows                                              
+        ->  Custom Scan (Index Merge Intersect) on lf_iso_st
+              Outer Index: lf_iso_st_b                      
+              Inner Index: lf_iso_st_a                      
+(5 rows)
+
+
+starting permutation: s1_begin s1_b s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_b: UPDATE lf_iso_st SET b = 0 WHERE id = 22;
+step s2_lock: SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE; <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|note
+--+----
+10|n   
+34|n   
+46|n   
+(3 rows)
+
+
+starting permutation: s1_begin s1_b s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_b: UPDATE lf_iso_st SET b = 0 WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|note
+--+----
+10|n   
+34|n   
+46|n   
+(3 rows)
+
+
+starting permutation: s1_begin s1_note s2_lock s1_commit
+step s1_begin: BEGIN;
+step s1_note: UPDATE lf_iso_st SET note = 'changed' WHERE id = 22;
+step s2_lock: SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE; <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock: <... completed>
+id|note   
+--+-------
+10|n      
+22|changed
+34|n      
+(3 rows)
+
+
+starting permutation: s1_begin s1_note s2_lock_std s1_commit
+step s1_begin: BEGIN;
+step s1_note: UPDATE lf_iso_st SET note = 'changed' WHERE id = 22;
+step s2_lock_std: 
+	SET leapfrog.enabled = off;
+	SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE;
+	RESET leapfrog.enabled;
+ <waiting ...>
+step s1_commit: COMMIT;
+step s2_lock_std: <... completed>
+id|note   
+--+-------
+10|n      
+22|changed
+34|n      
+(3 rows)
+

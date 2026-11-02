@@ -7,6 +7,27 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Sort columns of any B-tree type (`timestamptz`, `date`, `numeric`, `text`,
+  `varchar`, `uuid`, arrays, enums, domains …): the merge compares `Datum`s
+  with the comparator of the query's sort key. Every stream's index column
+  must be in that key's operator family, input type and collation. The
+  by-reference value of a group and the bound of a skip are copied, as the
+  stream they came from moves on. Types that compare as plain integers
+  (`bigint`, `integer`, `timestamptz`, `date` …) do it inline. Tests in
+  `leapfrog_sort_types`.
+- Nullable sort columns, in all four `ASC/DESC × NULLS FIRST/LAST` orders. A
+  NULL is a value of the merge and its group is intersected by TID. A stream
+  that skipped on a value goes back for the NULLs when they come after the
+  values; the NULL group can be a skip's target. The cost model counts the
+  null fraction in the overlap of the streams. Tests in `leapfrog_nulls`.
+- `DESC` and `NULLS FIRST` index columns: each stream scans in the direction
+  that gives the query's order in its own index. Tests in
+  `leapfrog_index_order`.
+- Partitioned tables and inheritance: a node per child under a `Merge Append`
+  or ordered `Append`. Tests in `leapfrog_partition`.
+- PostgreSQL 19 (`REL_19_STABLE`): `index_beginscan` takes table AM flags;
+  alternative expected output for the changes in the core `EXPLAIN` format;
+  an assertion build in CI.
 - `tests/performance/bitmap_bench.sh`: the node against `BitmapAnd`, stock
   PostgreSQL and PostgreSQL with leapfrog at 100k to 50M rows, with and
   without `LIMIT`, the modes in ABBA order; `WORK_MEM` for exact bitmaps;
@@ -16,12 +37,32 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- nbtree's private scan state (`BTScanOpaque`) is read in one function,
+  `lf_scan_leaf_position`.
 - `compose.yaml` publishes the server on 127.0.0.1 only, not on every
   interface: the password is the well-known default. `LEAPFROG_BIND=0.0.0.0`
   restores the old behaviour.
 
 ### Fixed
 
+- `TABLESAMPLE` was ignored: the node was offered for a sampled relation and
+  returned rows outside the sample. Such a relation is now left to its
+  Sample Scan. Test in `leapfrog_basic`; without the check the node is used
+  and the rows differ from the stock plan's.
+- The equalities of a stream were taken without
+  `restriction_is_securely_promotable`, as scan keys, under row-level
+  security: a non-leakproof operator of the query ran on every index entry,
+  also those of rows the policy hides. Such a clause now stays in `Filter`,
+  after the policy's quals. Test in `leapfrog_security`.
+- Cost model: the node was charged for the whole `baserestrictcost` per
+  fetched row, including the equalities its scan keys enforce and the clauses
+  an inner predicate lets it drop from `Filter`. It is now charged for what
+  it evaluates, the same list the plan's `Filter` is made from
+  (`lf_node_quals`), as `cost_index` does.
+- Cost model: a predicate implied by the set's other conditions counted twice
+  in the rows fetched (equality `kind = 2` and predicate `kind = 2`), which
+  also lowered the node's row estimate. It is now left out, as
+  `add_predicate_to_index_quals` does. Tests for both in `leapfrog_cost`.
 - The planner kept the cheapest pair, and in the greedy expansion the
   cheapest set, as a pointer to the path it had passed to `add_path`, and
   read its cost from there afterwards. `add_path` frees a path it rejects or
