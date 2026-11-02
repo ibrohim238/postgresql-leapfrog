@@ -584,6 +584,61 @@ change plan between runs, here in one run of `f30cf7a` only.
 spread with 1 or 2 equalities; with 6, 0.670 against 0.642 ms at 10 indexes,
 0.684 against 0.652 at 20, 0.839 against 0.787 at 50 (4–7 %).
 
+## Planning (against `9d5422d`)
+
+The MySQL-style pass, the merge in turns from the sparsest stream, the shares from
+statistics read once and the pruning, on one build, against `fix/external-review`
+(`9d5422d`), in ABBA order. PostgreSQL 18.6, one container, data loaded and
+analyzed anew per run.
+
+`planning_bench.sh`, median of two runs per build, 200 plans each, ms:
+
+| Indexes | Equalities | Extension off | `9d5422d` | This build |
+|---:|---:|---:|---:|---:|
+| 10 | 1 | 0.04 | 0.12 | 0.07 |
+| 10 | 2 | 0.05 | 0.16 | 0.10 |
+| 10 | 6 | 0.07 | 0.66 | 0.15 |
+| 20 | 1 | 0.06 | 0.14 | 0.09 |
+| 20 | 2 | 0.07 | 0.18 | 0.13 |
+| 20 | 6 | 0.09 | 0.68 | 0.17 |
+| 50 | 1 | 0.11 | 0.19 | 0.14 |
+| 50 | 2 | 0.12 | 0.24 | 0.17 |
+| 50 | 6 | 0.16 | 0.84 | 0.26 |
+
+Where the hook's time goes, one instrumented build (timers around each function,
+not committed), 10 indexes, 6 equalities, ms per plan:
+
+| | `9d5422d` | MySQL-style pass only | This build |
+|---|---:|---:|---:|
+| The hook | 0.799 | 0.178 | 0.074 |
+| Finding the equalities | 0.004 | 0.003 | 0.003 |
+| `probe_range` | 0.125 | 0.053 | 0.054 |
+| Shares of the ranges | 0.522 | 0.106 | 0.002 |
+| Rows, `Filter` and the rest of the costing | 0.082 | 0.008 | 0.007 |
+| Sets costed | 41 | 3 | 3 |
+
+So a cost computed incrementally, as `ROR_intersect_plan::add` does, was not worth
+doing: all it could save is a few microseconds of that "rest". The pruning does not
+fire on this table, where the fourth stream still pays; on `leapfrog_planner`'s it
+saves one set and one range probe of three.
+
+`cost_bench.sh` (1M rows, 32 queries, 9 repeats): the planner's choice differs in
+none. Node time, minimum of the two runs per build, change / `9d5422d`: median 0.85,
+range 0.50–0.96, same buffers on 28 of the 32 and fewer on the other 4. Node cost median 1.00, range
+0.26–1.04; the lowest is the three-stream `customer+product+deleted`, which reads half
+the entries (0.58 ms against 0.30, 95 buffers against 49), with the estimated entries
+close to those read.
+
+`run.sh` (1M rows, 48 cases of strategy B, 5 repeats per run): median `exec_ms` 0.87,
+range 0.66–1.00, of `9d5422d`. One case (`uniform`, 10 % deleted, deleted rows,
+`LIMIT 100`, large owner) took the node in one run of `9d5422d` and the bitmap in the
+others, as in earlier comparisons.
+
+Three streams with a dense third, 1M rows, the node forced, median of 15, ms: 2,000
+and 2,000 entries with 40,000: 0.80 against 0.27; with 460,000: 0.87 against 0.29.
+20,000, 40,000 and 460,000: 31 against 24. Before the order from the sparsest stream,
+the circle of `RowIDIntersectionIterator::DoRead` took 2.0 and 22 in the first two.
+
 ## Not done
 
 - 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).

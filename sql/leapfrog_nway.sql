@@ -239,13 +239,12 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway_red WHERE membership_id = 3 ORDER BY id DESC LIMIT 100 $$);
 -- (membership_id, id) WHERE deleted_at IS NULL alone enforces both
 -- conditions: (membership_id, id) adds nothing to it, nor does
--- (id) WHERE deleted_at IS NULL, whose predicate it implies.  The pair that
--- remains is (membership_id, id) and (id) WHERE deleted_at IS NULL, each
--- adding one condition.
+-- (id) WHERE deleted_at IS NULL, whose predicate it implies.  With the fewest
+-- entries it comes first, and no set forms.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
 SELECT lf_check($$ SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
--- The same with the pair gone: the partial index on both columns is the plan.
+-- The same without the (id) WHERE index.
 BEGIN;
 DROP INDEX lf_nway_red_live;
 SELECT * FROM lf_plan($$

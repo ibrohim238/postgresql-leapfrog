@@ -1,4 +1,3 @@
-BestPair
 ColumnMatchArg
 EqualityKeys
 IndexCandidate
@@ -6,7 +5,9 @@ IndexEquality
 IndexStream
 IntersectScanState
 IntersectSearch
+PlannerTrace
 SkipAhead
 SortBound
 SortColumn
 SortCompareKind
+SortStats

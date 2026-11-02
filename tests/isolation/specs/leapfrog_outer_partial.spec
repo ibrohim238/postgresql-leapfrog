@@ -16,7 +16,9 @@ setup
 	);
 	INSERT INTO lf_iso_op SELECT g, g % 4, g % 3, g % 2, NULL FROM generate_series(1, 600) g;
 	CREATE INDEX lf_iso_op_live_customer_id ON lf_iso_op (customer_id, id) WHERE deleted_at IS NULL;
-	CREATE INDEX lf_iso_op_product_id_kind ON lf_iso_op (product_id, id, kind);
+	-- partial too, with a predicate every query implies: the outer stream is the
+	-- first with a predicate when all have one
+	CREATE INDEX lf_iso_op_product_id_kind ON lf_iso_op (product_id, id, kind) WHERE product_id IS NOT NULL;
 	ANALYZE lf_iso_op;
 }
 

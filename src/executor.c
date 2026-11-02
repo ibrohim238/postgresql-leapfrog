@@ -97,6 +97,7 @@ typedef struct IntersectScanState
 	CustomScanState css;
 	int			nstreams;
 	IndexStream *streams;
+	IndexStream **merge_order;	/* the streams, sparsest first */
 	bool		values_ready;	/* key values are evaluated */
 	bool		values_null;	/* some equality value is NULL */
 	MemoryContext values_cxt;	/* copies of the values, reset per rescan */
@@ -235,6 +236,7 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 		DatumGetBool(private_datum(private, PRIVATE_DESCENDING));
 	state->nstreams = DatumGetInt32(private_datum(private, PRIVATE_NSTREAMS));
 	state->streams = palloc0(state->nstreams * sizeof(IndexStream));
+	state->merge_order = palloc(state->nstreams * sizeof(IndexStream *));
 
 	for (int i = 0; i < state->nstreams; i++)
 	{
@@ -250,6 +252,8 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 					   AccessShareLock);
 		stream->sort_attno =
 			DatumGetInt32(stream_datum(private, i, STREAM_PRIVATE_SORTPOS)) + 1;
+		state->merge_order[DatumGetInt32(stream_datum(private, i,
+													  STREAM_PRIVATE_RANK))] = stream;
 		stream->dir =
 			DatumGetBool(stream_datum(private, i, STREAM_PRIVATE_BACKWARD)) ?
 			BackwardScanDirection : ForwardScanDirection;
@@ -687,6 +691,96 @@ group_contains(IndexStream *stream, ItemPointer tid)
 }
 
 /*
+ * find_common_value
+ *		Advance the streams until all of them stand on one value, and keep a
+ *		copy of it as the group value.  Returns false when a stream runs out.
+ *
+ * The invariant of RowIDIntersectionIterator::DoRead in MySQL, on the sort
+ * value instead of the rowid: one stream holds the candidate and the others
+ * catch up with it in turn.  A stream that reaches it confirms it; one that
+ * passes it holds the new candidate.  The candidate's stream does not move
+ * meanwhile, so its value stays valid.  Unlike there, the turns start again
+ * from the sparsest stream after each new candidate (the order
+ * find_intersect_order prefers there): a dense stream then has to reach only
+ * the values all the sparser ones agree on, and skips the rest in one descent,
+ * where taking turns in a circle makes it read nearly all of its entries.
+ *
+ * A stream that has read its threshold of entries without catching up descends
+ * its B-tree straight to the candidate: the entries in between cannot match,
+ * since the candidate's stream has consumed every value before its current one.
+ */
+static bool
+find_common_value(IntersectScanState *state)
+{
+	IndexStream *candidate = state->merge_order[0];
+	int			turn = 1;
+	uint32		iterations = 0;
+	MemoryContext oldcxt;
+
+	if (!candidate->have)
+	{
+		if (!candidate->eof)
+			read_stream_entry(state, candidate);
+		if (candidate->eof)
+			return false;
+	}
+
+	while (turn < state->nstreams)
+	{
+		IndexStream *stream = state->merge_order[turn];
+		int			cmp;
+
+		if (stream == candidate)
+		{
+			turn++;
+			continue;
+		}
+
+		for (;;)
+		{
+			if (!stream->have)
+			{
+				if (!stream->eof)
+					read_stream_entry(state, stream);
+				if (stream->eof)
+					return false;
+			}
+
+			cmp = compare_values(state, stream->value, stream->isnull,
+								 candidate->value, candidate->isnull);
+			if (cmp >= 0)
+				break;
+
+			/* long stretches without a match must stay interruptible */
+			if ((++iterations & 1023) == 0)
+				CHECK_FOR_INTERRUPTS();
+
+			stream->have = false;
+			if (++stream->skip.behind >= stream->skip.threshold)
+				skip_ahead(state, stream, candidate->value, candidate->isnull);
+		}
+
+		stream->skip.behind = 0;
+		if (cmp > 0)
+		{
+			candidate = stream;
+			turn = 0;
+		}
+		else
+			turn++;
+	}
+
+	MemoryContextReset(state->group_cxt);
+	oldcxt = MemoryContextSwitchTo(state->group_cxt);
+	state->group_isnull = candidate->isnull;
+	state->group_value = candidate->isnull ? (Datum) 0 :
+		datumCopy(candidate->value, state->sort_typbyval, state->sort_typlen);
+	MemoryContextSwitchTo(oldcxt);
+
+	return true;
+}
+
+/*
  * intersect_next
  *		Merge the sorted index streams, the counterpart of MySQL's
  *		RowIDIntersectionIterator::DoRead: advance the lagging streams until
@@ -709,12 +803,6 @@ intersect_next(ScanState *ss)
 
 	while (!state->done)
 	{
-		Datum		front;
-		bool		front_isnull;
-		bool		all_equal;
-		bool		pending;
-		bool		exhausted = false;
-
 		/* long stretches without a match must stay interruptible */
 		if ((++iterations & 1023) == 0)
 			CHECK_FOR_INTERRUPTS();
@@ -797,84 +885,12 @@ intersect_next(ScanState *ss)
 			continue;
 		}
 
-		/* every inner stream needs a current entry */
-		pending = false;
-		for (int i = 1; i < state->nstreams && !pending; i++)
-		{
-			IndexStream *stream = &state->streams[i];
-
-			if (!stream->have)
-			{
-				if (stream->eof)
-					exhausted = true;
-				else
-					read_stream_entry(state, stream);
-				pending = true;
-			}
-		}
-		if (exhausted)
+		if (!find_common_value(state))
 			break;
-		if (pending)
-			continue;
 
-		/* the frontmost value in scan direction */
-		front = outer->value;
-		front_isnull = outer->isnull;
-		all_equal = true;
+		state->in_group = true;
 		for (int i = 1; i < state->nstreams; i++)
-		{
-			int			cmp = compare_values(state, state->streams[i].value,
-											 state->streams[i].isnull,
-											 front, front_isnull);
-
-			if (cmp != 0)
-				all_equal = false;
-			if (cmp > 0)
-			{
-				front = state->streams[i].value;
-				front_isnull = state->streams[i].isnull;
-			}
-		}
-
-		if (all_equal)
-		{
-			MemoryContext oldcxt;
-
-			state->in_group = true;
-			MemoryContextReset(state->group_cxt);
-			oldcxt = MemoryContextSwitchTo(state->group_cxt);
-			state->group_isnull = front_isnull;
-			state->group_value = front_isnull ? (Datum) 0 :
-				datumCopy(front, state->sort_typbyval, state->sort_typlen);
-			MemoryContextSwitchTo(oldcxt);
-			for (int i = 0; i < state->nstreams; i++)
-				state->streams[i].skip.behind = 0;
-			for (int i = 1; i < state->nstreams; i++)
-				collect_group(state, &state->streams[i]);
-			continue;
-		}
-
-		/*
-		 * Advance every lagging stream by one entry, or, once it has read its
-		 * threshold of entries in a row without catching up, descend its
-		 * B-tree again straight to the frontmost value.  The entries in
-		 * between cannot match: the frontmost stream has consumed every value
-		 * before its current one.
-		 */
-		for (int i = 0; i < state->nstreams; i++)
-		{
-			IndexStream *stream = &state->streams[i];
-
-			if (compare_values(state, stream->value, stream->isnull, front,
-							   front_isnull) == 0)
-			{
-				stream->skip.behind = 0;
-				continue;
-			}
-			stream->have = false;
-			if (++stream->skip.behind >= stream->skip.threshold)
-				skip_ahead(state, stream, front, front_isnull);
-		}
+			collect_group(state, &state->streams[i]);
 	}
 
 	/*

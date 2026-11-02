@@ -66,7 +66,8 @@
 #define STREAM_PRIVATE_COLLATIONS 4 /* OID list: its collation per key */
 #define STREAM_PRIVATE_BACKWARD 5	/* the index reads the query's order
 									 * backward */
-#define STREAM_PRIVATE_COUNT	6
+#define STREAM_PRIVATE_RANK		6	/* its turn in the merge, sparsest first */
+#define STREAM_PRIVATE_COUNT	7
 #define STREAM_EXPRS_KEYS		0
 #define STREAM_EXPRS_PRED		1
 #define STREAM_EXPRS_COUNT		2
@@ -109,6 +110,25 @@ typedef enum SortBound
 } SortBound;
 
 /*
+ * The statistics of the sort column, read once per relation and planning: the
+ * share of a range is asked for many times, and each scalarineqsel reads and
+ * detoasts them anew.  usable is false when they cannot answer in the query's
+ * order; the selectivity functions do then.
+ */
+typedef struct SortStats
+{
+	bool		usable;
+	bool		interpolate;	/* values are integers: within a bin, by value */
+	bool		signed64;		/* else int32 */
+	Datum	   *hist;
+	int			nhist;
+	Datum	   *mcv;
+	float4	   *mcv_freq;
+	int			nmcv;
+	double		hist_frac;		/* share of the rows the histogram stands for */
+} SortStats;
+
+/*
  * The column the query sorts by, as the planner found it.  type is the input
  * type of the operator class (text for a varchar column, anyarray for an
  * array).  range_ssup compares in ascending order for the cost model's range
@@ -126,6 +146,7 @@ typedef struct SortColumn
 	double		null_frac;		/* share of NULLs, -1 until looked up */
 	bool		range_ssup_ready;
 	SortSupportData range_ssup;
+	SortStats  *stats;			/* NULL until looked up */
 } SortColumn;
 
 /*
@@ -156,7 +177,22 @@ typedef struct IndexCandidate
 	Datum		range_hi;
 	Selectivity range_sel;		/* table share inside the range, -1 until
 								 * computed */
+	double		correlation;	/* of the leading column, -2 until looked up */
 } IndexCandidate;
+
+/* What one planning did, for leapfrog.trace_planner. */
+typedef struct PlannerTrace
+{
+	int			candidates;
+	int			sets;			/* sets of streams costed */
+	int			range_scans;	/* index scans of probe_range */
+	int			stat_loads;		/* reads of the sort column's statistics */
+	int			range_fallbacks;	/* shares left to the selectivity
+									 * functions */
+	int			correlations;	/* correlations looked up */
+	int			pruned;			/* candidates that could not pay for
+								 * themselves */
+} PlannerTrace;
 
 /* leapfrog.c: settings */
 extern bool intersect_enabled;
@@ -164,6 +200,8 @@ extern bool intersect_force;
 extern int	intersect_skip_after;
 extern int	intersect_max_streams;
 extern int	intersect_min_streams;
+extern bool intersect_trace_planner;
+extern PlannerTrace lf_trace;
 
 /* planner.c */
 extern void lf_planner_init(void);
@@ -182,7 +220,8 @@ extern void lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 								   RangeTblEntry *rte, SortColumn *sort,
 								   IndexCandidate **streams, int nstreams,
 								   double ndistinct, double correlation,
-								   double *reads);
+								   double *reads, int *ranks, Cost *fetch_cost);
+extern Cost lf_stream_min_cost(IndexOptInfo *index);
 
 /* indexstream.c */
 extern void lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
