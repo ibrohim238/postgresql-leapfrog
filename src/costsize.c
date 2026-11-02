@@ -7,13 +7,14 @@
  * through the planner's own cost functions:
  *
  *	  run = index_read_cost(each stream, entries read through the merge)
- *		   + cost of grouping the entries of one value, per inner stream
+ *		   + cost of grouping the entries of each value, per inner stream
  *		   + cost of fetching the matched rows from the heap
  *		   + cost of the node's qual per fetched row and of the target list
  *			 per result row
  *	  startup = descent into every btree (CPU, as btcostestimate charges it)
- *			  + the share of run spent before the first match
- *	  total = startup + run
+ *			  + the share of run spent before the first match, no less than
+ *				reading and sorting the first group of every inner stream
+ *	  total = descents + startup costs of the qual and target list + run
  *
  * Index pages are charged like genericcostestimate does (random_page_cost
  * per page, Mackert-Lohman for repeated scans inside a nestloop), the heap
@@ -25,8 +26,8 @@
  * Documented assumptions, not derived from statistics: inside the overlap
  * of the streams' sort ranges the matches are spread evenly along every
  * index (so a LIMIT is served by a proportional fraction of the total, as
- * the planner assumes for every path), and the TID group of one value has
- * the average size.  Skew inside the overlap can make a stream more
+ * the planner assumes for every path), and a TID group out of the most common
+ * values has the average size.  Skew among the others can make a stream more
  * expensive than predicted.
  *
  * IDENTIFICATION
@@ -44,6 +45,7 @@
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_type.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
@@ -58,6 +60,33 @@
 #include "utils/typcache.h"
 
 #include "leapfrog.h"
+
+/*
+ * Where the streams of a set can meet (stream_overlap).  lo and hi are the
+ * overlap of their sortcol ranges, when probed and not empty.  table_share is
+ * the share of the table's rows inside it, null_frac the share of the NULLs of
+ * the sort column when every stream holds them, else 0.
+ */
+typedef struct StreamOverlap
+{
+	RangeTblEntry *rte;
+	IndexCandidate **streams;
+	int			nstreams;
+	bool		probed;
+	bool		empty;
+	Datum		lo;
+	Datum		hi;
+	double		table_share;
+	double		null_frac;
+} StreamOverlap;
+
+/* Whether a stream holds a sort value, or the NULLs (stream_holds_group). */
+typedef struct GroupProbe
+{
+	Datum		value;
+	bool		isnull;
+	bool		present;
+} GroupProbe;
 
 /*
  * index_read_cost
@@ -452,6 +481,36 @@ lf_sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
  *		probed.
  */
 static bool
+candidate_const_keys(SortColumn *sort, IndexCandidate *candidate,
+					 EqualityKeys *keys)
+{
+	ListCell   *lc;
+
+	keys->nequal = 0;
+	foreach(lc, candidate->exprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		Const	   *value;
+
+		while (IsA(expr, RelabelType))
+			expr = (Node *) ((RelabelType *) expr)->arg;
+		if (!IsA(expr, Const) || ((Const *) expr)->constisnull)
+			return false;
+		value = (Const *) expr;
+		keys->values[keys->nequal] = value->constvalue;
+		keys->operators[keys->nequal] = list_nth_oid(candidate->operators,
+													 keys->nequal);
+		keys->collations[keys->nequal] = list_nth_oid(candidate->collations,
+													  keys->nequal);
+		keys->nequal++;
+	}
+	lf_init_key_procs(keys, sort->type, sort->opfamily, sort->collation,
+					  sort->descending);
+
+	return true;
+}
+
+static bool
 probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 {
 	EqualityKeys keys;
@@ -464,32 +523,13 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 	int			sort_keyno = candidate->sortpos + 1;
 	bool		isnull;
 	ScanDirection low_end;
-	ListCell   *lc;
 
 	if (candidate->range_known >= 0)
 		return candidate->range_known == 1;
 	candidate->range_known = 0;
 
-	keys.nequal = 0;
-	foreach(lc, candidate->exprs)
-	{
-		Node	   *expr = (Node *) lfirst(lc);
-		Const	   *value;
-
-		while (IsA(expr, RelabelType))
-			expr = (Node *) ((RelabelType *) expr)->arg;
-		if (!IsA(expr, Const) || ((Const *) expr)->constisnull)
-			return false;
-		value = (Const *) expr;
-		keys.values[keys.nequal] = value->constvalue;
-		keys.operators[keys.nequal] = list_nth_oid(candidate->operators,
-												   keys.nequal);
-		keys.collations[keys.nequal] = list_nth_oid(candidate->collations,
-													keys.nequal);
-		keys.nequal++;
-	}
-	lf_init_key_procs(&keys, sort->type, sort->opfamily, sort->collation,
-					  sort->descending);
+	if (!candidate_const_keys(sort, candidate, &keys))
+		return false;
 
 	/* the planner holds locks on the table and its indexes */
 	heap = table_open(rte->relid, NoLock);
@@ -598,6 +638,22 @@ range_compare(SortColumn *sort, Datum a, Datum b)
 	return ApplySortComparator(a, false, b, false, &sort->range_ssup);
 }
 
+/* mcv_order_cmp: the most common values by ascending value */
+typedef struct McvOrderArg
+{
+	SortColumn *sort;
+	SortStats  *stats;
+} McvOrderArg;
+
+static int
+mcv_order_cmp(const void *a, const void *b, void *arg)
+{
+	McvOrderArg *order = (McvOrderArg *) arg;
+
+	return range_compare(order->sort, order->stats->mcv[*(const int *) a],
+						 order->stats->mcv[*(const int *) b]);
+}
+
 /*
  * sort_stats
  *		The sort column's statistics, read on first use.  The histogram and the
@@ -651,6 +707,7 @@ sort_stats(PlannerInfo *root, Index rti, SortColumn *sort)
 				stats->nmcv = mcv.nvalues;
 				for (int i = 0; i < mcv.nvalues; i++)
 					mcv_total += mcv.numbers[i];
+				stats->mcv_total = mcv_total;
 			}
 			else
 				mcv_usable = false;
@@ -665,11 +722,8 @@ sort_stats(PlannerInfo *root, Index rti, SortColumn *sort)
 			stats->nhist = hist.nvalues;
 			stats->usable = true;
 			stats->hist_frac = Max(1.0 - null_frac - mcv_total, 0.0);
-		}
 
-		/* the comparators that compare plain integers */
-		if (stats->usable)
-		{
+			/* the comparators that compare plain integers */
 			range_compare(sort, stats->hist[0], stats->hist[0]);
 #if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
 			if (sort->range_ssup.comparator == ssup_datum_signed_cmp)
@@ -680,6 +734,17 @@ sort_stats(PlannerInfo *root, Index rti, SortColumn *sort)
 #endif
 			if (sort->range_ssup.comparator == ssup_datum_int32_cmp)
 				stats->interpolate = true;
+		}
+
+		if (stats->nmcv > 0)
+		{
+			McvOrderArg arg = {sort, stats};
+
+			stats->mcv_order = palloc(stats->nmcv * sizeof(int));
+			for (int i = 0; i < stats->nmcv; i++)
+				stats->mcv_order[i] = i;
+			qsort_arg(stats->mcv_order, stats->nmcv, sizeof(int),
+					  mcv_order_cmp, &arg);
 		}
 	}
 
@@ -808,32 +873,358 @@ sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)
 }
 
 /*
- * first_group_share
- *		Share of the table's rows in the group the merge reaches first: the
- *		NULLs when they come first, else the value the overlap of the ranges
- *		starts with, from the most common values, or an average group.  A value
- *		common enough to matter is among them.
+ * stream_holds_nulls
+ *		Whether NULLs of the sort column can be in the stream's index: not in a
+ *		partial index whose predicate rules them out, nor for a NOT NULL column.
  */
-static double
-first_group_share(PlannerInfo *root, Index rti, SortColumn *sort, Datum first,
-				  bool has_value, double ndistinct)
+static bool
+stream_holds_nulls(PlannerInfo *root, Index rti, SortColumn *sort,
+				   IndexCandidate *stream)
 {
-	double		null_frac = sortcol_null_frac(root, rti, sort);
-	SortStats  *stats;
-
-	if (null_frac > 0 && sort->nulls_first)
-		return null_frac;
-	if (!has_value)
-		return null_frac;
-
-	stats = sort_stats(root, rti, sort);
-	for (int i = 0; i < stats->nmcv; i++)
+	if (stream->holds_nulls < 0)
 	{
-		if (range_compare(sort, stats->mcv[i], first) == 0)
-			return stats->mcv_freq[i];
+		stream->holds_nulls = sort->notnull ? 0 : 1;
+		if (stream->holds_nulls && stream->index->indpred != NIL)
+		{
+			NullTest   *test = makeNode(NullTest);
+
+			test->arg = (Expr *) column_var(root, rti, sort->attno);
+			test->nulltesttype = IS_NOT_NULL;
+			test->argisrow = false;
+			test->location = -1;
+			if (predicate_implied_by(list_make1(test), stream->index->indpred,
+									 false))
+				stream->holds_nulls = 0;
+		}
 	}
 
+	return stream->holds_nulls != 0;
+}
+
+/*
+ * stream_holds_group
+ *		Whether a stream has entries of the sort value, or NULLs: one descent,
+ *		regardless of visibility as in probe_range, and the merge reads a dead
+ *		entry as well.  Cached in the candidate, as the sets share it; only for
+ *		a common value that would raise a cost.
+ */
+static bool
+stream_holds_group(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *stream,
+				   Datum value, bool isnull)
+{
+	EqualityKeys keys;
+	Relation	heap;
+	Relation	index;
+	IndexScanDesc scan;
+	ItemPointerData tid;
+	int64		entries = 0;
+	GroupProbe *probe;
+	Datum		found;
+	bool		found_null;
+	ListCell   *lc;
+
+	foreach(lc, stream->group_probes)
+	{
+		probe = (GroupProbe *) lfirst(lc);
+		if (probe->isnull == isnull &&
+			(isnull || range_compare(sort, probe->value, value) == 0))
+			return probe->present;
+	}
+
+	if (!candidate_const_keys(sort, stream, &keys))
+		return true;
+
+	heap = table_open(rte->relid, NoLock);
+	index = index_open(stream->index->indexoid, NoLock);
+	lf_trace.range_scans++;
+	scan = lf_index_beginscan(heap, index, SnapshotAny, keys.nequal + 1);
+	scan->xs_want_itup = true;
+	lf_rescan_with_keys(scan, &keys, isnull ? SORT_BOUND_NULL : SORT_BOUND_VALUE,
+						value);
+
+	probe = palloc(sizeof(GroupProbe));
+	probe->value = value;
+	probe->isnull = isnull;
+	probe->present = lf_read_index_entry(scan, stream->backward ?
+										 BackwardScanDirection :
+										 ForwardScanDirection,
+										 stream->sortpos + 1, false, &found,
+										 &found_null, &tid, &entries);
+	if (probe->present && !isnull)
+		probe->present = !found_null &&
+			range_compare(sort, found, value) == 0;
+	stream->group_probes = lappend(stream->group_probes, probe);
+
+	index_endscan(scan);
+	index_close(index, NoLock);
+	table_close(heap, NoLock);
+
+	return probe->present;
+}
+
+/*
+ * streams_hold_group
+ *		Whether every stream of the set holds the group.  The merge reads a
+ *		group only when all the streams stand on its value; one that lacks it
+ *		takes the others past it.  Without a probe, as is assumed everywhere,
+ *		they do.
+ */
+static bool
+streams_hold_group(SortColumn *sort, StreamOverlap *overlap, Datum value,
+				   bool isnull)
+{
+	if (!overlap->probed)
+		return true;
+
+	for (int i = 0; i < overlap->nstreams; i++)
+	{
+		if (!stream_holds_group(overlap->rte, sort, overlap->streams[i], value,
+								isnull))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * average_group_share
+ *		Share of the table's rows in a value out of the most common ones: its
+ *		part of what they and the NULLs leave.
+ */
+static double
+average_group_share(PlannerInfo *root, Index rti, SortColumn *sort,
+					SortStats *stats, double ndistinct)
+{
+	double		rest = 1.0 - stats->mcv_total -
+		sortcol_null_frac(root, rti, sort);
+
+	if (rest > 0 && ndistinct > stats->nmcv)
+		return rest / (ndistinct - stats->nmcv);
+
 	return 1.0 / Max(ndistinct, 1.0);
+}
+
+/*
+ * first_group_share
+ *		Share of the table's rows in the largest group the merge reads before
+ *		the rows wanted, expected within the first ahead_limit of the table's
+ *		rows from the end it starts at.  The NULLs when they come first, the
+ *		most common values there that every stream holds, or an average group of
+ *		the others.  Without a probe the overlap is taken for the whole column,
+ *		as everywhere in the costing of such a path.  Looking only at the value
+ *		at the end would miss a common value behind one row or dead entry.
+ */
+static double
+first_group_share(PlannerInfo *root, Index rti, SortColumn *sort,
+				  StreamOverlap *overlap, double ndistinct, double ahead_limit)
+{
+	SortStats  *stats;
+	double		ahead = 0.0;
+	double		edge_pos = 0.0;
+	double		share = 0.0;
+	int			bin;
+
+	/* the group of the NULLs is at the start, or all there is to meet in */
+	if ((sort->nulls_first || overlap->empty) && overlap->null_frac > 0 &&
+		streams_hold_group(sort, overlap, (Datum) 0, true))
+		share = overlap->null_frac;
+	if (sort->nulls_first)
+		ahead = share;
+	if (ahead > ahead_limit || overlap->empty)
+		return share;
+
+	stats = sort_stats(root, rti, sort);
+	share = Max(share, average_group_share(root, rti, sort, stats, ndistinct));
+
+	if (stats->usable)
+	{
+		if (overlap->probed)
+			edge_pos = histogram_position(sort, stats,
+										  sort->descending ? overlap->hi :
+										  overlap->lo, &bin);
+		else
+			edge_pos = sort->descending ? 1.0 : 0.0;
+	}
+
+	for (int k = 0; k < stats->nmcv; k++)
+	{
+		int			i = stats->mcv_order[sort->descending ?
+										 stats->nmcv - 1 - k : k];
+		double		hist_ahead = 0.0;
+
+		if (overlap->probed)
+		{
+			int			to_lo = range_compare(sort, stats->mcv[i], overlap->lo);
+			int			to_hi = range_compare(sort, stats->mcv[i], overlap->hi);
+
+			if (sort->descending ? to_hi > 0 : to_lo < 0)
+				continue;		/* not reached yet */
+			if (sort->descending ? to_lo < 0 : to_hi > 0)
+				break;			/* past the overlap */
+		}
+		if (stats->usable)
+			hist_ahead = stats->hist_frac *
+				fabs(histogram_position(sort, stats, stats->mcv[i], &bin) -
+					 edge_pos);
+		if (ahead + hist_ahead > ahead_limit)
+			break;
+		if (stats->mcv_freq[i] > share &&
+			streams_hold_group(sort, overlap, stats->mcv[i], false))
+			share = stats->mcv_freq[i];
+		ahead += stats->mcv_freq[i];
+	}
+
+	return share;
+}
+
+/*
+ * group_part
+ *		Part of a stream's entries in a group holding the given share of the
+ *		table's rows.  A stream follows the table's distribution within its own
+ *		range, so the group takes more of a stream with a narrower one.
+ */
+static double
+group_part(PlannerInfo *root, Index rti, SortColumn *sort,
+		   IndexCandidate *stream, StreamOverlap *overlap, double share)
+{
+	double		held = 1.0;
+
+	if (overlap->probed)
+	{
+		held = stream->range_sel;
+		if (stream_holds_nulls(root, rti, sort, stream))
+			held += sortcol_null_frac(root, rti, sort);
+		if (held <= 0)
+			return 0.0;
+	}
+
+	return Min(share / held, 1.0);
+}
+
+/*
+ * inner_group_limit
+ *		Entries of one group that fit into a stream's share of work_mem, as the
+ *		executor divides it among the inner streams.
+ */
+static double
+inner_group_limit(int nstreams)
+{
+	return work_mem * 1024.0 / sizeof(ItemPointerData) / (nstreams - 1);
+}
+
+/*
+ * first_group_cost
+ *		What the inner streams pay for the largest group read before the rows
+ *		wanted: its pages and entries, in proportion of the stream's, and
+ *		sorting it unless it overflows work_mem.  Those rows lie
+ *		limit/(matches + 1) of the overlap away, for a query on this relation
+ *		alone with a known LIMIT, else one row away.
+ */
+static Cost
+first_group_cost(PlannerInfo *root, Index rti, SortColumn *sort,
+				 IndexCandidate **streams, int nstreams, StreamOverlap *overlap,
+				 double ndistinct, double matches, double loop_count)
+{
+	double		wanted = 1.0;
+	double		group_limit = inner_group_limit(nstreams);
+	double		share;
+	Cost		cost = 0;
+
+	if (root->limit_tuples >= 1.0 &&
+		bms_membership(root->all_baserels) == BMS_SINGLETON)
+		wanted = root->limit_tuples;
+
+	share = first_group_share(root, rti, sort, overlap, ndistinct,
+							  overlap->table_share * wanted / (matches + 1));
+	if (share <= 0)
+		return 0;
+
+	for (int i = 1; i < nstreams; i++)
+	{
+		double		part = group_part(root, rti, sort, streams[i], overlap,
+									  share);
+		double		group = part * streams[i]->entries;
+
+		cost += part * index_read_cost(root, streams[i]->index,
+									   streams[i]->entries, loop_count);
+		if (group <= group_limit)
+			cost += group_cost(0, group, group);
+	}
+
+	return cost;
+}
+
+/*
+ * groups_cost
+ *		Cost of holding the groups of every inner stream, the largest by their
+ *		own size: the NULLs and the most common values inside the overlap, then
+ *		the rest at the average size.  A group over its share of work_mem is not
+ *		sorted; every outer entry of its value, returned in *overflow_rows, is
+ *		fetched from the heap and checked on the row.  Common values are not
+ *		looked up in the streams unless they would overflow.
+ */
+static Cost
+groups_cost(PlannerInfo *root, Index rti, SortColumn *sort,
+			IndexCandidate **streams, int nstreams, StreamOverlap *overlap,
+			double *reads, double ndistinct, double *overflow_rows)
+{
+	SortStats  *stats = sort_stats(root, rti, sort);
+	double		group_limit = inner_group_limit(nstreams);
+	double		average = average_group_share(root, rti, sort, stats, ndistinct);
+	double		rest_outer[INTERSECT_MAX_STREAMS];
+	double		rest_inner[INTERSECT_MAX_STREAMS];
+	Cost		cost = 0;
+
+	*overflow_rows = 0;
+	for (int i = 1; i < nstreams; i++)
+	{
+		rest_outer[i] = reads[0];
+		rest_inner[i] = reads[i];
+	}
+
+	for (int k = -1; k < stats->nmcv; k++)
+	{
+		bool		isnull = (k < 0);
+		Datum		value = isnull ? (Datum) 0 : stats->mcv[k];
+		double		share = isnull ? overlap->null_frac : stats->mcv_freq[k];
+		double		outer;
+		bool		overflow = false;
+
+		if (share <= 0 || (!isnull && overlap->empty))
+			continue;
+		if (!isnull && overlap->probed &&
+			(range_compare(sort, value, overlap->lo) < 0 ||
+			 range_compare(sort, value, overlap->hi) > 0))
+			continue;
+
+		outer = group_part(root, rti, sort, streams[0], overlap, share) *
+			streams[0]->entries;
+		for (int i = 1; i < nstreams; i++)
+		{
+			double		inner = group_part(root, rti, sort, streams[i], overlap,
+										   share) * streams[i]->entries;
+
+			rest_outer[i] -= outer;
+			rest_inner[i] -= inner;
+			if (inner > group_limit)
+				overflow = true;
+			else
+				cost += group_cost(outer, inner, inner);
+		}
+		if (overflow && streams_hold_group(sort, overlap, value, isnull))
+			*overflow_rows += outer;
+	}
+
+	for (int i = 1; i < nstreams; i++)
+	{
+		double		size = group_part(root, rti, sort, streams[i], overlap,
+									  average) * streams[i]->entries;
+
+		cost += group_cost(Max(rest_outer[i], 0.0), Max(rest_inner[i], 0.0),
+						   Max(size, 1.0));
+	}
+
+	return cost;
 }
 
 /*
@@ -850,31 +1241,46 @@ first_group_share(PlannerInfo *root, Index rti, SortColumn *sort, Datum first,
  *		A stream is assumed to follow the table's distribution of sortcol
  *		within its own range.  All are 1 when a range cannot be probed; an
  *		empty overlap gives 0.  The range holds values only: the NULLs of a
- *		nullable column form one more group, which every stream may reach, so
- *		their share counts in every stream's and in the table's.
+ *		nullable column form one more group, which the streams that hold them
+ *		may reach, so their share counts in those streams' and, when every
+ *		stream holds them, in the table's.
  */
 static void
 stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 			   SortColumn *sort, IndexCandidate **streams, int nstreams,
-			   double ndistinct, double *shares, double *rows_factor,
-			   double *first_share)
+			   double *shares, double *rows_factor, StreamOverlap *overlap)
 {
 	Datum		lo = (Datum) 0;
 	Datum		hi = (Datum) 0;
 	bool		empty = false;
-	double		null_frac;
+	double		null_frac = sortcol_null_frac(root, rti, sort);
 	Selectivity table_share;
 
 	for (int i = 0; i < nstreams; i++)
 		shares[i] = 1.0;
 	*rows_factor = 1.0;
-	*first_share = 1.0 / Max(ndistinct, 1.0);
+
+	overlap->rte = rte;
+	overlap->streams = streams;
+	overlap->nstreams = nstreams;
+	overlap->probed = false;
+	overlap->empty = false;
+	overlap->lo = (Datum) 0;
+	overlap->hi = (Datum) 0;
+	overlap->table_share = 1.0;
+	overlap->null_frac = null_frac;
+	for (int i = 0; i < nstreams; i++)
+	{
+		if (!stream_holds_nulls(root, rti, sort, streams[i]))
+			overlap->null_frac = 0.0;
+	}
 
 	for (int i = 0; i < nstreams; i++)
 	{
 		if (!probe_range(rte, sort, streams[i]))
 			return;
 	}
+	overlap->probed = true;
 
 	for (int i = 0; i < nstreams && !empty; i++)
 	{
@@ -894,15 +1300,15 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 		}
 	}
 	empty = empty || range_compare(sort, lo, hi) > 0;
-	null_frac = sortcol_null_frac(root, rti, sort);
-	*first_share = first_group_share(root, rti, sort,
-									 sort->descending ? hi : lo, !empty,
-									 ndistinct);
-	if (empty && null_frac <= 0)
+	overlap->empty = empty;
+	overlap->lo = lo;
+	overlap->hi = hi;
+	if (empty && overlap->null_frac <= 0)
 	{
 		for (int i = 0; i < nstreams; i++)
 			shares[i] = 0.0;
 		*rows_factor = 0.0;
+		overlap->table_share = 0.0;
 		return;
 	}
 
@@ -930,12 +1336,15 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 	}
 	if (table_share < 0)
 		table_share = sortcol_range_share(root, rti, sort, lo, hi);
-	table_share += null_frac;
+	table_share += overlap->null_frac;
+	overlap->table_share = table_share;
 
 	for (int i = 0; i < nstreams; i++)
 	{
-		Selectivity sel = streams[i]->range_sel + null_frac;
+		Selectivity sel = streams[i]->range_sel;
 
+		if (stream_holds_nulls(root, rti, sort, streams[i]))
+			sel += null_frac;
 		if (sel > 0)
 			shares[i] = Min(table_share / sel, 1.0);
 		if (table_share > 0)
@@ -1025,10 +1434,12 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	double		rows = cpath->path.rows;
 	double		shares[INTERSECT_MAX_STREAMS];
 	double		rows_factor;
-	double		first_share;
-	Cost		first_group = 0;
+	StreamOverlap overlap;
+	Cost		first_group;
 	double		loop_count;
 	double		fetched;
+	double		overflow_rows;
+	double		heap_rows;
 	double		matches;
 	double		pages_scanned = 0;
 	QualCost	qpqual_cost;
@@ -1044,8 +1455,8 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	 * read, and the matches lie there (stream_overlap); a stream that starts
 	 * outside it skips in with one more descent.
 	 */
-	stream_overlap(root, rte, rel->relid, sort, streams, nstreams, ndistinct,
-				   shares, &rows_factor, &first_share);
+	stream_overlap(root, rte, rel->relid, sort, streams, nstreams, shares,
+				   &rows_factor, &overlap);
 	for (int i = 0; i < nstreams; i++)
 	{
 		reads[i] = streams[i]->entries * shares[i];
@@ -1064,20 +1475,24 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 		fetched = Min(fetched, reads[i]);
 	matches = Min(matches, fetched);
 
+	first_group = first_group_cost(root, rel->relid, sort, streams, nstreams,
+								   &overlap, ndistinct, matches, loop_count);
+
 	/*
 	 * Reading the indexes, grouping the entries of each value of every inner
 	 * stream, fetching the agreed rows and running the qual on them, the
 	 * target list on the result rows.  The heap fetches are charged as for an
-	 * Index Scan on the outer index (see lf_outer_index_correlation).
+	 * Index Scan on the outer index (see lf_outer_index_correlation); so are
+	 * the outer entries of a group that overflows work_mem.
 	 */
 	run_cost = merge_read_cost(root, streams, nstreams, reads, ranks,
 							   rel->tuples, loop_count);
-	for (int i = 1; i < nstreams; i++)
-		run_cost += group_cost(reads[0], reads[i],
-							   Max(1.0, streams[i]->entries / ndistinct));
-	*fetch_cost = heap_fetch_cost(root, rel, fetched, loop_count, correlation,
+	run_cost += groups_cost(root, rel->relid, sort, streams, nstreams, &overlap,
+							reads, ndistinct, &overflow_rows);
+	heap_rows = Min(fetched + overflow_rows, reads[0]);
+	*fetch_cost = heap_fetch_cost(root, rel, heap_rows, loop_count, correlation,
 								  pages_scanned) +
-		fetched * (cpu_tuple_cost + qpqual_cost.per_tuple);
+		heap_rows * (cpu_tuple_cost + qpqual_cost.per_tuple);
 	run_cost += *fetch_cost + matches * rel->reltarget->cost.per_tuple;
 	for (int i = 0; i < nstreams; i++)
 	{
@@ -1093,10 +1508,6 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 	 * few rows a Limit wants, and a value with most of the rows makes that
 	 * more than the even share.
 	 */
-	for (int i = 1; i < nstreams; i++)
-		first_group += index_read_cost(root, streams[i]->index,
-									   streams[i]->entries * first_share,
-									   loop_count);
 	first_match = Max(run_cost / (matches + 1), Min(first_group, run_cost));
 	startup_cost = qpqual_cost.startup + rel->reltarget->cost.startup +
 		first_match;

@@ -1,13 +1,16 @@
 ColumnMatchArg
 EqualityKeys
+GroupProbe
 IndexCandidate
 IndexEquality
 IndexStream
 IntersectScanState
 IntersectSearch
+McvOrderArg
 PlannerTrace
 SkipAhead
 SortBound
 SortColumn
 SortCompareKind
 SortStats
+StreamOverlap

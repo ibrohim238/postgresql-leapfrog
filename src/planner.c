@@ -454,6 +454,8 @@ find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
 	candidate->heapkeyspace = -1;
 	candidate->range_known = -1;
 	candidate->correlation = -2.0;
+	candidate->holds_nulls = -1;
+	candidate->group_probes = NIL;
 
 	for (int i = 0; i < index->nkeycolumns; i++)
 	{

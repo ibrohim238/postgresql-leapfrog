@@ -637,6 +637,7 @@ Regression tests (`sql/`):
 | `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 | `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
 | `leapfrog_planner` | by the counts of `leapfrog.trace_planner`: statistics, ranges and correlations read once, a stream that cannot pay for itself pruned; the estimate from the statistics read once, also inside one histogram bin |
+| `leapfrog_first_group` | startup cost against the group read first: a common value at the end of the range, behind a row or a dead entry (the Index Scan then chosen), in a generic plan, without a histogram, within reach of a `LIMIT`; a value or NULLs one stream does not hold; a group overflowing `work_mem`, first or further on; sorting a later group; a stream with a narrow range; the group of the NULLs, also with ranges that do not meet, and partial indexes without NULLs; a value out of the most common ones; a unique sort column |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
@@ -699,14 +700,15 @@ PostgreSQL cost functions:
 read    = entries of each stream inside the overlap of their sortcol ranges
 matches = rows × outer share × inner share / table share of the overlap
 run     = merge_read_cost(outer read, inner read)
-        + group_cost(outer + inner read, log2(group size))
+        + group_cost(outer + inner read, log2(group size)), group by group
         + heap_fetch_cost(matches)
         + matches × (cpu_tuple_cost + cost of the Filter + tlist cost)
         + one descent per stream that skips into the overlap
 startup = descent into both B-trees (as in btcostestimate)
         + startup cost of Filter and tlist
-        + run / (matches + 1)       -- both streams advance to the first match
-total   = startup + run
+        + max(run / (matches + 1),  -- both streams advance to the first match
+              first group of the inner stream, read and sorted)  -- at most run
+total   = descents + startup cost of Filter and tlist + run
 ```
 
 - **Index entries**: each side's entries are estimated from its equalities
@@ -733,8 +735,9 @@ total   = startup + run
   generic plan is costed without the probe. Like any plan built on actual
   values, a cached plan with constants keeps this estimate until it is
   replanned.
-- **Group size**: inner entries / the number of distinct sortcol values in
-  the table (`get_variable_numdistinct`). Each entry pays log2(group size)
+- **Group size**: the NULLs and the most common values inside the overlap by
+  their own share; the others share what those leave, among the remaining
+  distinct values of the table (`get_variable_numdistinct`). Each entry pays log2(group size)
   TID comparisons at 0.1 × `cpu_operator_cost`, the rate
   `cost_bitmap_tree_node` charges per TID of a bitmap: the comparisons are
   inline, not operator calls. Measured on two ordinary indexes (15,000
@@ -746,13 +749,29 @@ total   = startup + run
   (its leading column, ×0.75 for a multicolumn index). The node visits the
   same heap rows in the same order as that Index Scan, so both are charged
   alike; the node wins only by fetching fewer rows.
+- **First group**: no row comes before the inner streams have read the group of
+  the value the merge stands on. It is the largest group within the share
+  wanted / (matches + 1) of the overlap, from the end the merge starts at, where
+  wanted is the `LIMIT` of a query on this relation alone and 1 otherwise: the NULLs
+  when they come first and every stream holds them, the most common values there,
+  or an average one of the others. A group a stream does not hold is passed,
+  as the merge passes it: such a value is looked up in the streams (one descent,
+  cached per index and value) when it would raise the charge. The other values
+  share what the common values and the NULLs leave. A stream with a narrow range holds more of a value than the table
+  does: the share is taken of its own range. Without a probe (a parameterized path,
+  a generic plan) the overlap is taken for the whole column, as above. The charge
+  raises startup, not the total.
+- **Overflow**: a NULL or common value group over its share of `work_mem` is not
+  sorted, and every outer entry of the value is fetched and checked on the row. It
+  is looked up in the streams first. Only a group of a value out of the most common
+  ones can overflow unnoticed.
 - `LIMIT` is applied by the planner: `startup + (total − startup) × fraction`,
   where fraction is `LIMIT` over the planner's row estimate of the relation,
   not over `matches`.
 
 **Documented assumptions**: inside the overlap, matches are spread evenly
-along both indexes, and a TID group has the average size. Skew inside the
-overlap, and the correlation of a filter with the sort column, are not seen —
+along both indexes, and a TID group out of the most common values has the
+average size. Skew among those values, and the correlation of a filter with the sort column, are not seen —
 by the node or by PostgreSQL's own estimate of the stock plans; see Known
 limitations.
 
@@ -841,8 +860,10 @@ Verified against `src/` and the tests.
 - Only the first key of the query's `ORDER BY` is considered.
 - The cost model is conservative. On the 1M-row benchmark (192 queries,
   `tests/performance/choices.sql`) the planner picks the node 2 times at
-  `random_page_cost = 4` and 5 times at 1.1; it is clearly slower only in
-  `LIMIT 1` queries (by 0.02–0.09 ms, 1 and 4 cases). It misses the node in
+  `random_page_cost = 4` and 5 times at 1.1; there it is clearly slower only in
+  `LIMIT 1` queries (by 0.02–0.09 ms, 1 and 4 cases), though with dense
+  conditions and the data in memory it can be at `LIMIT 100` as well (see the
+  top of this file). It misses the node in
   27 and 21 queries where the node is more than 15 % faster than both the
   planner's choice and the stock plan on `(customer_id, id)`. Most of these
   are deleted rows (1 % uniform: 0.5 ms against 0.7–1.7 ms; skewed, `LIMIT
