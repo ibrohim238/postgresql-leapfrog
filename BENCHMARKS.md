@@ -9,7 +9,14 @@ Three harnesses, all reproducible from the repository:
   filter column plus soft deletes, three index strategies over a matrix of
   distributions, deleted shares, customers and limits;
 - [`tests/performance/bitmap_bench.sh`](tests/performance/bitmap_bench.sh) —
-  the node against `BitmapAnd` at 100k to 50M rows.
+  the node against `BitmapAnd`, an Index Scan and an exact index at 100k to
+  100M rows.
+
+The list-query data sets of the section "100M rows: the list query, needles and the
+middle" are [`tests/performance/list_bench.sh`](tests/performance/list_bench.sh)
+(`SIZE=100000000 WORK_MEM=512MB`, `ORDER=random` or `ORDER=id`); the needle, middle and
+spread data sets there were made with one-off scripts kept outside the repository, and
+their data generators are quoted there.
 
 Raw data of every run goes to `tests/performance/results/` and is not
 committed.
@@ -30,8 +37,11 @@ committed.
 - Writes are single measurements per run; the range over four runs is given.
 - The OS page cache was never dropped (needs root on the host;
   `skip_bench.sh` takes a `COLD_CMD` for that). `skip_bench.sh` was also run
-  with shared buffers emptied before every query. 10M+ rows were not
-  measured.
+  with shared buffers emptied before every query.
+- The sections from "10M to 100M rows" on were measured later (2026-11-03,
+  commit `fed2cfb`) on the same laptop with `shared_buffers` 512MB and the
+  settings stated there; at 50M and 100M rows a part of the pages comes from
+  disk.
 
 ## Write and storage benchmark
 
@@ -706,8 +716,435 @@ change cannot affect, moves as much between runs with 20 indexes (0.114-0.225), 
 this bounds the cost and does not settle it. These tables have no common values
 to look up.
 
+## 10M to 100M rows, reads and writes (`fed2cfb`)
+
+One laptop (14 GB of memory, 16 threads), `shared_buffers` 512MB, other containers idle.
+`bitmap_bench.sh`, `WARMUP=5`, `WORK_MEM=256MB` (512MB at 100M), median of 11, ms. Every
+bitmap exact (no lossy heap blocks). Pages outside `shared_buffers` come from the OS page
+cache or the disk, which the script does not tell apart; that matters from 50M on.
+
+The columns: "exact index" has indexes made for the query, with the extension off. "Node"
+forces the node on the small indexes, "auto" is the planner's choice with the extension on,
+"stock" with it off, and `BitmapAnd` is forced. Only "exact" has the three extra indexes,
+and it runs as a separate block after the others on the same table, not interleaved.
+
+Two filters, `LIMIT 1`:
+
+| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 10M | `hashed` | 0.03 | 0.07 | node 0.07 | Index Scan 0.07 | 99.0 | 5, 8, 35 |
+| 20M | `hashed` | 0.04 | 0.04 | node 0.05 | Index Scan 0.04 | 153 | 5, 9, 9 |
+| 50M | `hashed` | 0.03 | 0.06 | node 0.06 | Index Scan 0.05 | 465 | 5, 9, 15 |
+| 100M | `hashed` | 0.04 | 0.06 | node 0.05 | Index Scan 0.04 | 548 | 5, 10, 15 |
+| 10M | `batches` | 0.04 | 0.04 | node 0.04 | Index Scan 0.07 | 64.3 | 5, 8, 45 |
+| 20M | `batches` | 0.04 | 0.05 | node 0.05 | Index Scan 0.05 | 200 | 5, 9, 12 |
+| 50M | `batches` | 0.03 | 0.06 | node 0.06 | Index Scan 0.06 | 506 | 5, 9, 18 |
+| 100M | `batches` | 0.03 | 0.05 | node 0.04 | Index Scan 0.05 | 607 | 5, 10, 23 |
+
+Two filters, `LIMIT 100`:
+
+| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 10M | `hashed` | 0.13 | 1.75 | node 1.71 | Index Scan 3.65 | 94.0 | 101, 156, 3,382 |
+| 20M | `hashed` | 0.09 | 1.84 | node 1.77 | Index Scan 3.91 | 172 | 104, 164, 3,506 |
+| 50M | `hashed` | 0.13 | 1.47 | node 1.09 | Index Scan 3.85 | 251 | 105, 179, 4,534 |
+| 100M | `hashed` | 0.12 | 1.01 | node 0.77 | Index Scan 2.79 | 495 | 104, 161, 3,331 |
+| 10M | `batches` | 0.09 | 1.73 | node 1.73 | Index Scan 4.73 | 102 | 104, 159, 4,597 |
+| 20M | `batches` | 0.08 | 1.87 | node 1.87 | Index Scan 5.07 | 201 | 104, 164, 4,818 |
+| 50M | `batches` | 0.13 | 2.21 | node 2.18 | Index Scan 5.56 | 455 | 105, 179, 6,245 |
+| 100M | `batches` | 0.13 | 1.16 | node 1.24 | Index Scan 3.26 | 552 | 104, 161, 4,643 |
+
+Two filters, `LIMIT 1000`:
+
+| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 10M | `hashed` | 1.01 | 18.6 | node 18.5 | `BitmapAnd` 94.2 | 97.0 | 1,000, 1,571, 3,077 |
+| 20M | `hashed` | 1.05 | 8.93 | node 9.00 | `BitmapAnd` 83.4 | 82.1 | 1,003, 1,582, 6,244 |
+| 50M | `hashed` | 0.91 | 9.26 | node 9.04 | `BitmapAnd` 254 | 253 | 1,006, 1,592, 15,656 |
+| 100M | `hashed` | 0.91 | 8.66 | node 8.48 | `BitmapAnd` 526 | 533 | 1,003, 1,571, 31,337 |
+| 10M | `batches` | 1.11 | 18.3 | node 18.4 | `BitmapAnd` 97.5 | 98.8 | 1,008, 1,579, 3,080 |
+| 20M | `batches` | 1.03 | 9.15 | node 9.02 | `BitmapAnd` 109 | 110 | 1,009, 1,588, 6,240 |
+| 50M | `batches` | 0.56 | 9.06 | node 9.06 | `BitmapAnd` 263 | 264 | 1,009, 1,595, 15,665 |
+| 100M | `batches` | 0.92 | 8.93 | node 8.69 | `BitmapAnd` 576 | 592 | 1,009, 1,577, 31,343 |
+
+Two filters, no `LIMIT`, all rows found (1,936, 3,962, 9,965, 19,973):
+
+| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 10M | `hashed` | 4.32 | 16.9 | node 16.9 | `BitmapAnd` 49.8 | 49.4 | 1,934, 3,077, 3,077 |
+| 20M | `hashed` | 8.18 | 33.9 | node 34.3 | `BitmapAnd` 78.3 | 75.4 | 3,959, 6,244, 6,244 |
+| 50M | `hashed` | 23.8 | 83.5 | node 85.0 | `BitmapAnd` 226 | 226 | 9,951, 15,656, 15,656 |
+| 100M | `hashed` | 44.2 | 166 | node 167 | `BitmapAnd` 478 | 485 | 19,932, 31,337, 31,337 |
+| 10M | `batches` | 4.15 | 18.4 | node 17.2 | `BitmapAnd` 51.8 | 51.4 | 1,937, 3,092, 3,080 |
+| 20M | `batches` | 9.27 | 33.5 | node 34.2 | `BitmapAnd` 80.5 | 81.2 | 3,955, 6,270, 6,240 |
+| 50M | `batches` | 25.7 | 85.5 | node 85.9 | `BitmapAnd` 261 | 260 | 9,960, 15,723, 15,665 |
+| 100M | `batches` | 48.2 | 173 | node 173 | `BitmapAnd` 577 | 594 | 19,938, 31,480, 31,343 |
+
+One filter and deleted rows, `LIMIT 100`:
+
+| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 10M | `hashed` | 0.12 | 1.29 | Index Scan 3.35 | Index Scan 3.56 | 165 | 96, 133, 1,447 |
+| 20M | `hashed` | 0.09 | 0.83 | Index Scan 1.86 | Index Scan 2.65 | 161 | 100, 139, 1,522 |
+| 50M | `hashed` | 0.08 | 1.01 | Index Scan 2.00 | Index Scan 2.54 | 427 | 99, 136, 1,454 |
+| 100M | `hashed` | 0.14 | 1.01 | Index Scan 2.38 | Index Scan 4.41 | 1,264 | 101, 140, 1,523 |
+| 10M | `batches` | 0.13 | 7.27 | node 6.97 | Index Scan 7.15 | 158 | 104, 470, 9,556 |
+| 20M | `batches` | 0.13 | 11.8 | node 11.6 | Index Scan 11.7 | 270 | 104, 828, 18,787 |
+| 50M | `batches` | 0.07 | 28.5 | node 28.2 | Index Scan 42.8 | 1,063 | 104, 1,896, 47,200 |
+| 100M | `batches` | 0.07 | 67.6 | node 59.0 | Index Scan 445 | 2,278 | 104, 3,681, 94,689 |
+
+Two filters and deleted rows, `LIMIT 100`:
+
+| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 10M | `hashed` | 0.09 | 12.0 | node 11.7 | `BitmapAnd` 55.0 | 56.4 | 102, 1,704, 3,077 |
+| 20M | `hashed` | 0.11 | 12.6 | node 15.6 | Index Scan 649 | 132 | 104, 1,814, 84,623 |
+| 50M | `hashed` | 0.12 | 9.14 | node 10.3 | Index Scan 392 | 270 | 103, 1,642, 77,876 |
+| 100M | `hashed` | 0.12 | 8.30 | node 8.10 | Index Scan 341 | 566 | 104, 1,521, 70,172 |
+| 10M | `batches` | 0.15 | 8.01 | node 8.10 | `BitmapAnd` 43.2 | 46.7 | 104, 1,515, 3,080 |
+| 20M | `batches` | 0.11 | 7.94 | node 7.75 | `BitmapAnd` 81.9 | 83.4 | 103, 1,460, 6,240 |
+| 50M | `batches` | 0.13 | 8.57 | node 8.63 | `BitmapAnd` 258 | 255 | 104, 1,613, 15,665 |
+| 100M | `batches` | 0.08 | 17.0 | node 16.6 | Index Scan 454 | 652 | 105, 3,138, 99,054 |
+
+Sizes with `hashed`, GB. The small set is what the node needs; the exact indexes come on top:
+
+| Rows | Table | Small set | `(customer_id, product_id, id)` | `(customer_id, id)`, deleted | `(customer_id, product_id, id)`, deleted |
+|---:|---:|---:|---:|---:|---:|
+| 10M | 1.10 | 0.82 | 0.38 | 0.03 | 0.04 |
+| 20M | 2.20 | 1.64 | 0.76 | 0.06 | 0.08 |
+| 50M | 5.49 | 4.09 | 1.89 | 0.15 | 0.19 |
+| 100M | 10.99 | 8.18 | 3.78 | 0.29 | 0.38 |
+
+Compare along a row more than down a column. Each size is one load, and the same work can
+take twice as long on another one: the node at `LIMIT 1000` takes 18.6 ms at 10M and 8.9 ms
+at 20M for 1,571 and 1,582 buffers, the cause not looked into. Buffers are the steadier
+measure.
+
+What the tables show:
+
+- An exact index wins nearly every query, but by very different margins against the node:
+  within 3 times at `LIMIT 1`, about 4 times with no `LIMIT`, 7 to 20 times at `LIMIT 100`,
+  and up to 900 times for rare matches at 100M.
+- With `LIMIT` reached and matches common, the node does not grow with the table:
+  161 to 179 buffers at `LIMIT 100`, 8 to 10 at `LIMIT 1`.
+- With rare matches it grows in step with the table: deleted rows in `batches` take 3,681
+  buffers at 100M against 470 at 10M. So does the query with no `LIMIT`, as the number of
+  rows found grows.
+- The planner leaves the node for an Index Scan on the `hashed` deleted query at every size,
+  at 2 to 2.6 times the time (`auto` against "node").
+- Stock's plan can change between loads. At 10M two filters with `LIMIT 100` took `BitmapAnd`
+  in one load, 77 ms, and an Index Scan in another, 3.6 ms; at 20M to 100M three filters in
+  `hashed` take an Index Scan at 340 to 650 ms, at 10M `BitmapAnd` at 55 ms.
+- The three exact indexes add 54 % to the small set's size (4.45 GB on 8.18 GB at 100M).
+
+`write_bench.sh`, `BASE_ROWS` 20M, `BATCH_ROWS` 100,000, strategies M and G (one load each,
+the same generator as S and G below), median of 5 for reads. M is the 9 composite
+indexes of S plus `(fK, id)` for the 6 columns no composite starts with, 15 indexes; G
+14 general ones:
+
+| | M, 20M | G, 20M |
+|---|---:|---:|
+| Index size | 11.18 GB | 8.02 GB |
+| `INSERT` 100,000 rows: WAL | 3,595 MB | 166 MB |
+| `INSERT`: rows per second | 945 | 12,592 |
+| `UPDATE` of a filter column, 25,000 rows: WAL | 1,004 MB | 70 MB |
+| The same: rows per second | 1,059 | 6,354 |
+| Soft delete, 25,000 rows: WAL | 46 MB | 77 MB |
+| `DELETE`, 25,000 rows: WAL | 18 MB | 18 MB |
+
+Reads with M at 20M rows, `random_page_cost` 1.1, `LIMIT 100`, ms: the queries with a
+composite index of their own 0.03–0.08 (Index Scan on it, with leapfrog on as well);
+one filter on deleted rows 460 (no partial index in M: Index Scan on `(f5, id)`
+filtering `deleted_at`); two, three and four filters without a composite 304, 299 and
+300 for stock (`BitmapAnd`) against 1.2, 29 and 29 with leapfrog merging M's
+single-column indexes. So the node serves the specialised set too, for the
+combinations it has no index for.
+
+`write_bench.sh`, `BASE_ROWS` 10M and 20M, `BATCH_ROWS` 100,000, median of 5 for reads. S is
+33 specialised indexes, G 14 general ones. The extension plays no part in the write
+numbers: they compare the two index sets. Rows per second are one run. S at 50M and 100M
+does not fit on this disk (about 43 GB and 85 GB of indexes), and G at 50M ran out of its
+34 GB free during the load.
+
+| | S, 10M | G, 10M | S, 20M | G, 20M |
+|---|---:|---:|---:|---:|
+| Index size | 7.49 GB | 4.01 GB | 14.97 GB | 8.02 GB |
+| `INSERT` 100,000 rows: WAL | 3,275 MB | 165 MB | 3,793 MB | 166 MB |
+| `INSERT`: rows per second | 959 | 14,476 | 747 | 13,746 |
+| `UPDATE` of a filter column, 25,000 rows: WAL | 980 MB | 70 MB | 1,029 MB | 70 MB |
+| The same: rows per second | 1,104 | 11,329 | 800 | 9,631 |
+| Soft delete, 25,000 rows: WAL | 68 MB | 77 MB | 68 MB | 77 MB |
+| The same: rows per second | 10,861 | 8,227 | 9,058 | 9,024 |
+| `DELETE`, 25,000 rows: WAL | 18 MB | 18 MB | 18 MB | 18 MB |
+
+Where the INSERT WAL comes from. The same 20M table, the index groups of S added one at
+a time, `EXPLAIN (ANALYZE, WAL)` of an `INSERT` of 100,000 rows after a `CHECKPOINT`,
+`full_page_writes` on, `wal_compression` off, one run per set (ad hoc script, not in
+the repository; `seconds` is the execution time):
+
+| Index set, added one group at a time | Indexes | WAL, 100k INSERTs | Full-page images | Time |
+|---|---:|---:|---:|---:|
+| The 14 general indexes | 14 | 157 MB | 3,593 | 5.6 s |
+| 24 single-column partial indexes | 24 | 150 MB | 3,591 | 8.5 s |
+| + 6 two-column composites | 30 | 603 MB | 63,626 | 25 s |
+| + 2 three-column composites | 32 | 2,866 MB | 373,518 | 93 s |
+| + 1 four-column composite = the 33 | 33 | 3,785 MB | 547,729 | 149 s |
+
+The same for the groups of M, one run per set, a separate load of the same data:
+
+| Index set, added one group at a time | Indexes | WAL, 100k INSERTs | Full-page images | Time |
+|---|---:|---:|---:|---:|
+| The 14 general indexes | 14 | 157 MB | 3,593 | 7.3 s |
+| 6 single-column indexes | 6 | 89 MB | 1,797 | 4.1 s |
+| + 6 two-column composites | 12 | 550 MB | 61,832 | 23 s |
+| + 2 three-column composites | 14 | 2,763 MB | 363,667 | 85 s |
+| + 1 four-column composite = the 15 | 15 | 3,688 MB | 536,770 | 134 s |
+
+The 24 single-column partial indexes cost what the 14 general ones do: a new row goes
+into 13 of them (the `IS NULL` ones and the primary key) against 14. The composites add
+3.6 GB of the 3.8 GB, nearly all of it full-page images: `(f1, id)` has 100 values, so
+new rows append at the end of 100 runs on the same pages, while `(f1, f2, f3, id)` has a
+million prefixes and each new row lands on a page of its own, logged in full on its
+first write after the checkpoint. The checkpoint right before each batch makes this the
+high end; the ratio between the sets stays under a steady load, the size of the gap
+depends on how many pages are revisited between checkpoints.
+
+Reads at 20M rows, `LIMIT 100`, `random_page_cost` 1.1, ms:
+
+| Query | Rows found | S | G, stock | G, planner with the node |
+|---|---:|---:|---:|---:|
+| one filter, live rows | 100 | 0.04 | 0.05 | 0.04 |
+| one filter, deleted rows | 100 | 0.04 | 1.73 | 0.38 |
+| 2 filters, composite index in S | 100 | 0.04 | 507 | 0.60 |
+| 2 filters, no composite in S | 100 | 4.27 | 267 | 0.77 |
+| 3 filters, composite index in S | 21 | 0.02 | 512 | 18.0 |
+| 3 filters, no composite in S | 23 | 548 | 343 | 18.0 |
+| 4 filters, composite index in S | 0 | 0.01 | 210 | 18.0 |
+| 4 filters, no composite in S | 0 | 552 | 251 | 17.6 |
+
+With three or four filters fewer rows match than the `LIMIT` asks, so the merge runs to the
+end of the sparsest stream, and it does not stay under a millisecond. At `random_page_cost`
+4, with three or four streams at both sizes, it doubles with the rows: 32 ms at 10M, 65 ms at
+20M. At 1.1 it took 22 to 28 ms at 10M and 18 ms at 20M, with up to four streams at 10M and two
+at 20M, so these two loads show no growth at that page cost.
+
+## 100M rows: the list query, needles and the middle (`fed2cfb`)
+
+One laptop (14 GB of memory, 16 threads, NVMe), PostgreSQL 18.6 in Docker,
+`shared_buffers` 512MB, `work_mem` 512MB for the queries, `jit` off, no parallel
+workers, `max_parallel_maintenance_workers` 6 for the index builds. Each data set is
+one load of 100M rows (`generate_series`, `hashint8` for the columns, a 60-byte
+payload; table 11–12 GB), in `id` order, `VACUUM ANALYZE` before the queries. Indexes
+`(customer_id, id)` and `(product_id, id)` (3 GB each) and, where the query needs it,
+`(id) WHERE deleted_at IS NULL` (101 MB). The scripts (`run.sh` of each set, kept
+outside the repository for now, to be folded into `tests/performance/`) run every
+query in six modes, 3 measured runs in ABBA order, `EXPLAIN (ANALYZE, BUFFERS)`:
+
+- `node`: leapfrog on, stock scans disabled; `auto`: leapfrog on, the planner's choice;
+- `stock`: leapfrog off, the planner's choice; `indexscan`: leapfrog off, no bitmaps;
+  `bitmap`: leapfrog off, no Index Scan;
+- `exact`: leapfrog off, with an index built for the query after the other modes.
+
+Times in ms, median of 3, with the slowest run in brackets where it differs by more
+than 2×; "buffers" is the median of shared hits and reads, "read" the most pages read
+from outside `shared_buffers` in a run (OS page cache or disk: not told apart). The
+runs follow each other on the same server, so a plan that reads 290,000 pages evicts
+what the next one needs: the cold figures are real, the warm ones are the best case.
+
+### The list query with rare, scattered matches
+
+`customer_id = $1 AND deleted_at IS NULL [AND product_id = $2] ORDER BY id DESC LIMIT
+100`. 5 % of all rows are live. Customer 4 has 999,058 rows, customer 5 has 5,004,172,
+each with exactly 500 live rows spread evenly (one per 200,000 `id`s); product 120 has
+2M rows; about 11 of customer 4's live rows have it. Exact indexes `(customer_id, id)
+WHERE deleted_at IS NULL` (142 MB) and `(customer_id, product_id, id) WHERE deleted_at
+IS NULL` (182 MB).
+
+| Query | Mode | ms | Plan | Buffers | Read |
+|---|---|---:|---|---:|---:|
+| customer 4 (1M rows) | exact | 0.4 | Index Scan, exact | 106 | 102 |
+| | node | 59 (224) | Index Merge Intersect | 3,409 | 842 |
+| | auto | 1,615 (3,059) | Index Scan on `(id) WHERE deleted_at IS NULL`, Filter | 290,149 | 290,146 |
+| | stock | 1,614 (2,508) | the same | 290,149 | 290,149 |
+| | indexscan | 1,597 (4,255) | the same | 290,149 | 290,149 |
+| | bitmap | 829 | `BitmapAnd` | 17,190 | 16,719 |
+| customer 5 (5M rows) | exact | 19,667 | Index Scan on `(id) WHERE deleted_at IS NULL`, Filter: the exact index not chosen | 291,619 | 291,619 |
+| | node | 107 (1,054) | Index Merge Intersect | 6,476 | 5,921 |
+| | auto | 1,579 (2,892) | Index Scan on the live-rows index, Filter | 291,619 | 291,616 |
+| | stock | 1,600 | the same | 291,619 | 291,619 |
+| | indexscan | 1,594 (3,163) | the same | 291,619 | 291,619 |
+| | bitmap | 1,300 (2,290) | `BitmapAnd` | 32,536 | 32,035 |
+| customer 4 and product 120 | exact | 0.1 | Index Scan, exact | 18 | 15 |
+| | node | 259 (3,794) | Index Merge Intersect, three streams | 31,374 | 30,649 |
+| | auto | 3,874 | Index Merge Intersect, three streams | 31,374 | 30,934 |
+| | stock | 167,753 (174,925) | Index Scan on the live-rows index, Filter | 1,465,764 | 1,465,764 |
+| | indexscan | 152,602 | the same | 1,465,764 | 1,465,308 |
+| | bitmap | 1,126 (2,193) | `BitmapAnd` | 31,380 | 30,708 |
+
+The stock Index Scan removes 929,658 rows by filter for customer 4 and 4,703,248 for
+the third query; the node reads 198,190 outer and 929,756 inner entries for customer 4,
+and 2,001,433 + 999,058 + 4,702,364 entries for the third query, with 100 and 11 heap
+fetches. Written out: the text plans are in `explain-*.txt` next to the results.
+
+Estimates. The planner expects 45,971 live rows for customer 4 (1M × the 4.5 % live
+share) and 224,349 for customer 5, against 500: the statistics cannot see that a
+customer's live rows are rare. Both plans are scaled by the `LIMIT` fraction of that
+estimate, so the choice between them comes down to the total costs:
+
+```
+Index Scan Backward using (id) WHERE deleted_at IS NULL   cost=0.43..197514  rows=45971   with LIMIT: 430
+Custom Scan (Index Merge Intersect)                        cost=7.04..277879  rows=45971   with LIMIT: 611
+  Outer Entries Estimated: 1029965   Inner Entries Estimated: 4463184
+```
+
+The table is in `id` order, so the Index Scan's 4.5 million heap fetches are costed
+as nearly sequential; the node is charged more for its index entries and gets no such
+discount. With leapfrog loaded the planner therefore keeps the Index Scan in the first
+two queries, 15–27× slower than the node, and picks the node in the third. This is the
+cost-model miss to fix next, with this data set as the test. The same mis-estimate
+keeps stock on the live-rows index for customer 5 even with the exact partial index
+present (19.7 s, all pages from disk after the index builds).
+
+Cold against warm: the Index Scan's 290,000 pages take 1.6 s from the OS page cache
+and 19 to 23 s from disk (`explain-c1M-stock.txt`: 22.9 s, `explain-c5M-exact.txt`:
+18.8 s); the node's 3,400 pages 59 ms and 224 ms.
+
+Data generator:
+
+```sql
+INSERT INTO lf_bitmap
+SELECT g, c0, 100 + abs(hashint8(g * 4 + 2)) % 50,
+  CASE WHEN c0 = 4 THEN CASE WHEN g % 200000 = 0 THEN NULL ELSE '2026-01-01'::timestamptz END
+       WHEN c0 = 5 THEN CASE WHEN g % 200000 = 100000 THEN NULL ELSE '2026-01-01'::timestamptz END
+       WHEN h3 = 0 THEN NULL ELSE '2026-01-01'::timestamptz END,
+  repeat('x', 60)
+FROM (SELECT g, CASE WHEN g % 200000 = 0 THEN 4 WHEN g % 200000 = 100000 THEN 5
+                     WHEN h1 = 4 THEN 4 WHEN h1 BETWEEN 5 AND 9 THEN 5 ELSE 100 + h1 END AS c0, h3
+      FROM (SELECT g, abs(hashint8(g * 4 + 1)) % 100 AS h1, abs(hashint8(g * 4 + 3)) % 20 AS h3
+            FROM generate_series(1, 100000000) g) s) t;
+```
+
+### The same data with the rows in random physical order
+
+The same generator with `ORDER BY hashint8(g * 4 + 7)` on the insert, so that the heap is
+in no relation to `id`, as a table is after years of updates; `work_mem` 1GB for the
+load. The sort column's correlation is then near zero, the stock Index Scan's heap
+reads are costed as random, and the planner with leapfrog picks the node in all three
+queries. "exact_only" is the exact index with `(id) WHERE deleted_at IS NULL` dropped,
+so that nothing competes with it; here the planner used the exact index in the
+"exact" mode as well.
+
+| Query | Mode | ms | Plan | Buffers | Read |
+|---|---|---:|---|---:|---:|
+| customer 4 (1M rows) | exact | 0.4 | Index Scan, exact | 106 | 97 |
+| | node | 92 (240) | Index Merge Intersect | 3,409 | 855 |
+| | auto | 159 (186) | Index Merge Intersect | 3,409 | 3,127 |
+| | stock | 2,333 (3,808; text plan 22,176) | Index Scan on `(customer_id, id)`, Filter `deleted_at` | 198,956 | 190,659 |
+| | indexscan | 2,132 (18,414) | the same | 198,956 | 191,091 |
+| | bitmap | 1,614 | `BitmapAnd` | 17,190 | 16,901 |
+| customer 5 (5M rows) | exact | 0.3 | Index Scan, exact | 106 | 99 |
+| | node | 235 (879) | Index Merge Intersect | 6,476 | 6,467 |
+| | auto | 880 | Index Merge Intersect | 6,476 | 6,293 |
+| | stock | 91,896 (104,261) | Index Scan on the live-rows index, Filter | 937,182 | 897,804 |
+| | indexscan | 96,175 | the same | 937,182 | 898,990 |
+| | bitmap | 2,692 (3,365) | `BitmapAnd` | 32,536 | 32,362 |
+| customer 4 and product 120 | exact | 0.3 | Index Scan, exact | 18 | 4 |
+| | node | 399 (4,046) | Index Merge Intersect, two streams, `deleted_at` in `Filter`: 20,012 heap fetches | 24,383 | 24,186 |
+| | auto | 3,495 | the same | 24,383 | 24,195 |
+| | stock | 1,481 | `BitmapAnd` of three indexes | 24,374 | 0 |
+| | indexscan | 88,663 (96,796) | Index Scan on `(customer_id, id)`, Filter | 1,002,892 | 961,692 |
+| | bitmap | 1,636 | `BitmapAnd` of three indexes | 24,374 | 24,115 |
+
+For customer 5 the stock Index Scan removes 934,525 rows by filter and reads 897,834
+pages from disk: 94 s in its text plan against 0.87 s for the node (6,465 pages read).
+For the third query the planner takes two streams and filters `deleted_at` on the
+heap, 20,012 random fetches, where the ordered load got three streams and 11 fetches;
+with the pages cached that is 0.4 s, cold 3.5–4 s, against stock's `BitmapAnd` at
+1.5 s: not a win here, and the cause (the third stream's cost) is to be looked into.
+
+### Two filters, 100 matches spread one per million ids
+
+Customers with 10k, 100k and 1M rows, products with 1M and 10M rows (`h1 =
+abs(hashint8(g*4+1)) % 10000`: 0 → customer 7, 1–10 → 8, 11–110 → 9; `h2 = ... % 100`:
+0 → product 3, 1–10 → 4). Each queried pair has exactly 100 rows, at `g % 1000000 =
+1..5`, the pair's natural rows moved to product 99, so `ORDER BY id DESC LIMIT 100`
+walks to the oldest one. Exact index `(customer_id, product_id, id)`, 3.9 GB.
+
+| Customer × product rows | exact | node | auto | stock | indexscan | bitmap |
+|---|---:|---:|---:|---:|---:|---:|
+| 10k × 1M | 0.4 | 108 | 104 | `BitmapAnd` 338 | 20 (3,774) | 295 |
+| 10k × 10M | 0.4 | 270 | Index Scan 12 | Index Scan 13 | 12 | 17 (one bitmap) |
+| 100k × 1M | 0.5 | 54 | 57 (447) | `BitmapAnd` 197 | 1,102 (12,768) | 216 |
+| 1M × 1M | 0.5 | 119 (903) | 919 | Index Scan 81,068 | 79,056 | 486 |
+| 1M × 10M | 0.3 | 1,100 (5,947) | 5,930 | Index Scan 73,150 | 73,356 | 1,608 |
+
+Buffers: node 3,948 / 39,404 / 4,281 / 7,721 / 41,846; stock's Index Scan in the last
+two rows 725,557, all read from disk (`Rows Removed by Filter: 987960`); `BitmapAnd`
+the same pages as the node. The planner expects 10,000 matches for 1M × 1M (1M × 1M /
+100M) against 100, and picks the Index Scan; `auto` and `node` are the same plan, the
+difference is whether the index pages were still cached after the stock run. For
+10k × 10M both planners pick the plain Index Scan and are right: the node forced reads
+4.7 million entries of product 4 with 5,279 skips.
+
+### 5,000 matches spread evenly, and 5 million
+
+Customer 4 with 1,003,520 rows and product 10 with 202,956, exactly 5,000 rows with
+both (every 20,000th `id`; the pair's natural rows moved to product 11, independence
+would give 2,000); customer 5 with 20,006,400 rows and product 20 with 24,992,503,
+4,999,454 rows with both, as independence gives. Exact index `(customer_id,
+product_id, id)`.
+
+| Pair | exact | node | auto | stock | indexscan | bitmap |
+|---|---:|---:|---:|---:|---:|---:|
+| 1M × 200k, 5,000 match | 1.1 | 2.3 (16) | 2.5 (the node) | `BitmapAnd` 384 | 6.7 (37) | 373 |
+| 20M × 25M, 5M match | 0.3 (on the primary key) | 0.6 | 0.5 (Index Scan on the primary key) | 0.7 (the same) | 2.6 | 12,045 (one bitmap, 1.5M pages) |
+
+For the first pair stock expects 2,022 matches and costs the Index Scan on `(product_id,
+id)` filtering the customer above `BitmapAnd` with a sort; the scan reads 3,944 entries
+and 3,720 pages (13.9 ms in its text plan), the node 19,792 + 3,945 entries and 198
+pages. For the second pair every plan but the bitmap stops within the first few
+thousand rows: matches that common make the index choice irrelevant.
+
+### 500 matches in the middle of the table
+
+Customer 4 with 999,061 rows, product 10 with 198,462, spread evenly; exactly 500 rows
+have both, one per 1,000 `id`s between 49,751,000 and 50,250,000, so the query walks
+the newer half of both before the first match. The planner expects 1,746 matches.
+
+| Mode | ms | Buffers | Read |
+|---|---:|---:|---:|
+| exact | 0.6 | 108 | 5 |
+| node | 65 | 2,396 | 1 |
+| auto (the node) | 66 (152) | 2,396 | 751 |
+| stock: `BitmapAnd` | 353 | 5,101 | 2,701 |
+| indexscan, on `(product_id, id)` | 1,521 (5,918) | 92,755 | 92,270 |
+| bitmap | 371 | 5,101 | 2,701 |
+
+The node reads 497,479 entries of the customer's index and 98,734 of the product's,
+fetches 100 rows; `BitmapAnd` reads both indexes whole (1.2 million entries) and sorts
+500 rows.
+
+### The limit of the merge, not measured to the end
+
+Both filters on half the table each (50M rows per index, rows alternating so that
+nothing can be skipped) and the only matches at the oldest 1,000 `id`s. One run each
+before the set was stopped: node 59.0 s (383,149 buffers), bitmap on one index with a
+heap filter 14.8 s (1,620,154 buffers), Index Scan 167.5 s (1,701,786 buffers). The
+node iterates 100 million entries at about 0.6 µs each: where neither stream is
+sparse it reads everything, like `BitmapAnd`, and is slower per entry. Not a case
+anyone writes an index for; it bounds the node's per-entry cost.
+
 ## Not done
 
 - 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).
+- 50M and 100M rows for `write_bench.sh`: they need more disk than was free here.
+- The needle, middle and spread data sets of 100M rows as scripts in
+  `tests/performance/` (the list query is `list_bench.sh`). The `bitmap_bench.sh` rerun
+  with the `indexscan` mode was stopped after 10M and 20M (no change against the run
+  above; the forced Index Scan equals stock's choice where that is an Index Scan).
+- Why the planner takes two streams and 20,012 heap fetches for the three-filter
+  query on the random-order table, where the ordered one got three streams.
+- Write cost of the exact indexes of `bitmap_bench.sh`; only the S, M and G sets of
+  `write_bench.sh` were measured.
 - OS-cold runs: everything above is with data in the OS page cache.
 - Real-world data: synthetic data only.

@@ -9,6 +9,12 @@ BENCHMARKS.md.
 
 ## Later
 
+- Cost model: on a table in `id` order the planner keeps an Index Scan on a
+  partial index that filters the other column on the heap where the node is
+  15–27× faster (611 against 430 for `customer_id = $1 AND deleted_at IS NULL`
+  at 100M rows, 500 live rows for the customer; BENCHMARKS.md, "The list query
+  with rare, scattered matches"). The Index Scan's heap reads are costed as
+  nearly sequential by correlation, the node's are not; test from that data set.
 - Planner: the node is chosen at `LIMIT 1`/`10` although the stock
   `Index Scan` on `(key, id)` is faster (BENCHMARKS.md, "Equality types").
 - Expression index columns (`lower(email)`), through

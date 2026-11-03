@@ -9,6 +9,20 @@ versions: [SemVer](https://semver.org/).
 
 - README: `leapfrog.enabled = off` does not change plans already cached, and
   `DISCARD PLANS` does; every stream holds its own buffer pin.
+- BENCHMARKS.md: the list query `customer_id = $1 AND deleted_at IS NULL` at 100M rows
+  with the rows in random physical order (stock's Index Scan 92 s against the node's
+  0.9 s, chosen by the planner) and in `id` order (where the planner keeps a 1.6 s
+  Index Scan over the node's 59 ms: a cost-model miss to fix), two filters with 100 or
+  5,000 matches at 100M, 500 matches in the middle of the table, writes with 15 against
+  14 indexes at 20M, where the INSERT WAL comes from, reads at 10M to 100M. README:
+  its numbers are now those at 20M and 100M rows instead of 500,000 to 50M.
+- `write_bench.sh`: strategy M (the composite indexes of S plus single-column indexes
+  for the other columns, 15); the read runs are labelled with their strategy.
+- `list_bench.sh`: the list query with rare, scattered matches, rows in random or `id`
+  order, six plan modes and text plans; checked by `bench-smoke`.
+- `bitmap_bench.sh`: an `exact` mode, with indexes made for the queries, and index sizes in
+  `sizes.csv`. `write_bench.sh`: `STRATEGIES` picks the index sets to run.
+- Shorter script headers and fewer source comments; no change to the code.
 
 ### Fixed
 
