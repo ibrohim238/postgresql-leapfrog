@@ -19,8 +19,8 @@
 # Text plans of node, stock and exact per query go to explain-<query>-<mode>.txt.
 #
 # Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); SIZE (1000000),
-# ORDER (random | id), REPEATS (3), WARMUP (1), WORK_MEM (server's), EXACT (1),
-# BENCH_OUT (must not exist). Output in results/list-<timestamp>/: runs.csv,
+# ORDER (random | id), QUERIES ("small big small_product"), REPEATS (3), WARMUP (1),
+# WORK_MEM (server's), EXACT (1), BENCH_OUT (must not exist). Output in results/list-<timestamp>/: runs.csv,
 # summary.csv, sizes.csv, server.txt, explain-*.txt.
 set -euo pipefail
 
@@ -34,7 +34,7 @@ WARMUP=${WARMUP:-1}
 WORK_MEM=${WORK_MEM:-}
 EXACT=${EXACT:-1}
 MODES="node bitmap indexscan stock auto"
-QUERIES="small big small_product"
+QUERIES=${QUERIES:-"small big small_product"}
 
 case $ORDER in
 	random) order="ORDER BY hashint8(g * 4 + 7)" ;;
