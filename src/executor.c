@@ -82,9 +82,11 @@ typedef struct IndexStream
 	int64		group_overflows;
 	int64		skips;			/* re-descents of this scan */
 	int64		short_skips;	/* skips that landed on the next leaf page */
-	bool		started;		/* has read its first entry */
+	bool		started;		/* has read its first entry of this loop */
 	StreamInstr instr;			/* descents and page steps, under ANALYZE */
-	instr_time	startup;		/* of that time, until the first entry */
+	instr_time	startup;		/* of that time, until the first entry of each
+								 * loop, summed */
+	instr_time	loop_base;		/* instr.time when the loop started */
 	double		estimate;		/* entries the cost model expected */
 } IndexStream;
 
@@ -129,20 +131,6 @@ typedef struct IntersectScanState
 	int			peak_capacity;	/* largest total of the group arrays */
 } IntersectScanState;
 
-/* A descent of a stream, clocked under EXPLAIN ANALYZE (see StreamInstr). */
-static inline void
-stream_clock_start(IndexStream *stream, StreamClock *clock)
-{
-	if (stream->instr.timer || stream->instr.bufusage)
-		lf_instr_start(&stream->instr, clock);
-}
-
-static inline void
-stream_clock_stop(IndexStream *stream, StreamClock *clock)
-{
-	if (stream->instr.timer || stream->instr.bufusage)
-		lf_instr_stop(&stream->instr, clock);
-}
 
 static Node *intersect_create_scan_state(CustomScan *cscan);
 static void intersect_begin(CustomScanState *node, EState *estate,
@@ -481,7 +469,7 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
 
 	SkipAhead  *skip = &stream->skip;
 
-	stream_clock_start(stream, &clock);
+	lf_instr_start(&stream->instr, &clock);
 	skip->landing = lf_scan_leaf_position(stream->scan,
 										  ScanDirectionIsBackward(stream->dir),
 										  &skip->from_page, &skip->from_next);
@@ -502,7 +490,7 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
 		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_VALUE, bound);
 		stream->bounded = state->nulls_ahead;
 	}
-	stream_clock_stop(stream, &clock);
+	lf_instr_stop(&stream->instr, &clock);
 	skip->behind = 0;
 	stream->skips++;
 }
@@ -556,10 +544,12 @@ intersect_start(IntersectScanState *state)
 		/* allocated after BeginCustomScan: read here, before the first use */
 		stream->instr.timer = instr != NULL && instr->need_timer;
 		stream->instr.bufusage = instr != NULL && instr->need_bufusage;
-		stream_clock_start(stream, &clock);
+		stream->loop_base = stream->instr.time;
+		stream->started = false;
+		lf_instr_start(&stream->instr, &clock);
 		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
 							(Datum) 0);
-		stream_clock_stop(stream, &clock);
+		lf_instr_stop(&stream->instr, &clock);
 		stream->bounded = false;
 		init_skip(&stream->skip);
 	}
@@ -636,7 +626,8 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream)
 			if (!stream->started)
 			{
 				stream->started = true;
-				stream->startup = stream->instr.time;
+				INSTR_TIME_ACCUM_DIFF(stream->startup, stream->instr.time,
+									  stream->loop_base);
 			}
 			stream->have = true;
 			check_landing(state, stream);
@@ -645,10 +636,10 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream)
 		if (!stream->bounded)
 			break;
 		stream->bounded = false;
-		stream_clock_start(stream, &clock);
+		lf_instr_start(&stream->instr, &clock);
 		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NULL,
 							(Datum) 0);
-		stream_clock_stop(stream, &clock);
+		lf_instr_stop(&stream->instr, &clock);
 	}
 	stream->eof = true;
 }
@@ -935,10 +926,10 @@ intersect_next(ScanState *ss)
 			IndexStream *stream = &state->streams[i];
 			StreamClock clock;
 
-			stream_clock_start(stream, &clock);
+			lf_instr_start(&stream->instr, &clock);
 			lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
 								(Datum) 0);
-			stream_clock_stop(stream, &clock);
+			lf_instr_stop(&stream->instr, &clock);
 		}
 	}
 	state->done = true;
@@ -1073,10 +1064,26 @@ stream_predicate(IntersectScanState *state, int i, List *context,
 
 	if (pred == NIL)
 		return NULL;
-	pred = copyObject(pred);
+	/* a copy of the relcache's list: free to rewrite */
 	ChangeVarNodes((Node *) pred, 1, cscan->scan.scanrelid, 0);
 	return deparse_expression((Node *) make_ands_explicit(pred), context,
 							  useprefix, false);
+}
+
+/* One kind of buffers in the text form: " shared hit=N read=M", nonzero parts. */
+static void
+buffers_text(StringInfo str, const char *kind, int64 hit, int64 read,
+			 int64 dirtied, int64 written)
+{
+	appendStringInfoString(str, kind);
+	if (hit > 0)
+		appendStringInfo(str, " hit=%lld", (long long) hit);
+	if (read > 0)
+		appendStringInfo(str, " read=%lld", (long long) read);
+	if (dirtied > 0)
+		appendStringInfo(str, " dirtied=%lld", (long long) dirtied);
+	if (written > 0)
+		appendStringInfo(str, " written=%lld", (long long) written);
 }
 
 /* The buffers of a stream's index calls, in the manner of a node's. */
@@ -1085,25 +1092,25 @@ stream_buffers(IndexStream *stream, ExplainState *es)
 {
 	BufferUsage *usage = &stream->instr.buffers;
 
+	bool		has_shared = usage->shared_blks_hit + usage->shared_blks_read +
+		usage->shared_blks_dirtied + usage->shared_blks_written > 0;
+	bool		has_local = usage->local_blks_hit + usage->local_blks_read +
+		usage->local_blks_dirtied + usage->local_blks_written > 0;
+
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 	{
-		if (usage->shared_blks_hit + usage->shared_blks_read +
-			usage->shared_blks_dirtied + usage->shared_blks_written == 0)
+		if (!has_shared && !has_local)
 			return;
 		ExplainIndentText(es);
-		appendStringInfoString(es->str, "Buffers: shared");
-		if (usage->shared_blks_hit > 0)
-			appendStringInfo(es->str, " hit=%lld",
-							 (long long) usage->shared_blks_hit);
-		if (usage->shared_blks_read > 0)
-			appendStringInfo(es->str, " read=%lld",
-							 (long long) usage->shared_blks_read);
-		if (usage->shared_blks_dirtied > 0)
-			appendStringInfo(es->str, " dirtied=%lld",
-							 (long long) usage->shared_blks_dirtied);
-		if (usage->shared_blks_written > 0)
-			appendStringInfo(es->str, " written=%lld",
-							 (long long) usage->shared_blks_written);
+		appendStringInfoString(es->str, "Buffers:");
+		if (has_shared)
+			buffers_text(es->str, " shared", usage->shared_blks_hit,
+						 usage->shared_blks_read, usage->shared_blks_dirtied,
+						 usage->shared_blks_written);
+		if (has_local)
+			buffers_text(es->str, " local", usage->local_blks_hit,
+						 usage->local_blks_read, usage->local_blks_dirtied,
+						 usage->local_blks_written);
 		appendStringInfoChar(es->str, '\n');
 	}
 	else
@@ -1116,6 +1123,14 @@ stream_buffers(IndexStream *stream, ExplainState *es)
 							   usage->shared_blks_dirtied, es);
 		ExplainPropertyInteger("Shared Written Blocks", NULL,
 							   usage->shared_blks_written, es);
+		ExplainPropertyInteger("Local Hit Blocks", NULL,
+							   usage->local_blks_hit, es);
+		ExplainPropertyInteger("Local Read Blocks", NULL,
+							   usage->local_blks_read, es);
+		ExplainPropertyInteger("Local Dirtied Blocks", NULL,
+							   usage->local_blks_dirtied, es);
+		ExplainPropertyInteger("Local Written Blocks", NULL,
+							   usage->local_blks_written, es);
 	}
 }
 
@@ -1236,6 +1251,9 @@ intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			if (stream->group_overflows > 0)
 				ExplainPropertyInteger("Group Overflows", NULL,
 									   stream->group_overflows, es);
+			if (stream->instr.prefetches > 0)
+				ExplainPropertyInteger("Prefetches", NULL,
+									   stream->instr.prefetches, es);
 			if (es->buffers)
 				stream_buffers(stream, es);
 		}

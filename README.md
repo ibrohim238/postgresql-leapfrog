@@ -650,7 +650,8 @@ Custom Scan (Index Merge Intersect) on orders (actual time=0.100..2.485 rows=100
 | `Index Pred` | the predicate of a partial index. |
 | `Filter` | conditions the node checks on the row. The equalities of every stream and conditions implied by an inner predicate are not in `Filter` (like `Index Cond` of an Index Scan); the exception is the target relation of `UPDATE/DELETE/SELECT FOR UPDATE`, where predicate-implied conditions are kept for EvalPlanQual. |
 | `actual time`, `rows` of a stream | time of the stream's descents and of the reads that step to another leaf page, where the page reads happen (the entries within a page are not clocked, which keeps `TIMING` cheap), until the first entry and in total; and the entries read, per loop as a node's rows; `Entries Read` in the structured formats, total over all loops. Dead entries with a NULL sort value that are skipped count. The heap fetches are in the node's time, not in a stream's. |
-| `Buffers` of a stream | pages touched by the stream's index calls; the node's own `Buffers` line, printed after the blocks, has everything including the heap. |
+| `Buffers` of a stream | pages touched by the stream's index calls, shared and local; the node's own `Buffers` line, printed after the blocks, has everything including the heap. |
+| `Prefetches` of a stream | leaf pages asked for ahead of time (`leapfrog.prefetch`), when any. |
 | `Entries Estimated` | with `VERBOSE` (and costs on): the entries the cost model expected the stream to read, to set against its rows. `tests/performance/cost_bench.sh` records both and their ratio per query. |
 | `Skips` / `Short Skips` of a stream | re-descents of this scan to the frontmost value, and those that landed on the leaf page they left or the next one, which doubles the stream's threshold (see Skip-ahead). The node's lines are the totals. |
 | `Group Overflows` of a stream | how many times a value's group in this inner stream exceeded its share of `work_mem`. |

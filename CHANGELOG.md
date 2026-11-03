@@ -9,8 +9,10 @@ versions: [SemVer](https://semver.org/).
 
 - `leapfrog.prefetch` (default on): every stream asks for its next leaf page as
   soon as it reaches one, so that the read overlaps the entries of the current
-  page. Cold, the node took half the time on two dense streams (BENCHMARKS.md,
-  "Leaf page prefetch"); warm, no change. Test in `leapfrog_explain`.
+  page, not when nbtree already knows the scan ends there. Cold, the node took
+  half the time on two dense streams (BENCHMARKS.md, "Leaf page prefetch");
+  warm, no change. `EXPLAIN ANALYZE` counts them per stream as `Prefetches`;
+  test in `leapfrog_explain`.
 
 ### Changed
 

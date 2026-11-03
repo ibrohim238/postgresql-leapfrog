@@ -116,6 +116,7 @@ typedef struct StreamInstr
 	bool		bufusage;
 	instr_time	time;
 	BufferUsage buffers;
+	int64		prefetches;		/* leaf pages asked for ahead */
 } StreamInstr;
 
 typedef struct StreamClock

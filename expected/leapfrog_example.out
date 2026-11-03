@@ -60,11 +60,13 @@ ORDER BY id DESC LIMIT 100 $$);
                Index Cond: (customer_id = 100)
                Skips: 1
                Short Skips: 0
+               Prefetches: 4
          ->  Inner Stream on idx_orders_deleted_id (actual rows=20131.00 loops=1)
                Index Pred: (deleted_at IS NOT NULL)
                Skips: 3
                Short Skips: 3
-(15 rows)
+               Prefetches: 58
+(17 rows)
 
 RESET random_page_cost;
 -- With the default random_page_cost = 4 as well (estimated 798 against 933

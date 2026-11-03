@@ -59,9 +59,11 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
          Peak Group Memory: 96 B
          ->  Outer Stream on lf_explain_owner_id (actual rows=10.00 loops=1)
                Index Cond: (owner_id = 1)
+               Prefetches: 1
          ->  Inner Stream on lf_explain_live_id (actual rows=21.00 loops=1)
                Index Pred: (deleted_at IS NULL)
-(9 rows)
+               Prefetches: 1
+(11 rows)
 
 -- In the structured formats the streams are an array
 CREATE FUNCTION lf_plan_streams(query text) RETURNS SETOF jsonb
@@ -88,16 +90,33 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
  Inner | lf_explain_live_id  |                | (deleted_at IS NULL) | t
 (2 rows)
 
-DROP FUNCTION lf_plan_streams(text);
 -- leapfrog.prefetch asks for the next leaf page of every stream ahead of
--- time; the result does not depend on it.
+-- time, counted per stream; the result does not depend on it.
 SHOW leapfrog.prefetch;
  leapfrog.prefetch 
 -------------------
  on
 (1 row)
 
+SELECT s ->> 'Role' AS role, (s ->> 'Prefetches')::int > 0 AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
+ role  | prefetched 
+-------+------------
+ Outer | t
+ Inner | t
+(2 rows)
+
 SET leapfrog.prefetch = off;
+SELECT s ->> 'Role' AS role, s ? 'Prefetches' AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
+ role  | prefetched 
+-------+------------
+ Outer | f
+ Inner | f
+(2 rows)
+
 SELECT lf_check($$ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
                      lf_check                      
 ---------------------------------------------------
@@ -105,6 +124,7 @@ SELECT lf_check($$ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS
 (1 row)
 
 RESET leapfrog.prefetch;
+DROP FUNCTION lf_plan_streams(text);
 -- VERBOSE with costs adds the entries the cost model expects each side to
 -- read, to set against the ANALYZE counters (numbers masked).
 CREATE FUNCTION lf_plan_verbose(query text) RETURNS SETOF text
@@ -512,9 +532,11 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
          Peak Group Memory: 96 B
          ->  Outer Stream on lf_explain_owner_id (actual rows=10.00 loops=1)
                Index Cond: (owner_id = 1)
+               Prefetches: 1
          ->  Inner Stream on lf_explain_live_id (actual rows=21.00 loops=1)
                Index Pred: (deleted_at IS NULL)
-(9 rows)
+               Prefetches: 1
+(11 rows)
 
 -- Owner 1 has odd ids only, all of them live: LIMIT 10 reads 10 outer
 -- entries and about 20 inner ones, matches and fetches 10.
@@ -669,12 +691,14 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
                <Index-Name>lf_explain_owner_id</Index-Name>                  +
                <Index-Cond>(owner_id = 1)</Index-Cond>                       +
                <Entries-Read>10</Entries-Read>                               +
+               <Prefetches>1</Prefetches>                                    +
              </Index-Stream>                                                 +
              <Index-Stream>                                                  +
                <Role>Inner</Role>                                            +
                <Index-Name>lf_explain_live_id</Index-Name>                   +
                <Index-Pred>(deleted_at IS NULL)</Index-Pred>                 +
                <Entries-Read>21</Entries-Read>                               +
+               <Prefetches>1</Prefetches>                                    +
              </Index-Stream>                                                 +
            </Index-Streams>                                                  +
          </Plan>                                                             +

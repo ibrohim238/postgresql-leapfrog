@@ -52,14 +52,19 @@ SELECT s ->> 'Role' AS role, s ->> 'Index Name' AS index, s ->> 'Index Cond' AS 
 	s ->> 'Index Pred' AS pred, s ? 'Entries Read' AS counted
 FROM lf_plan_streams($$
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$) s;
-DROP FUNCTION lf_plan_streams(text);
-
 -- leapfrog.prefetch asks for the next leaf page of every stream ahead of
--- time; the result does not depend on it.
+-- time, counted per stream; the result does not depend on it.
 SHOW leapfrog.prefetch;
+SELECT s ->> 'Role' AS role, (s ->> 'Prefetches')::int > 0 AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
 SET leapfrog.prefetch = off;
+SELECT s ->> 'Role' AS role, s ? 'Prefetches' AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
 SELECT lf_check($$ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
 RESET leapfrog.prefetch;
+DROP FUNCTION lf_plan_streams(text);
 
 -- VERBOSE with costs adds the entries the cost model expects each side to
 -- read, to set against the ANALYZE counters (numbers masked).

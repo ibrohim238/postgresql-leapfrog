@@ -29,8 +29,9 @@
 /*
  * lf_scan_leaf_position
  *		The leaf page the scan is positioned on and its neighbour in scan
- *		direction; false when it is positioned nowhere.  The only read of
- *		nbtree's private scan state, for the skip-ahead's landing check.
+ *		direction; false when it is positioned nowhere.  For the skip-ahead's
+ *		landing check; with scan_will_step and prefetch_next_leaf below, the
+ *		reads of nbtree's private scan state.
  */
 bool
 lf_scan_leaf_position(IndexScanDesc scan, bool backward, BlockNumber *page,
@@ -160,19 +161,25 @@ scan_will_step(IndexScanDesc scan, ScanDirection dir)
 /*
  * prefetch_next_leaf
  *		Ask for the leaf page after the one just reached, so that its read
- *		overlaps the entries of this one.
+ *		overlaps the entries of this one; not when nbtree already knows the
+ *		scan ends on this page.  Returns whether a page was asked for.
  */
-static inline void
+static inline bool
 prefetch_next_leaf(IndexScanDesc scan, ScanDirection dir)
 {
 	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+	bool		forward = ScanDirectionIsForward(dir);
 	BlockNumber next;
 
 	if (!BTScanPosIsValid(so->currPos))
-		return;
-	next = ScanDirectionIsForward(dir) ? so->currPos.nextPage : so->currPos.prevPage;
-	if (BlockNumberIsValid(next))
-		PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, next);
+		return false;
+	if (forward ? !so->currPos.moreRight : !so->currPos.moreLeft)
+		return false;
+	next = forward ? so->currPos.nextPage : so->currPos.prevPage;
+	if (!BlockNumberIsValid(next))
+		return false;
+	PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, next);
+	return true;
 }
 
 /*
@@ -193,15 +200,12 @@ lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
 		if (instr != NULL && scan_will_step(scan, dir))
 		{
 			StreamClock clock;
-			bool		clocked = instr->timer || instr->bufusage;
 
-			if (clocked)
-				lf_instr_start(instr, &clock);
+			lf_instr_start(instr, &clock);
 			found = index_getnext_tid(scan, dir) != NULL;
-			if (clocked)
-				lf_instr_stop(instr, &clock);
-			if (found && intersect_prefetch)
-				prefetch_next_leaf(scan, dir);
+			lf_instr_stop(instr, &clock);
+			if (found && intersect_prefetch && prefetch_next_leaf(scan, dir))
+				instr->prefetches++;
 		}
 		else
 			found = index_getnext_tid(scan, dir) != NULL;
