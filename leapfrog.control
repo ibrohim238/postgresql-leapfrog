@@ -1,5 +1,5 @@
 # leapfrog extension
 comment = 'Index Merge Intersect: ordered intersection of btree indexes'
-default_version = '0.0.4'
+default_version = '0.0.5'
 module_pathname = '$libdir/leapfrog'
 relocatable = true
