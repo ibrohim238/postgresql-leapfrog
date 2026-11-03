@@ -126,9 +126,11 @@ SELECT id FROM lf_st WHERE owner_id = 3 AND kind = 2 ORDER BY ts, id LIMIT 5 $$)
          Sort Key: ts, id
          Presorted Key: ts
          ->  Custom Scan (Index Merge Intersect) on lf_st
-               Outer Index: lf_st_owner_ts
-               Inner Index: lf_st_kind_ts
-(7 rows)
+               ->  Outer Stream on lf_st_owner_ts
+                     Index Cond: (owner_id = 3)
+               ->  Inner Stream on lf_st_kind_ts
+                     Index Cond: (kind = 2)
+(9 rows)
 
 SELECT * FROM lf_plan($$
 SELECT id FROM lf_st WHERE owner_id = 3 AND kind = 2 ORDER BY ts LIMIT 5 $$);
@@ -136,9 +138,11 @@ SELECT id FROM lf_st WHERE owner_id = 3 AND kind = 2 ORDER BY ts LIMIT 5 $$);
 ----------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_st
-         Outer Index: lf_st_owner_ts
-         Inner Index: lf_st_kind_ts
-(4 rows)
+         ->  Outer Stream on lf_st_owner_ts
+               Index Cond: (owner_id = 3)
+         ->  Inner Stream on lf_st_kind_ts
+               Index Cond: (kind = 2)
+(6 rows)
 
 -- Duplicates of the sort value across streams, big groups (three moods).
 SELECT lf_check($$ SELECT id FROM lf_st WHERE owner_id = 3 AND kind = 2 ORDER BY mood DESC, id $$);
@@ -197,9 +201,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_st_q(3, 2);
          Sort Key: txt, id
          Presorted Key: txt
          ->  Custom Scan (Index Merge Intersect) on lf_st
-               Outer Index: lf_st_kind_txt
-               Inner Index: lf_st_owner_txt
-(7 rows)
+               ->  Outer Stream on lf_st_kind_txt
+                     Index Cond: (kind = $2)
+               ->  Inner Stream on lf_st_owner_txt
+                     Index Cond: (owner_id = $1)
+(9 rows)
 
 CREATE TEMP TABLE lf_st_generic AS EXECUTE lf_st_q(3, 2);
 RESET leapfrog.force;

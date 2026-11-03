@@ -66,14 +66,16 @@ SELECT count(*) FROM (
 	SELECT id FROM lf_memory
 	WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
 	ORDER BY group_id) s;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
  Aggregate
    ->  Result
          ->  Custom Scan (Index Merge Intersect) on lf_memory
-               Outer Index: lf_memory_owner_group
-               Inner Index: lf_memory_live_group
-(5 rows)
+               ->  Outer Stream on lf_memory_owner_group
+                     Index Cond: (lf_memory.owner_id = 1)
+               ->  Inner Stream on lf_memory_live_group
+                     Index Pred: ((length(repeat(lf_memory.tag, 4000)) > 0) AND (lf_memory.deleted_at IS NULL))
+(7 rows)
 
 SELECT * FROM lf_counters($$
 SELECT id FROM lf_memory
@@ -141,16 +143,18 @@ CROSS JOIN LATERAL (SELECT id FROM lf_memory_values v
 	WHERE v.path = 'p' || d.g % 2 || repeat('x', 3000 + d.g % 7)
 		AND v.tag = 't' || d.g % 3 || repeat('x', 3000 + d.g % 5)
 	ORDER BY id LIMIT 1) v;
-                                 QUERY PLAN                                  
------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                          
+------------------------------------------------------------------------------------------------------------------------------
  Aggregate
    ->  Nested Loop
          ->  Function Scan on generate_series d
          ->  Limit
                ->  Custom Scan (Index Merge Intersect) on lf_memory_values v
-                     Outer Index: lf_memory_values_path
-                     Inner Index: lf_memory_values_tag
-(7 rows)
+                     ->  Outer Stream on lf_memory_values_path
+                           Index Cond: (v.path = (('p'::text || ((d.g % 2))::text) || repeat('x'::text, (3000 + (d.g % 7)))))
+                     ->  Inner Stream on lf_memory_values_tag
+                           Index Cond: (v.tag = (('t'::text || ((d.g % 3))::text) || repeat('x'::text, (3000 + (d.g % 5)))))
+(9 rows)
 
 RESET enable_memoize;
 RESET enable_material;

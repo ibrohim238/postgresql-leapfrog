@@ -36,9 +36,12 @@ ORDER BY id DESC LIMIT 20 $$);
 ---------------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_outer_partial
-         Outer Index: lf_outer_partial_product_id_kind
-         Inner Index: lf_outer_partial_live_customer_id
-(4 rows)
+         ->  Outer Stream on lf_outer_partial_product_id_kind
+               Index Cond: (product_id = 4)
+         ->  Inner Stream on lf_outer_partial_live_customer_id
+               Index Cond: (customer_id = 3)
+               Index Pred: (deleted_at IS NULL)
+(7 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
                      lf_check                      
@@ -63,9 +66,12 @@ ORDER BY id DESC LIMIT 20 FOR UPDATE $$);
    ->  LockRows
          ->  Custom Scan (Index Merge Intersect) on lf_outer_partial
                Filter: (deleted_at IS NULL)
-               Outer Index: lf_outer_partial_product_id_kind
-               Inner Index: lf_outer_partial_live_customer_id
-(6 rows)
+               ->  Outer Stream on lf_outer_partial_product_id_kind
+                     Index Cond: (product_id = 4)
+               ->  Inner Stream on lf_outer_partial_live_customer_id
+                     Index Cond: (customer_id = 3)
+                     Index Pred: (deleted_at IS NULL)
+(9 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 FOR UPDATE $$);
                      lf_check                      
@@ -94,9 +100,13 @@ SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND product_id = 4 AND kind
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_outer_partial
          Filter: (deleted_at IS NULL)
-         Outer Index: lf_outer_partial_live_customer_id
-         Inner Index: lf_outer_partial_product_two
-(5 rows)
+         ->  Outer Stream on lf_outer_partial_live_customer_id
+               Index Cond: (customer_id = 3)
+               Index Pred: (deleted_at IS NULL)
+         ->  Inner Stream on lf_outer_partial_product_two
+               Index Cond: (product_id = 4)
+               Index Pred: (kind = 1)
+(9 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_outer_partial WHERE customer_id = 3 AND product_id = 4 AND kind = 1 AND deleted_at IS NULL ORDER BY id $$);
                      lf_check                      

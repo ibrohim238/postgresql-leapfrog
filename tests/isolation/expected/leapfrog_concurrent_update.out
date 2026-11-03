@@ -12,9 +12,11 @@ Limit
   ->  LockRows                                           
         ->  Custom Scan (Index Merge Intersect) on lf_iso
               Filter: (deleted_at IS NULL)               
-              Outer Index: lf_iso_owner_id               
-              Inner Index: lf_iso_live_id                
-(6 rows)
+              ->  Outer Stream on lf_iso_owner_id        
+                    Index Cond: (owner_id = 2)           
+              ->  Inner Stream on lf_iso_live_id         
+                    Index Pred: (deleted_at IS NULL)     
+(8 rows)
 
 
 starting permutation: s1_begin s1_move_owner s2_lock s1_commit s2_std

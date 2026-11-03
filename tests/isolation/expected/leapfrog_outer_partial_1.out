@@ -13,9 +13,13 @@ Limit
         ->  Result                                                
               ->  Custom Scan (Index Merge Intersect) on lf_iso_op
                     Filter: (deleted_at IS NULL)                  
-                    Outer Index: lf_iso_op_product_id_kind        
-                    Inner Index: lf_iso_op_live_customer_id       
-(7 rows)
+                    ->  Outer Stream on lf_iso_op_product_id_kind 
+                          Index Cond: (product_id = 1)            
+                          Index Pred: (product_id IS NOT NULL)    
+                    ->  Inner Stream on lf_iso_op_live_customer_id
+                          Index Cond: (customer_id = 2)           
+                          Index Pred: (deleted_at IS NULL)        
+(11 rows)
 
 
 starting permutation: s1_begin s1_soft_delete s2_lock s1_commit

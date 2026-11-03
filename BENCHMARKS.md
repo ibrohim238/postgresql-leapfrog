@@ -1134,6 +1134,35 @@ node iterates 100 million entries at about 0.6 µs each: where neither stream is
 sparse it reads everything, like `BitmapAnd`, and is slower per entry. Not a case
 anyone writes an index for; it bounds the node's per-entry cost.
 
+## Leaf page prefetch (against `a598e73`)
+
+20M rows in `id` order, customer 5 with 5 % of the rows and one live row per 40,000
+`id`s, 5 % of all rows live; indexes `(customer_id, id)` and `(id) WHERE deleted_at IS
+NULL`; `customer_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100`, the node
+forced: 197,987 outer and 188,536 inner entries, 762 and 519 index pages. One laptop,
+`shared_buffers` 2GB. Cold means a server restart and the OS page cache of the table
+and index files dropped (`dd iflag=nocache`) before every run; `leapfrog.prefetch` on
+and off in ABBA order, `EXPLAIN (ANALYZE, TIMING OFF)`, ms:
+
+| Round | Prefetch on | Prefetch off |
+|---:|---:|---:|
+| 1 | 199 | 397 |
+| 2 | 186 | 390 |
+| 3 | 177 | 334 |
+| 4 | 108 | 224 |
+| 5 | 106 | 208 |
+
+Warm, on or off: 21–27 ms. The rounds get faster as the kernel keeps more of the
+files despite the drop; the ratio holds at about 2×. The prefetch asks for the leaf
+page after the one just reached (`PrefetchBuffer`, the sibling link of the leaf), so
+one page is in flight per stream while its entries are merged.
+
+The per-stream clock of `EXPLAIN ANALYZE` was measured on the same query: clocking
+every entry doubled the time under `TIMING` (92 ms against 48); clocking only the
+descents and the reads that step to another leaf page costs nothing measurable (49.8
+against 48.0 ms) and reports 12.5 and 11.2 ms for the two streams, the rest being
+the merge itself.
+
 ## Not done
 
 - 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).

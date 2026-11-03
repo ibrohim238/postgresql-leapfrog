@@ -49,8 +49,8 @@ BEGIN
 		shared_hit := (j->'Plan'->>'Shared Hit Blocks')::bigint;
 		shared_read := (j->'Plan'->>'Shared Read Blocks')::bigint;
 		rows_out := (j->'Plan'->>'Actual Rows')::numeric;
-		outer_read := (scan->>'Outer Entries Read')::bigint;
-		inner_read := (scan->>'Inner Entries Read')::bigint;
+		outer_read := (scan -> 'Index Streams' -> 0 ->> 'Entries Read')::bigint;
+		inner_read := (scan -> 'Index Streams' -> 1 ->> 'Entries Read')::bigint;
 		heap_fetches := (scan->>'Heap Fetches')::bigint;
 		rows_removed := (scan->>'Rows Removed by Filter')::bigint;
 		plan_json := j;

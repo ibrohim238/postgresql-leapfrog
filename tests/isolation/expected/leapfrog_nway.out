@@ -12,10 +12,13 @@ Limit
   ->  LockRows                                                
         ->  Custom Scan (Index Merge Intersect) on lf_iso_nway
               Filter: (deleted_at IS NULL)                    
-              Outer Index: lf_iso_nway_product_id             
-              Inner Index: lf_iso_nway_customer_id            
-              Inner Index 2: lf_iso_nway_live_id              
-(7 rows)
+              ->  Outer Stream on lf_iso_nway_product_id      
+                    Index Cond: (product_id = 2)              
+              ->  Inner Stream on lf_iso_nway_customer_id     
+                    Index Cond: (customer_id = 7)             
+              ->  Inner Stream on lf_iso_nway_live_id         
+                    Index Pred: (deleted_at IS NULL)          
+(10 rows)
 
 
 starting permutation: s1_begin s1_move_product s2_lock s1_commit

@@ -13,4 +13,6 @@ SortBound
 SortColumn
 SortCompareKind
 SortStats
+StreamClock
+StreamInstr
 StreamOverlap

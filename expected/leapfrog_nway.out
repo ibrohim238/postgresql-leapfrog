@@ -52,10 +52,13 @@ ORDER BY id DESC LIMIT 20 $$);
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_nway
-         Outer Index: lf_nway_product_id
-         Inner Index: lf_nway_customer_id
-         Inner Index 2: lf_nway_live_id
-(5 rows)
+         ->  Outer Stream on lf_nway_product_id
+               Index Cond: (product_id = 3)
+         ->  Inner Stream on lf_nway_customer_id
+               Index Cond: (customer_id = 7)
+         ->  Inner Stream on lf_nway_live_id
+               Index Pred: (deleted_at IS NULL)
+(8 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
                      lf_check                      
@@ -110,11 +113,15 @@ ORDER BY id $$);
                     lf_plan                     
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_region_id
-   Inner Index: lf_nway_product_id
-   Inner Index 2: lf_nway_archived_id
-   Inner Index 3: lf_nway_customer_id
-(5 rows)
+   ->  Outer Stream on lf_nway_region_id
+         Index Cond: (region = 2)
+   ->  Inner Stream on lf_nway_product_id
+         Index Cond: (product_id = 3)
+   ->  Inner Stream on lf_nway_archived_id
+         Index Pred: archived
+   ->  Inner Stream on lf_nway_customer_id
+         Index Cond: (customer_id = 7)
+(9 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND region = 2 AND archived ORDER BY id $$);
                     lf_check                     
@@ -136,12 +143,17 @@ ORDER BY id $$);
                     lf_plan                     
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_region_id
-   Inner Index: lf_nway_product_id
-   Inner Index 2: lf_nway_archived_id
-   Inner Index 3: lf_nway_customer_id
-   Inner Index 4: lf_nway_live_id
-(6 rows)
+   ->  Outer Stream on lf_nway_region_id
+         Index Cond: (region = 2)
+   ->  Inner Stream on lf_nway_product_id
+         Index Cond: (product_id = 3)
+   ->  Inner Stream on lf_nway_archived_id
+         Index Pred: archived
+   ->  Inner Stream on lf_nway_customer_id
+         Index Cond: (customer_id = 7)
+   ->  Inner Stream on lf_nway_live_id
+         Index Pred: (deleted_at IS NULL)
+(11 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND region = 2 AND archived AND deleted_at IS NULL ORDER BY id $$);
                     lf_check                     
@@ -190,10 +202,13 @@ SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY
                   lf_plan_node                  
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_region_id
-   Inner Index: lf_nway_archived_id
-   Inner Index 2: lf_nway_customer_id
-(4 rows)
+   ->  Outer Stream on lf_nway_region_id
+         Index Cond: (region = 2)
+   ->  Inner Stream on lf_nway_archived_id
+         Index Pred: archived
+   ->  Inner Stream on lf_nway_customer_id
+         Index Cond: (customer_id = 7)
+(7 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$);
                      lf_check                      
@@ -209,9 +224,11 @@ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
    Filter: (deleted_at IS NULL)
-   Outer Index: lf_nway_product_id
-   Inner Index: lf_nway_customer_id
-(4 rows)
+   ->  Outer Stream on lf_nway_product_id
+         Index Cond: (product_id = 3)
+   ->  Inner Stream on lf_nway_customer_id
+         Index Cond: (customer_id = 7)
+(6 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NULL ORDER BY id $$);
                      lf_check                      
@@ -223,10 +240,10 @@ SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 
 SET leapfrog.max_indexes = 2;
 SELECT count(*) FROM lf_plan_node($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$)
-WHERE lf_plan_node ~ 'Inner Index 2';
+WHERE lf_plan_node ~ 'Stream on';
  count 
 -------
-     0
+     2
 (1 row)
 
 RESET leapfrog.max_indexes;
@@ -241,10 +258,13 @@ SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY
                   lf_plan_node                  
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_nway
-   Outer Index: lf_nway_region_id
-   Inner Index: lf_nway_archived_id
-   Inner Index 2: lf_nway_customer_id
-(4 rows)
+   ->  Outer Stream on lf_nway_region_id
+         Index Cond: (region = 2)
+   ->  Inner Stream on lf_nway_archived_id
+         Index Pred: archived
+   ->  Inner Stream on lf_nway_customer_id
+         Index Cond: (customer_id = 7)
+(7 rows)
 
 RESET leapfrog.force;
 DROP FUNCTION lf_plan_node(text);
@@ -260,10 +280,13 @@ EXPLAIN (COSTS OFF) EXECUTE lf_nway_q(7, 3);
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_nway
-         Outer Index: lf_nway_product_id
-         Inner Index: lf_nway_customer_id
-         Inner Index 2: lf_nway_live_id
-(5 rows)
+         ->  Outer Stream on lf_nway_product_id
+               Index Cond: (product_id = $2)
+         ->  Inner Stream on lf_nway_customer_id
+               Index Cond: (customer_id = $1)
+         ->  Inner Stream on lf_nway_live_id
+               Index Pred: (deleted_at IS NULL)
+(8 rows)
 
 EXECUTE lf_nway_q(7, 3);
   id   

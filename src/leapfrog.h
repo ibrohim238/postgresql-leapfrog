@@ -20,6 +20,7 @@
 
 #include "access/genam.h"
 #include "access/tableam.h"
+#include "executor/instrument.h"
 #include "nodes/execnodes.h"
 #include "nodes/extensible.h"
 #include "nodes/pathnodes.h"
@@ -103,6 +104,48 @@ typedef enum SortBound
 	SORT_BOUND_NOT_NULL,		/* any value but NULL */
 	SORT_BOUND_NULL,			/* NULLs only */
 } SortBound;
+
+/*
+ * Instrumentation of one index stream under EXPLAIN ANALYZE: the time and
+ * buffers of its descents and of the reads that step to another leaf page,
+ * where the page reads happen.  Clocked only there, not on every entry.
+ */
+typedef struct StreamInstr
+{
+	bool		timer;
+	bool		bufusage;
+	instr_time	time;
+	BufferUsage buffers;
+} StreamInstr;
+
+typedef struct StreamClock
+{
+	instr_time	start;
+	BufferUsage buffers;
+} StreamClock;
+
+static inline void
+lf_instr_start(const StreamInstr *instr, StreamClock *clock)
+{
+	if (instr->timer)
+		INSTR_TIME_SET_CURRENT(clock->start);
+	if (instr->bufusage)
+		clock->buffers = pgBufferUsage;
+}
+
+static inline void
+lf_instr_stop(StreamInstr *instr, const StreamClock *clock)
+{
+	if (instr->timer)
+	{
+		instr_time	now;
+
+		INSTR_TIME_SET_CURRENT(now);
+		INSTR_TIME_ACCUM_DIFF(instr->time, now, clock->start);
+	}
+	if (instr->bufusage)
+		BufferUsageAccumDiff(&instr->buffers, &pgBufferUsage, &clock->buffers);
+}
 
 /*
  * The statistics of the sort column, read once per relation and planning:
@@ -199,6 +242,7 @@ extern int	intersect_skip_after;
 extern int	intersect_max_streams;
 extern int	intersect_min_streams;
 extern bool intersect_trace_planner;
+extern bool intersect_prefetch;
 extern PlannerTrace lf_trace;
 
 /* planner.c */
@@ -231,7 +275,7 @@ extern bool lf_scan_leaf_position(IndexScanDesc scan, bool backward,
 extern bool lf_read_index_entry(IndexScanDesc scan, ScanDirection dir,
 								int attno, bool skip_nulls, Datum *value,
 								bool *isnull, ItemPointer tid,
-								int64 *entries_read);
+								int64 *entries_read, StreamInstr *instr);
 
 /* executor.c */
 extern const CustomScanMethods lf_scan_methods;

@@ -34,9 +34,11 @@ ORDER BY id DESC LIMIT 20 $$);
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_pair
-         Outer Index: lf_pair_product_id
-         Inner Index: lf_pair_customer_id
-(4 rows)
+         ->  Outer Stream on lf_pair_product_id
+               Index Cond: (product_id = 4)
+         ->  Inner Stream on lf_pair_customer_id
+               Index Cond: (customer_id = 3)
+(6 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 ORDER BY id $$);
                       lf_check                       
@@ -105,9 +107,11 @@ ORDER BY id LIMIT 20 $$);
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_pair
          Filter: (deleted_at IS NULL)
-         Outer Index: lf_pair_product_id
-         Inner Index: lf_pair_customer_id
-(5 rows)
+         ->  Outer Stream on lf_pair_product_id
+               Index Cond: (product_id = 4)
+         ->  Inner Stream on lf_pair_customer_id
+               Index Cond: (customer_id = 3)
+(7 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
                      lf_check                      
@@ -126,9 +130,12 @@ ORDER BY id DESC LIMIT 20 $$);
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_pair
-         Outer Index: lf_pair_customer_id
-         Inner Index: lf_pair_live_product_id
-(4 rows)
+         ->  Outer Stream on lf_pair_customer_id
+               Index Cond: (customer_id = 3)
+         ->  Inner Stream on lf_pair_live_product_id
+               Index Cond: (product_id = 4)
+               Index Pred: (deleted_at IS NULL)
+(7 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_pair WHERE customer_id = 3 AND product_id = 4 AND deleted_at IS NULL ORDER BY id DESC $$);
                      lf_check                      
@@ -148,9 +155,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_pair_q(3, 4);
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_pair
-         Outer Index: lf_pair_product_id
-         Inner Index: lf_pair_customer_id
-(4 rows)
+         ->  Outer Stream on lf_pair_product_id
+               Index Cond: (product_id = $2)
+         ->  Inner Stream on lf_pair_customer_id
+               Index Cond: (customer_id = $1)
+(6 rows)
 
 EXECUTE lf_pair_q(3, 4);
   id   
@@ -184,15 +193,17 @@ FROM (VALUES (1::bigint), (4), (999)) v (p),
 	LATERAL (SELECT id FROM lf_pair
 			 WHERE customer_id = 3 AND product_id = v.p
 			 ORDER BY id DESC LIMIT 3) s $$);
-                          lf_plan                           
-------------------------------------------------------------
+                                  lf_plan                                  
+---------------------------------------------------------------------------
  Nested Loop
    ->  Values Scan on "*VALUES*"
    ->  Limit
          ->  Custom Scan (Index Merge Intersect) on lf_pair
-               Outer Index: lf_pair_product_id
-               Inner Index: lf_pair_customer_id
-(6 rows)
+               ->  Outer Stream on lf_pair_product_id
+                     Index Cond: (lf_pair.product_id = "*VALUES*".column1)
+               ->  Inner Stream on lf_pair_customer_id
+                     Index Cond: (lf_pair.customer_id = 3)
+(8 rows)
 
 SELECT lf_check($$
 SELECT v.p, s.id
@@ -263,9 +274,11 @@ SELECT * FROM lf_pair_dup WHERE customer_id = 1 AND product_id = 2 ORDER BY grp 
                       lf_plan                       
 ----------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_pair_dup
-   Outer Index: lf_pair_dup_customer_grp
-   Inner Index: lf_pair_dup_product_grp
-(3 rows)
+   ->  Outer Stream on lf_pair_dup_customer_grp
+         Index Cond: (customer_id = 1)
+   ->  Inner Stream on lf_pair_dup_product_grp
+         Index Cond: (product_id = 2)
+(5 rows)
 
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_pair_dup WHERE customer_id = 1 AND product_id = 2 ORDER BY grp $$)

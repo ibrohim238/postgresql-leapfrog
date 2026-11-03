@@ -26,15 +26,21 @@ SELECT * FROM lf_part WHERE kind = 3 AND deleted_at IS NULL ORDER BY id LIMIT 20
    ->  Merge Append
          Sort Key: lf_part.id
          ->  Custom Scan (Index Merge Intersect) on lf_part_0 lf_part_1
-               Outer Index: lf_part_0_kind_id_idx
-               Inner Index: lf_part_0_id_idx
+               ->  Outer Stream on lf_part_0_kind_id_idx
+                     Index Cond: (lf_part_1.kind = 3)
+               ->  Inner Stream on lf_part_0_id_idx
+                     Index Pred: (lf_part_1.deleted_at IS NULL)
          ->  Custom Scan (Index Merge Intersect) on lf_part_1 lf_part_2
-               Outer Index: lf_part_1_kind_id_idx
-               Inner Index: lf_part_1_id_idx
+               ->  Outer Stream on lf_part_1_kind_id_idx
+                     Index Cond: (lf_part_2.kind = 3)
+               ->  Inner Stream on lf_part_1_id_idx
+                     Index Pred: (lf_part_2.deleted_at IS NULL)
          ->  Custom Scan (Index Merge Intersect) on lf_part_2 lf_part_3
-               Outer Index: lf_part_2_kind_id_idx
-               Inner Index: lf_part_2_id_idx
-(12 rows)
+               ->  Outer Stream on lf_part_2_kind_id_idx
+                     Index Cond: (lf_part_3.kind = 3)
+               ->  Inner Stream on lf_part_2_id_idx
+                     Index Pred: (lf_part_3.deleted_at IS NULL)
+(18 rows)
 
 SELECT lf_check($$ SELECT id, owner_id, kind FROM lf_part WHERE kind = 3 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
                      lf_check                      
@@ -61,9 +67,11 @@ SELECT * FROM lf_part WHERE owner_id = 5 AND kind = 3 ORDER BY id LIMIT 20 $$);
 ----------------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_part_2 lf_part
-         Outer Index: lf_part_2_kind_id_idx
-         Inner Index: lf_part_2_owner_id_id_idx
-(4 rows)
+         ->  Outer Stream on lf_part_2_kind_id_idx
+               Index Cond: (lf_part.kind = 3)
+         ->  Inner Stream on lf_part_2_owner_id_id_idx
+               Index Cond: (lf_part.owner_id = 5)
+(6 rows)
 
 SELECT lf_check($$ SELECT id, owner_id, kind FROM lf_part WHERE owner_id = 5 AND kind = 3 ORDER BY id LIMIT 20 $$);
                      lf_check                      
@@ -84,9 +92,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_part_q(5, 3);
          Sort Key: lf_part.id
          Subplans Removed: 2
          ->  Custom Scan (Index Merge Intersect) on lf_part_2 lf_part_1
-               Outer Index: lf_part_2_kind_id_idx
-               Inner Index: lf_part_2_owner_id_id_idx
-(7 rows)
+               ->  Outer Stream on lf_part_2_kind_id_idx
+                     Index Cond: (lf_part_1.kind = $2)
+               ->  Inner Stream on lf_part_2_owner_id_id_idx
+                     Index Cond: (lf_part_1.owner_id = $1)
+(9 rows)
 
 EXECUTE lf_part_q(5, 3);
   id  | owner_id | kind 
@@ -160,13 +170,17 @@ SELECT * FROM lf_part_rls WHERE kind = 3 AND price = 3 ORDER BY id LIMIT 5 $$);
          Sort Key: lf_part_rls.id
          ->  Custom Scan (Index Merge Intersect) on lf_part_rls_0 lf_part_rls_1
                Filter: (price = '3'::numeric)
-               Outer Index: lf_part_rls_0_tenant_id_id_idx
-               Inner Index: lf_part_rls_0_kind_id_idx
+               ->  Outer Stream on lf_part_rls_0_tenant_id_id_idx
+                     Index Cond: (lf_part_rls_1.tenant_id = 1)
+               ->  Inner Stream on lf_part_rls_0_kind_id_idx
+                     Index Cond: (lf_part_rls_1.kind = 3)
          ->  Custom Scan (Index Merge Intersect) on lf_part_rls_1 lf_part_rls_2
                Filter: (price = '3'::numeric)
-               Outer Index: lf_part_rls_1_tenant_id_id_idx
-               Inner Index: lf_part_rls_1_kind_id_idx
-(11 rows)
+               ->  Outer Stream on lf_part_rls_1_tenant_id_id_idx
+                     Index Cond: (lf_part_rls_2.tenant_id = 1)
+               ->  Inner Stream on lf_part_rls_1_kind_id_idx
+                     Index Cond: (lf_part_rls_2.kind = 3)
+(15 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_part_rls WHERE kind = 3 AND price = 3 ORDER BY id LIMIT 5 $$);
                     lf_check                     
@@ -207,15 +221,19 @@ SELECT * FROM lf_range WHERE owner_id = 5 AND kind = 3 ORDER BY id LIMIT 3 $$);
  Limit
    ->  Append
          ->  Custom Scan (Index Merge Intersect) on lf_range_1
-               Outer Index: lf_range_1_kind_id_idx
-               Inner Index: lf_range_1_owner_id_id_idx
+               ->  Outer Stream on lf_range_1_kind_id_idx
+                     Index Cond: (lf_range_1.kind = 3)
+               ->  Inner Stream on lf_range_1_owner_id_id_idx
+                     Index Cond: (lf_range_1.owner_id = 5)
          ->  Custom Scan (Index Merge Intersect) on lf_range_2
-               Outer Index: lf_range_2_kind_id_idx
-               Inner Index: lf_range_2_owner_id_id_idx
+               ->  Outer Stream on lf_range_2_kind_id_idx
+                     Index Cond: (lf_range_2.kind = 3)
+               ->  Inner Stream on lf_range_2_owner_id_id_idx
+                     Index Cond: (lf_range_2.owner_id = 5)
          ->  Index Scan using lf_range_3_owner_id_id_idx on lf_range_3
                Index Cond: (owner_id = 5)
                Filter: (kind = 3)
-(11 rows)
+(15 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_range WHERE owner_id = 5 AND kind = 3 ORDER BY id LIMIT 3 $$);
                     lf_check                     
@@ -255,12 +273,16 @@ SELECT id FROM lf_inh WHERE owner_id = 5 AND kind = 3 ORDER BY id LIMIT 20 $$);
    ->  Merge Append
          Sort Key: lf_inh.id
          ->  Custom Scan (Index Merge Intersect) on lf_inh lf_inh_1
-               Outer Index: lf_inh_kind_id_idx
-               Inner Index: lf_inh_owner_id_id_idx
+               ->  Outer Stream on lf_inh_kind_id_idx
+                     Index Cond: (lf_inh_1.kind = 3)
+               ->  Inner Stream on lf_inh_owner_id_id_idx
+                     Index Cond: (lf_inh_1.owner_id = 5)
          ->  Custom Scan (Index Merge Intersect) on lf_inh_child lf_inh_2
-               Outer Index: lf_inh_child_kind_id_idx
-               Inner Index: lf_inh_child_owner_id_id_idx
-(9 rows)
+               ->  Outer Stream on lf_inh_child_kind_id_idx
+                     Index Cond: (lf_inh_2.kind = 3)
+               ->  Inner Stream on lf_inh_child_owner_id_id_idx
+                     Index Cond: (lf_inh_2.owner_id = 5)
+(13 rows)
 
 SELECT lf_check($$ SELECT id FROM lf_inh WHERE owner_id = 5 AND kind = 3 ORDER BY id $$);
                       lf_check                       

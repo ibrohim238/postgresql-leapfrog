@@ -189,9 +189,11 @@ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMI
    ->  LockRows
          ->  Custom Scan (Index Merge Intersect) on lf_mvcc
                Filter: (deleted_at IS NULL)
-               Outer Index: lf_mvcc_owner_id
-               Inner Index: lf_mvcc_live_id
-(6 rows)
+               ->  Outer Stream on lf_mvcc_owner_id
+                     Index Cond: (owner_id = 2)
+               ->  Inner Stream on lf_mvcc_live_id
+                     Index Pred: (deleted_at IS NULL)
+(8 rows)
 
 BEGIN;
 SELECT id, owner_id, deleted_at FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
@@ -234,11 +236,13 @@ UPDATE lf_mvcc SET payload = payload || '+' WHERE id IN (
                ->  Subquery Scan on unnamed_subquery
                      ->  Limit
                            ->  Custom Scan (Index Merge Intersect) on lf_mvcc lf_mvcc_1
-                                 Outer Index: lf_mvcc_owner_id
-                                 Inner Index: lf_mvcc_live_id
+                                 ->  Outer Stream on lf_mvcc_owner_id
+                                       Index Cond: (lf_mvcc_1.owner_id = 2)
+                                 ->  Inner Stream on lf_mvcc_live_id
+                                       Index Pred: (lf_mvcc_1.deleted_at IS NULL)
          ->  Index Scan using lf_mvcc_pkey on lf_mvcc
                Index Cond: (id = unnamed_subquery.id)
-(10 rows)
+(12 rows)
 
 UPDATE lf_mvcc SET payload = payload || '+' WHERE id IN (
 	SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 10);
@@ -321,9 +325,11 @@ SELECT id FROM lf_mvcc_null WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY i
 -----------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_mvcc_null
-         Outer Index: lf_mvcc_null_owner_id
-         Inner Index: lf_mvcc_null_live_id
-(4 rows)
+         ->  Outer Stream on lf_mvcc_null_owner_id
+               Index Cond: (owner_id = 7)
+         ->  Inner Stream on lf_mvcc_null_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
 
 SELECT lf_check($$ SELECT id FROM lf_mvcc_null WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
                      lf_check                      

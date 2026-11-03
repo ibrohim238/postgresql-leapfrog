@@ -72,9 +72,11 @@ SELECT * FROM lf_cost WHERE coded_id === 5 AND owner_id = 5 ORDER BY id LIMIT 5 
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_cost
-         Outer Index: lf_cost_coded
-         Inner Index: lf_cost_owner
-(4 rows)
+         ->  Outer Stream on lf_cost_coded
+               Index Cond: (coded_id === '5'::bigint)
+         ->  Inner Stream on lf_cost_owner
+               Index Cond: (owner_id = 5)
+(6 rows)
 
 SELECT lf_cost_depends('lf_cost_eq(bigint, bigint)', $$
 SELECT * FROM lf_cost WHERE coded_id === 5 AND owner_id = 5 ORDER BY id LIMIT 5 $$);
@@ -90,9 +92,11 @@ SELECT * FROM lf_cost WHERE owner_id = 5 AND lf_cost_flag(flag) ORDER BY id LIMI
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_cost
-         Outer Index: lf_cost_owner
-         Inner Index: lf_cost_flagged
-(4 rows)
+         ->  Outer Stream on lf_cost_owner
+               Index Cond: (owner_id = 5)
+         ->  Inner Stream on lf_cost_flagged
+               Index Pred: lf_cost_flag(flag)
+(6 rows)
 
 SELECT lf_cost_depends('lf_cost_flag(integer)', $$
 SELECT * FROM lf_cost WHERE owner_id = 5 AND lf_cost_flag(flag) ORDER BY id LIMIT 5 $$);
@@ -110,9 +114,11 @@ SELECT * FROM lf_cost WHERE owner_id = 5 AND lf_cost_flag(flag) ORDER BY id LIMI
    ->  LockRows
          ->  Custom Scan (Index Merge Intersect) on lf_cost
                Filter: lf_cost_flag(flag)
-               Outer Index: lf_cost_owner
-               Inner Index: lf_cost_flagged
-(6 rows)
+               ->  Outer Stream on lf_cost_owner
+                     Index Cond: (owner_id = 5)
+               ->  Inner Stream on lf_cost_flagged
+                     Index Pred: lf_cost_flag(flag)
+(8 rows)
 
 SELECT lf_cost_depends('lf_cost_flag(integer)', $$
 SELECT * FROM lf_cost WHERE owner_id = 5 AND lf_cost_flag(flag) ORDER BY id LIMIT 5 FOR UPDATE $$);
@@ -129,9 +135,11 @@ SELECT * FROM lf_cost WHERE owner_id = 5 AND kind = 5 AND lf_cost_flag(flag + 1)
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_cost
          Filter: lf_cost_flag((flag + 1))
-         Outer Index: lf_cost_kind
-         Inner Index: lf_cost_owner
-(5 rows)
+         ->  Outer Stream on lf_cost_kind
+               Index Cond: (kind = 5)
+         ->  Inner Stream on lf_cost_owner
+               Index Cond: (owner_id = 5)
+(7 rows)
 
 SELECT lf_cost_depends('lf_cost_flag(integer)', $$
 SELECT * FROM lf_cost WHERE owner_id = 5 AND kind = 5 AND lf_cost_flag(flag + 1) ORDER BY id LIMIT 5 $$);
@@ -148,9 +156,12 @@ SELECT * FROM lf_cost WHERE kind = 2 AND owner_id = 7 ORDER BY id $$);
                     lf_plan                     
 ------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_cost
-   Outer Index: lf_cost_kind
-   Inner Index: lf_cost_owner_kind2
-(3 rows)
+   ->  Outer Stream on lf_cost_kind
+         Index Cond: (kind = 2)
+   ->  Inner Stream on lf_cost_owner_kind2
+         Index Cond: (owner_id = 7)
+         Index Pred: (kind = 2)
+(6 rows)
 
 SELECT plan_rows >= 50 AS rows_estimate_keeps_the_condition_once
 FROM lf_cost_node($$ SELECT * FROM lf_cost WHERE kind = 2 AND owner_id = 7 ORDER BY id $$);

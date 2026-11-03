@@ -42,9 +42,11 @@ SELECT * FROM lf_security WHERE category_id = 3 AND price = 3 ORDER BY id LIMIT 
 ----------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_security
-         Outer Index: lf_security_price
-         Inner Index: lf_security_category
-(4 rows)
+         ->  Outer Stream on lf_security_price
+               Index Cond: (price = '3'::numeric)
+         ->  Inner Stream on lf_security_category
+               Index Cond: (category_id = 3)
+(6 rows)
 
 SET LOCAL ROLE lf_security_reader;
 -- leakproof: a stream, together with the policy's own condition
@@ -54,9 +56,11 @@ SELECT * FROM lf_security WHERE category_id = 3 ORDER BY id LIMIT 5 $$);
 ----------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_security
-         Outer Index: lf_security_tenant
-         Inner Index: lf_security_category
-(4 rows)
+         ->  Outer Stream on lf_security_tenant
+               Index Cond: (tenant_id = 1)
+         ->  Inner Stream on lf_security_category
+               Index Cond: (category_id = 3)
+(6 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_security WHERE category_id = 3 ORDER BY id LIMIT 5 $$);
                     lf_check                     
@@ -72,9 +76,11 @@ SELECT * FROM lf_security WHERE category_id = 3 AND price = 3 ORDER BY id LIMIT 
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_security
          Filter: (price = '3'::numeric)
-         Outer Index: lf_security_tenant
-         Inner Index: lf_security_category
-(5 rows)
+         ->  Outer Stream on lf_security_tenant
+               Index Cond: (tenant_id = 1)
+         ->  Inner Stream on lf_security_category
+               Index Cond: (category_id = 3)
+(7 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_security WHERE category_id = 3 AND price = 3 ORDER BY id LIMIT 5 $$);
                     lf_check                     

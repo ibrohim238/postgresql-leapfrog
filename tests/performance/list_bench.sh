@@ -203,7 +203,7 @@ $PSQL <<-'SQL'
 		(plan -> 'Plan' ->> 'Shared Hit Blocks')::bigint
 			+ (plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers,
 		(plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers_read,
-		(SELECT sum(value::bigint) FROM jsonb_each_text(n) WHERE key LIKE '%Entries Read%') AS index_entries,
+		(SELECT sum((s ->> 'Entries Read')::bigint) FROM jsonb_array_elements(n -> 'Index Streams') s) AS index_entries,
 		(n ->> 'Heap Fetches')::bigint AS heap_fetches,
 		(plan -> 'Plan' ->> 'Actual Rows')::float8 AS rows
 	FROM (SELECT *, jsonb_path_query_first(plan, '$.** ? (exists(@."Custom Plan Provider"))') AS n

@@ -115,7 +115,7 @@ SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 
 SET leapfrog.max_indexes = 2;
 SELECT count(*) FROM lf_plan_node($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$)
-WHERE lf_plan_node ~ 'Inner Index 2';
+WHERE lf_plan_node ~ 'Stream on';
 RESET leapfrog.max_indexes;
 -- leapfrog.force scales down the costs of the paths it offers; the sets are
 -- still compared by their own costs, so the same three streams are chosen.
