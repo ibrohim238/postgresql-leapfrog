@@ -1072,18 +1072,23 @@ run of the three queries, 3 measured runs in ABBA order, ms, cold run in bracket
 |---|---:|---:|---:|---:|---:|---:|
 | customer 4 (1M rows) | 0.14 | 121 (58–123) | 122 (152) | Index Scan 1,762 (4,755) | 1,822 (7,415) | 1,497 |
 | customer 5 (5M rows) | 0.14 | 228 (104–228) | 160 (559) | Index Scan 117,411 | 112,480 | 2,715 |
-| customer 4 and product 120 | 0.07 | 1,983 (831–2,001) | 843 (2,021) | `BitmapAnd` 1,267 | 112,025 | 2,187 |
+| customer 4 and product 120, see below | 0.03 | 277 (176–279) | 179 (244) | `BitmapAnd` 610 (1,300) | 63,567 | 1,322 |
 
 Against the run above without the prefetch: the planner's node for customer 5 went
 from 880 ms to 160 (the cold run from 886 to 559), its 6,292 pages read from outside
-`shared_buffers` in both. For the third query the planner took three streams this
-time, 7,702,855 entries and 11 heap fetches, where the earlier load got two streams
-and 20,012 fetches: the estimate of the third stream sits close to the line, and the
-statistics of a new load fell on the other side. With three streams the node beats
-stock's `BitmapAnd` here, 843 against 1,267 ms. The stream blocks of the text plans
-(`explain-*.txt`) show where the time goes: for customer 5, 269 ms in the customer's
-index (995,834 entries, 3,815 pages read) and 90 ms in the live-rows index (934,626
-entries, 2,554 pages) of a 619 ms cold run.
+`shared_buffers` in both. The stream blocks of the text plans (`explain-*.txt`) show
+where the time goes: for customer 5, 269 ms in the customer's index (995,834 entries,
+3,815 pages read) and 90 ms in the live-rows index (934,626 entries, 2,554 pages) of a
+619 ms cold run.
+
+The third query was measured twice. In the first run of this load the planner took
+three streams (7,702,855 entries, 11 heap fetches) and the node took 843 ms (cold
+2,021), against `BitmapAnd` at 1,267; but a PostgreSQL build was compiling on the same
+machine during those runs, so they are not kept. The row above is a second load of the
+same data with `QUERIES=small_product`, the machine idle: the planner took two streams
+there (3,000,491 entries, 20,012 heap fetches, 11 rows kept), as in the load without
+the prefetch; the estimate of the third stream sits close to the line and the sample
+statistics of each load decide. Either way the node is ahead of stock's `BitmapAnd`.
 
 ### Two filters, 100 matches spread one per million ids
 

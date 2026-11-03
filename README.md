@@ -97,15 +97,17 @@ the rows are live, the customer has 500 live rows spread over its history:
 |---|---:|---:|---:|---:|
 | `customer_id` with 1M rows `AND deleted_at IS NULL` | **0.14 ms** | 122 ms (cold 151) | Index Scan 1.8 s (cold 4.8 s) | 1.5 s |
 | `customer_id` with 5M rows `AND deleted_at IS NULL` | **0.14 ms** | 160 ms (cold 559) | Index Scan 117 s | 2.7 s |
-| the first `AND product_id = $2` (2M rows): 11 match | **0.07 ms** | 843 ms (cold 2.0 s) | `BitmapAnd` 1.3 s | 2.2 s |
+| the first `AND product_id = $2` (2M rows): 11 match | **0.03 ms** | 179 ms (cold 244) | `BitmapAnd` 610 ms | 1.3 s |
 
 Stock scans one index and filters the other columns on the heap: it expects
 the live rows near the top, they are not there, and it fetches 930,000 heap
 rows for 100 results, 937,000 random pages from disk. The node walks the
 indexes together, 6,500 pages for the second row, and fetches the 100 rows
-it returns; for the third it merges three indexes, 7.7 million entries, for
-11 rows. Its leaf pages are asked for one ahead (`leapfrog.prefetch`), which
-is what keeps the cold runs close to the warm ones.
+it returns; for the third it merges the two filter indexes, 3 million
+entries, fetches the 20,012 rows of the customer with that product and keeps
+the 11 live ones. Its leaf pages are asked for one ahead
+(`leapfrog.prefetch`), which is what keeps the cold runs close to the warm
+ones.
 
 Rows in `id` order, the best case for stock's Index Scan, whose heap reads
 then come out sequential:
