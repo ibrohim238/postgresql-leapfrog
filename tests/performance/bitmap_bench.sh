@@ -1,72 +1,27 @@
 #!/usr/bin/env bash
-# Index Merge Intersect against BitmapAnd as the table grows.
+# Index Merge Intersect against BitmapAnd and an exact index as the table grows.
 #
-# BitmapAnd reads every index entry of both conditions before it returns a
-# row, so its work grows with the table; the node reads the streams in id
-# order and stops at the LIMIT.  For each size in SIZES and each way of
-# deleting rows in DELETED a table of that many rows is loaded:
+# Table: customer_id (100 values), product_id (50), deleted_at, with indexes
+# (customer_id, id), (product_id, id), (id) WHERE deleted_at IS NOT NULL.
+# Deleted rows are "hashed" (10 %, evenly spread) or "batches" (12.5 %, per
+# customer in blocks of id, loaded in random order; stock plans misjudge this).
 #
-#   customer_id   100 values, hashed            index (customer_id, id)
-#   product_id     50 values, hashed            index (product_id, id)
-#   deleted_at    see below                     index (id) WHERE deleted_at
-#                                                     IS NOT NULL
+# Modes, in ABBA order so that none always follows the one evicting most pages:
+#   node    leapfrog on, stock scans disabled
+#   bitmap  leapfrog off, a bitmap plan
+#   indexscan  leapfrog off, an Index Scan with a Filter
+#   stock   leapfrog off, the planner's choice
+#   auto    leapfrog on, the planner's choice
+#   exact   leapfrog off, with indexes made for the queries; runs last, as they
+#           would change the other plans (EXACT=0 skips it)
 #
-#   hashed    10 % of the rows, spread evenly over id and the customers
-#   batches   12.5 % of the rows, in batches: the id range is cut into 64
-#             blocks, and a customer's rows in a block are deleted all or
-#             none, in every 8th block, a different one for each customer
-#             ((block + customer_id) % 8 = 0).  Customer 7, the one the
-#             queries ask for, has no deleted rows in the 6 newest blocks
-#             while the other customers have theirs there.  The rows are
-#             loaded in random order, so the heap is not in id order either,
-#             as in a table whose rows are updated in place.
+# A bitmap over work_mem turns lossy: 256MB keeps it exact up to 50M rows.
 #
-# batches is the case that the stock plans get wrong: PostgreSQL takes the
-# deleted rows as spread evenly over id and independent of the customer, so
-# it expects the 100 newest deleted rows of customer 7 within its 800 newest
-# rows and picks an Index Scan on (customer_id, id) with deleted_at as a
-# filter, which fetches from the heap every row of the 6 blocks first;
-# BitmapAnd reads the whole partial index.  The node reads only index
-# entries until the matches.
-#
-# Every query of the mix runs in four modes, interleaved run by run in
-# ABBA order (node bitmap stock auto, then auto stock bitmap node), so that
-# no mode always runs right after the one that evicted the most pages:
-#
-#   node     leapfrog on, the stock scans disabled: the node, its cheapest
-#            set by its own estimate (not leapfrog.force, whose scaled costs
-#            hide that)
-#   bitmap   leapfrog off, Index Scan and Seq Scan disabled: a bitmap plan
-#   stock    leapfrog off: what PostgreSQL picks without the extension
-#   auto     leapfrog on: what PostgreSQL picks with it
-#
-# recording, per run, execution time, shared buffers, index entries read
-# (the node's counters, or the rows of the Bitmap Index Scans), shared
-# buffers read from outside shared_buffers (OS cache or disk), heap rows
-# and the plan's scan node.  The queries without LIMIT are the case where
-# both plans have to read everything; they are in the mix on purpose.
-#
-# work_mem matters to BitmapAnd: a bitmap larger than work_mem turns lossy,
-# keeps whole heap pages and rechecks every row on them (Lossy Heap Blocks,
-# Rows Removed by Index Recheck).  At the server's default of 4MB that
-# happens at 10M rows; WORK_MEM=64MB keeps the bitmaps exact at 10M rows and
-# 256MB at 50M, for a comparison that does not rest on it.  The README's
-# table is SIZES="1000000 10000000 50000000" WORK_MEM=256MB WARMUP=5, run
-# several times.
-#
-# The helper objects (lf_bitmap_runs, lf_bitmap_run(), lf_bitmap_metrics)
-# are dropped and recreated by every run, so that ones left in BENCH_DB by
-# an older version of the script do not get in the way; the table
-# lf_bitmap, up to 11 GB at 50M rows, is dropped when the script exits,
-# however it exits.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
-# bench_db.sh); SIZES ("100000 1000000 10000000"), REPEATS (11), WARMUP (2),
-# DELETED ("hashed batches"), WORK_MEM (empty: the server's setting),
-# BENCH_OUT (a directory that must not exist yet).
-# Output: tests/performance/results/bitmap-<timestamp>/runs.csv (one row
-# per run), summary.csv (medians and p90 per size, deleted rows, query and
-# mode) and server.txt.
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); SIZES ("100000
+# 1000000 10000000"), REPEATS (11), WARMUP (2), DELETED ("hashed batches"),
+# WORK_MEM (server's), EXACT (1), BENCH_OUT (must not exist).
+# Output in results/bitmap-<timestamp>/: runs.csv, summary.csv (median, p90),
+# sizes.csv (table and indexes), server.txt.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -77,7 +32,8 @@ REPEATS=${REPEATS:-11}
 WARMUP=${WARMUP:-2}
 WORK_MEM=${WORK_MEM:-}
 DELETED=${DELETED:-"hashed batches"}
-MODES="node bitmap stock auto"
+MODES="node bitmap indexscan stock auto"
+EXACT=${EXACT:-1}
 
 bench_db_use
 trap 'psql -X -q -c "DROP TABLE IF EXISTS lf_bitmap" >/dev/null 2>&1 || true; bench_db_unlock' EXIT
@@ -105,8 +61,11 @@ $PSQL <<-'SQL'
 	DROP FUNCTION IF EXISTS lf_bitmap_run(bigint, text, text, int, text);
 	DROP FUNCTION IF EXISTS lf_bitmap_run(bigint, text, text, text, int, text);
 	DROP TABLE IF EXISTS lf_bitmap_runs;
+	DROP TABLE IF EXISTS lf_bitmap_sizes;
 	CREATE TABLE lf_bitmap_runs (
 		size bigint, deleted text, query text, mode text, run int, plan jsonb);
+	CREATE TABLE lf_bitmap_sizes (
+		size bigint, deleted text, relation text, bytes bigint);
 	CREATE FUNCTION lf_bitmap_run(size bigint, deleted text, name text,
 		mode text, run int, query text)
 	RETURNS void LANGUAGE plpgsql AS $$
@@ -115,10 +74,10 @@ $PSQL <<-'SQL'
 	BEGIN
 		PERFORM set_config('leapfrog.enabled', (mode IN ('node', 'auto'))::text, true);
 		PERFORM set_config('leapfrog.force', 'off', true);
-		PERFORM set_config('enable_seqscan', (mode IN ('stock', 'auto'))::text, true);
-		PERFORM set_config('enable_indexscan', (mode IN ('stock', 'auto'))::text, true);
-		PERFORM set_config('enable_indexonlyscan', (mode IN ('stock', 'auto'))::text, true);
-		PERFORM set_config('enable_bitmapscan', (mode <> 'node')::text, true);
+		PERFORM set_config('enable_seqscan', (mode IN ('stock', 'auto', 'exact'))::text, true);
+		PERFORM set_config('enable_indexscan', (mode IN ('stock', 'auto', 'exact', 'indexscan'))::text, true);
+		PERFORM set_config('enable_indexonlyscan', (mode IN ('stock', 'auto', 'exact', 'indexscan'))::text, true);
+		PERFORM set_config('enable_bitmapscan', (mode NOT IN ('node', 'indexscan'))::text, true);
 		EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' || query INTO plan;
 		IF run >= 1 THEN
 			INSERT INTO lf_bitmap_runs VALUES (size, deleted, name, mode, run, (plan -> 0)::jsonb);
@@ -129,12 +88,23 @@ SQL
 
 query() {
 	case $1 in
+		pair_limit1) echo "SELECT * FROM lf_bitmap WHERE customer_id = 7 AND product_id = 3 ORDER BY id DESC LIMIT 1" ;;
 		pair_limit) echo "SELECT * FROM lf_bitmap WHERE customer_id = 7 AND product_id = 3 ORDER BY id DESC LIMIT 100" ;;
+		pair_limit1000) echo "SELECT * FROM lf_bitmap WHERE customer_id = 7 AND product_id = 3 ORDER BY id DESC LIMIT 1000" ;;
+		triple_limit) echo "SELECT * FROM lf_bitmap WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 100" ;;
 		deleted_limit) echo "SELECT * FROM lf_bitmap WHERE customer_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 100" ;;
 		pair_all) echo "SELECT * FROM lf_bitmap WHERE customer_id = 7 AND product_id = 3 ORDER BY id DESC" ;;
 	esac
 }
-QUERIES="pair_limit deleted_limit pair_all"
+QUERIES="pair_limit1 pair_limit pair_limit1000 deleted_limit triple_limit pair_all"
+
+record_sizes() {
+	$PSQL -c "INSERT INTO lf_bitmap_sizes
+		SELECT $1, '$2', c.relname, pg_relation_size(c.oid)
+		FROM pg_class c
+		WHERE c.oid = 'lf_bitmap'::regclass
+			OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'lf_bitmap'::regclass)"
+}
 
 deleted_expr() {
 	case $1 in
@@ -183,6 +153,28 @@ for deleted in $DELETED; do
 			done
 		} | $PSQL -v work_mem="$WORK_MEM" >/dev/null
 	done
+	if [ "$EXACT" = 1 ]; then
+		echo "   exact: indexes"
+		started=$(date +%s)
+		$PSQL <<-SQL
+			CREATE INDEX lf_bitmap_exact_pair ON lf_bitmap (customer_id, product_id, id);
+			CREATE INDEX lf_bitmap_exact_deleted ON lf_bitmap (customer_id, id) WHERE deleted_at IS NOT NULL;
+			CREATE INDEX lf_bitmap_exact_triple ON lf_bitmap (customer_id, product_id, id) WHERE deleted_at IS NOT NULL;
+			ANALYZE lf_bitmap;
+		SQL
+		$PSQL -c "INSERT INTO lf_bitmap_sizes VALUES ($size, '$deleted', 'exact indexes, seconds to build', $(($(date +%s) - started)))"
+		for name in $QUERIES; do
+			q=$(query "$name")
+			echo "   $name, exact"
+			{
+				echo "$settings"
+				for run in $(seq $((1 - WARMUP)) "$REPEATS"); do
+					echo "SELECT lf_bitmap_run($size, '$deleted', '$name', 'exact', $run, \$q\$$q\$q\$);"
+				done
+			} | $PSQL -v work_mem="$WORK_MEM" >/dev/null
+		done
+	fi
+	record_sizes "$size" "$deleted"
 done
 done
 $PSQL -c "DROP TABLE IF EXISTS lf_bitmap"
@@ -218,7 +210,8 @@ $PSQL -c "\\copy (SELECT size, deleted, query, mode, mode() WITHIN GROUP (ORDER 
 	percentile_disc(0.5) WITHIN GROUP (ORDER BY index_entries) AS index_entries,
 	max(rows) AS rows, max(lossy_blocks) AS lossy_blocks
 	FROM lf_bitmap_metrics GROUP BY 1, 2, 3, 4
-	ORDER BY 2, 3, 1, array_position(ARRAY['node', 'bitmap', 'stock', 'auto'], mode)) TO '$out/summary.csv' CSV HEADER"
+	ORDER BY 2, 3, 1, array_position(ARRAY['node', 'bitmap', 'indexscan', 'stock', 'auto', 'exact'], mode)) TO '$out/summary.csv' CSV HEADER"
+$PSQL -c "\\copy (SELECT * FROM lf_bitmap_sizes ORDER BY 1, 2, 3) TO '$out/sizes.csv' CSV HEADER"
 
 column -s, -t < "$out/summary.csv" 2>/dev/null || cat "$out/summary.csv"
 echo "bitmap_bench: results in $out"
