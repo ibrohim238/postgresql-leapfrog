@@ -1,4 +1,4 @@
-/* leapfrog--0.0.4.sql */
+/* leapfrog--0.0.5.sql */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION leapfrog" to load this file. \quit

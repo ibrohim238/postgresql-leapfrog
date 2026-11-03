@@ -12,7 +12,7 @@ No query changes: the planner picks the node where it is cheaper, per query and
 with the current statistics, and `leapfrog.enabled = off` stops new plans from
 using it (see [Operational safety](#operational-safety) for plans already cached).
 
-Status: **experimental (0.0.4)**. The executor is covered by regression and
+Status: **experimental (0.0.5)**. The executor is covered by regression and
 isolation tests that compare every result with the stock plans
 (see [Tests](#tests)). The cost model counts pages first: with data in memory it
 can pick the node over an Index Scan that touches more buffers but takes less time

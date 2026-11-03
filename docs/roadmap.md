@@ -4,7 +4,7 @@ Working plan for the next changes, with the design decisions already taken.
 Update this file in the commit that finishes or changes a step; delete a
 step once it is released and described in README.md and CHANGELOG.md.
 
-State at 0.0.4: no step is planned; what is left is below. Baseline measurements:
+State at 0.0.5: no step is planned; what is left is below. Baseline measurements:
 BENCHMARKS.md.
 
 ## Later
