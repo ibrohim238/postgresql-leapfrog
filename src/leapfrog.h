@@ -40,14 +40,11 @@
 #define INTERSECT_MAX_STREAMS 16
 
 /*
- * Layout of CustomPath.custom_private: the scan direction, the number of
- * streams, the sort column's type, operator family and collation, and whether
- * its NULLs sort first and whether it can hold any, then
- * STREAM_PRIVATE_COUNT Consts per stream, then two expression
- * lists per stream (the value expressions of its equalities and, for a
- * partial index, its predicate).  The plan keeps the Consts in
- * custom_private and moves the expression lists to custom_exprs.  Stream 0
- * is the outer index, whose entries are fetched from the heap.
+ * Layout of CustomPath.custom_private: the PRIVATE_* items, the
+ * STREAM_PRIVATE_* items per stream, then the STREAM_EXPRS_* lists per stream
+ * (the value expressions of its equalities and, for a partial index, its
+ * predicate).  The plan keeps the expression lists in custom_exprs instead.
+ * Stream 0 is the outer index, whose entries are fetched from the heap.
  */
 #define PRIVATE_DESCENDING		0
 #define PRIVATE_NSTREAMS		1
@@ -73,14 +70,12 @@
 #define STREAM_EXPRS_COUNT		2
 
 /*
- * The equality conditions on the leading columns of one index: the value
- * expressions, their values for the current (re)scan, the heap columns they
- * apply to (for the EvalPlanQual recheck and the overflow fallback), and
- * for each the equality operator of the column's btree family with the
- * column on the left, the collation and what a scan key needs.  The values
- * may be of any type.  The bound on the sort column compares in the type and
- * collation the query sorts in, with the operator of the pathkey's direction:
- * nbtree applies it to a DESC index column itself.
+ * The equality conditions on the leading columns of one index.  attnos are
+ * the heap columns, for the EvalPlanQual recheck and the overflow fallback;
+ * operators are of the column's btree family, with the column on the left.
+ * The values may be of any type.  The bound on the sort column compares in
+ * the type and collation the query sorts in, with the operator of the
+ * pathkey's direction: nbtree applies it to a DESC index column itself.
  */
 typedef struct EqualityKeys
 {
@@ -110,10 +105,9 @@ typedef enum SortBound
 } SortBound;
 
 /*
- * The statistics of the sort column, read once per relation and planning: the
- * share of a range is asked for many times, and each scalarineqsel reads and
- * detoasts them anew.  usable is false when they cannot answer in the query's
- * order; the selectivity functions do then.
+ * The statistics of the sort column, read once per relation and planning:
+ * each scalarineqsel would read and detoast them anew.  usable is false when
+ * they cannot answer in the query's order; the selectivity functions do then.
  */
 typedef struct SortStats
 {
@@ -152,13 +146,12 @@ typedef struct SortColumn
 } SortColumn;
 
 /*
- * Index candidate for a stream of the intersection: equality clauses of the
- * columns before sortcol, the value expressions compared against, the outer
- * rels they refer to, and the position of sortcol among the key columns.
- * Built once per index while the relation's paths are planned and shared by
- * every stream set the index takes part in; heapkeyspace is looked up on
- * first use (-1 until then) because it opens the index.  So is the range of
- * sortcol values the stream holds (probe_range).
+ * Index candidate for a stream of the intersection, built once per index and
+ * shared by every stream set it takes part in: equality clauses of the columns
+ * before sortcol, the value expressions compared against, the outer rels they
+ * refer to, and sortcol's position among the key columns.  heapkeyspace is
+ * looked up on first use (-1 until then) because it opens the index; so is
+ * the range of sortcol values (probe_range).
  */
 typedef struct IndexCandidate
 {

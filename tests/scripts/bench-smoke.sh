@@ -1,36 +1,16 @@
 #!/usr/bin/env bash
-# Smoke test of the benchmark harness: a tiny run of tests/performance/run.sh
-# in a scratch database, so that a broken harness is caught by CI rather
-# than at the next real measurement.
+# Smoke test of the benchmark harness, so that CI catches a broken one.  Tiny runs of
+# run.sh and bitmap_bench.sh, checking that they:
+#   - replace helper objects left in another shape by an older version;
+#   - leave no lf_bitmap table behind, also on failure;
+#   - refuse an output directory that exists;
+#   - list_bench.sh: every mode runs, the node and the exact index are used;
+#   - never touch a database that is not theirs (no benchmark mark), and refuse
+#     one that another benchmark holds the lock of.
 #
-# The database is seeded with a bench_owners() whose result columns differ
-# from the current one, as a database left over from an older version of the
-# harness would have; run.sh must replace it.
-#
-# Then a tiny run of tests/performance/bitmap_bench.sh, in a database seeded
-# with its helper table, function and view in shapes of their own, which it
-# must replace; it must leave no lf_bitmap table behind, also when it fails
-# after creating it.
-#
-# The run writes into a temporary directory of its own (BENCH_OUT), not into
-# tests/performance/results, so earlier results there, of any benchmark,
-# neither confuse the checks nor get touched; the temporary directory is
-# removed afterwards.  A second run into the same directory must be refused.
-#
-# The benchmarks must never touch a database that is not theirs.  A
-# database without the benchmark mark, with an orders table, is set up as
-# PGDATABASE: run.sh must leave it alone, and run.sh with BENCH_DB naming it
-# must refuse to start.  Neither may run.sh while another benchmark holds
-# the lock of its database.
-#
-# Connection: PGHOST/PGPORT/PGUSER as usual.  The scratch databases are
-# leapfrog_bench_smoke and leapfrog_bench_smoke_foreign, each with a comment
-# of its own; one left over by an earlier run is recognised by it and
-# dropped, before and after the run.  An existing database of either name
-# without that comment is not touched, and the smoke test fails.  One
-# bench-smoke at a time per server: a run holds the benchmark lock, under
-# a key of its own, in BENCH_ADMIN_DB, and touches the databases only once
-# it has it.
+# Connection: PGHOST/PGPORT/PGUSER.  Scratch databases: leapfrog_bench_smoke and
+# leapfrog_bench_smoke_foreign, recognised by their comment and dropped; one of those
+# names without the comment is not touched, and the test fails.  One run per server.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -188,16 +168,28 @@ no_bitmap_table() {
 	[ -z "$($PSQL -d "$BENCH_DB" -tAc "SELECT to_regclass('lf_bitmap')")" ]
 }
 
-# 1 size x 2 kinds of deleted rows x 3 queries x 4 modes, 1 run each
+# 1 size x 2 kinds of deleted rows x 6 queries x 6 modes, 1 run each
 bitmap_rows=$(($(wc -l < "$bitmap_out/summary.csv") - 1))
-if [ "$bitmap_rows" -ne 24 ]; then
-	echo "bench-smoke: bitmap_bench.sh: expected 24 summary rows, got $bitmap_rows" >&2
+if [ "$bitmap_rows" -ne 72 ]; then
+	echo "bench-smoke: bitmap_bench.sh: expected 72 summary rows, got $bitmap_rows" >&2
 	exit 1
 fi
 if ! awk -F, '$4 == "node" && $5 == "Index Merge Intersect" { n++ }
 	$4 == "bitmap" && $5 ~ /Bitmap Heap Scan/ { b++ }
-	END { exit !(n == 6 && b == 6) }' "$bitmap_out/summary.csv"; then
+	END { exit !(n == 12 && b == 12) }' "$bitmap_out/summary.csv"; then
 	echo "bench-smoke: bitmap_bench.sh: the node or bitmap mode did not use its plan" >&2
+	exit 1
+fi
+if ! grep -q ',pair_limit,indexscan,Index Scan on ' "$bitmap_out/summary.csv"; then
+	echo "bench-smoke: bitmap_bench.sh: the indexscan mode did not use an Index Scan" >&2
+	exit 1
+fi
+if ! grep -q ',pair_limit1,exact,Index Scan on lf_bitmap_exact_pair,' "$bitmap_out/summary.csv"; then
+	echo "bench-smoke: bitmap_bench.sh: the exact mode did not use its index" >&2
+	exit 1
+fi
+if [ "$(grep -c ',lf_bitmap_exact_pair,' "$bitmap_out/sizes.csv")" -ne 2 ]; then
+	echo "bench-smoke: bitmap_bench.sh: no size of the exact index in sizes.csv" >&2
 	exit 1
 fi
 if ! no_bitmap_table; then
@@ -216,4 +208,30 @@ if ! no_bitmap_table; then
 	exit 1
 fi
 
-echo "bench-smoke: ok ($rows result rows, $bitmap_rows bitmap_bench rows)"
+# list_bench.sh: 3 queries x 6 modes, 1 run each, rows in random order
+list_out="$tmp/list"
+BENCH_DB=$BENCH_DB BENCH_OUT=$list_out SIZE=400000 REPEATS=1 WARMUP=0 \
+	WORK_MEM=64MB bash tests/performance/list_bench.sh > /dev/null
+list_rows=$(($(wc -l < "$list_out/summary.csv") - 1))
+if [ "$list_rows" -ne 18 ]; then
+	echo "bench-smoke: list_bench.sh: expected 18 summary rows, got $list_rows" >&2
+	exit 1
+fi
+if [ "$(grep -c ',node,Index Merge Intersect,' "$list_out/summary.csv")" -ne 3 ]; then
+	echo "bench-smoke: list_bench.sh: the node mode did not use the node" >&2
+	exit 1
+fi
+if ! grep -q '^small,exact,Index Scan on lf_list_exact,' "$list_out/summary.csv"; then
+	echo "bench-smoke: list_bench.sh: the exact mode did not use its index" >&2
+	exit 1
+fi
+if ! grep -q 'Index Merge Intersect' "$list_out/explain-small-node.txt"; then
+	echo "bench-smoke: list_bench.sh: no text plan of the node" >&2
+	exit 1
+fi
+if [ -n "$($PSQL -d "$BENCH_DB" -tAc "SELECT to_regclass('lf_list')")" ]; then
+	echo "bench-smoke: list_bench.sh left its lf_list table behind" >&2
+	exit 1
+fi
+
+echo "bench-smoke: ok ($rows result rows, $bitmap_rows bitmap_bench rows, $list_rows list_bench rows)"

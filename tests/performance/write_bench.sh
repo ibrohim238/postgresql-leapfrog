@@ -1,36 +1,19 @@
 #!/usr/bin/env bash
-# Write and storage benchmark: what index composition saves on writes, and
-# what it costs or gains on reads.
+# What index composition saves on writes, and costs or gains on reads, on a table
+# with NFILTERS filter columns and soft deletes:
+#   S    specialised: (fK, id) WHERE deleted_at IS [NOT] NULL per column, plus
+#        composite indexes for frequent filter combinations
+#   M    moderate: the composite indexes of S, plus (fK, id) for M_SINGLES, the
+#        columns no composite starts with (f3 left out, its pairs cover it)
+#   G    general: (fK, id) per column, (id) WHERE deleted_at IS [NOT] NULL
+#   G+L  the same indexes as G with leapfrog; it shares G's writes
 #
-# A table with NFILTERS filter columns and soft deletes, served by
+# Measured per strategy: index size; rows per second and WAL of insert (BATCH_ROWS),
+# soft delete, filter update and delete (BATCH_ROWS/4 each); a read mix of 1-4 filters.
 #
-#   S    specialised indexes: per filter column (fK, id) WHERE deleted_at IS
-#        NULL and (fK, id) WHERE deleted_at IS NOT NULL, plus composite
-#        (fI, fJ, id), (fI, fJ, fK, id) and (fI, fJ, fK, fL, id) WHERE
-#        deleted_at IS NULL for the frequent filter combinations
-#        (2 * NFILTERS + combinations indexes);
-#   G+L  general indexes with leapfrog: per filter column (fK, id), plus
-#        (id) WHERE deleted_at IS NULL and (id) WHERE deleted_at IS NOT NULL
-#        (NFILTERS + 2 indexes); leapfrog combines two or more of them;
-#   G    the same general indexes, stock PostgreSQL (leapfrog.enabled = off).
-#
-# For S and G (G+L shares G's indexes and writes) the script loads BASE_ROWS
-# rows, builds the indexes, then measures, each after a CHECKPOINT:
-#   insert   BATCH_ROWS new rows
-#   update   soft-delete BATCH_ROWS/4 rows (deleted_at changes)
-#   update2  change one filter column of BATCH_ROWS/4 rows
-#   delete   BATCH_ROWS/4 rows
-# as rows per second and WAL bytes; and the total index size.  Then a query
-# mix (single filter live/deleted; two, three and four filters, each with a
-# composite index in S and without one) runs for S, G+L and G: median
-# execution and planning time over REPEATS runs after a warm-up, the plan's
-# top scan node and, for leapfrog, the number of indexes it combined.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
-# bench_db.sh); NFILTERS (12), BASE_ROWS (500000), BATCH_ROWS (100000),
-# REPEATS (5), BENCH_OUT (a directory that must not exist yet).
-# Output: tests/performance/results/write-<timestamp>/write.csv, read.csv
-# and a summary on stdout.
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); NFILTERS (12),
+# BASE_ROWS (500000), BATCH_ROWS (100000), REPEATS (5), STRATEGIES ("S G"; also M), M_SINGLES, BENCH_OUT
+# (must not exist).  Output in results/write-<timestamp>/: write.csv, read.csv, size.csv.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -40,6 +23,7 @@ NFILTERS=${NFILTERS:-12}
 BASE_ROWS=${BASE_ROWS:-500000}
 BATCH_ROWS=${BATCH_ROWS:-100000}
 REPEATS=${REPEATS:-5}
+STRATEGIES=${STRATEGIES:-"S G"}
 QUARTER=$((BATCH_ROWS / 4))
 
 bench_db_use
@@ -82,6 +66,7 @@ insert_rows() {
 
 # frequent filter combinations that get a composite index in strategy S
 combinations="1:2 1:3 2:3 4:5 6:7 8:9 1:2:3 4:5:6 1:2:3:4"
+M_SINGLES=${M_SINGLES:-"5 7 9 10 11 12"}
 
 create_indexes() {
 	local strategy=$1
@@ -92,6 +77,13 @@ create_indexes() {
 		done
 		for c in $combinations; do
 			echo "CREATE INDEX ON orders (f${c//:/, f}, id) WHERE deleted_at IS NULL;"
+		done
+	elif [ "$strategy" = M ]; then
+		for c in $combinations; do
+			echo "CREATE INDEX ON orders (f${c//:/, f}, id) WHERE deleted_at IS NULL;"
+		done
+		for k in $M_SINGLES; do
+			echo "CREATE INDEX ON orders (f$k, id);"
 		done
 	else
 		for k in $(seq 1 "$NFILTERS"); do
@@ -191,7 +183,7 @@ echo "strategy,query,exec_ms,plan_ms,scan_node,indexes,rows" > "$out/read.csv"
 echo "strategy,indexes,index_bytes" > "$out/size.csv"
 
 next=$((BASE_ROWS + 1))
-for strategy in S G; do
+for strategy in $STRATEGIES; do
 	echo "== strategy $strategy: load $BASE_ROWS rows"
 	load "$strategy"
 	echo "$strategy,$(index_count),$(index_size)" >> "$out/size.csv"
@@ -202,8 +194,8 @@ for strategy in S G; do
 		if [ "$strategy" = S ]; then
 			read_mix "S rpc=$rpc" "SET leapfrog.enabled = off; SET random_page_cost = $rpc;"
 		else
-			read_mix "G+L rpc=$rpc" "SET leapfrog.enabled = on; SET random_page_cost = $rpc;"
-			read_mix "G rpc=$rpc" "SET leapfrog.enabled = off; SET random_page_cost = $rpc;"
+			read_mix "$strategy+L rpc=$rpc" "SET leapfrog.enabled = on; SET random_page_cost = $rpc;"
+			read_mix "$strategy rpc=$rpc" "SET leapfrog.enabled = off; SET random_page_cost = $rpc;"
 		fi
 	done
 	if [ "$strategy" = G ]; then
@@ -222,12 +214,12 @@ $PSQL -c "DROP TABLE IF EXISTS orders"
 
 echo
 echo "Index size (excluding the primary key):"
-column -t -s, "$out/size.csv"
+column -t -s, "$out/size.csv" 2>/dev/null || cat "$out/size.csv"
 echo
 echo "Writes:"
-column -t -s, "$out/write.csv"
+column -t -s, "$out/write.csv" 2>/dev/null || cat "$out/write.csv"
 echo
 echo "Reads (median of $REPEATS):"
-column -t -s, "$out/read.csv"
+column -t -s, "$out/read.csv" 2>/dev/null || cat "$out/read.csv"
 echo
 echo "results: $out"

@@ -1,39 +1,18 @@
 #!/usr/bin/env bash
-# Cost model check: estimated cost against measured time, on skewed and
-# correlated data.
+# Cost model check: estimated cost against measured time, on skewed and correlated
+# data.  Columns: customer_id, product_id (hashed), region (follows the heap order),
+# deleted_at (10 % of the oldest 20 % of ids), archived (1.6 %, uniform).
+# Modes: leapfrog on, forced (stock scans disabled, keeps the real estimate), off.
 #
-# Table of ROWS rows:
-#   customer_id   200 values, hashed (independent of everything else)
-#   product_id    100 values, hashed (a second ordinary index for pairs)
-#   region        10 values, region = id / (ROWS / 10): follows the heap order
-#   deleted_at    set for 10 % of the oldest 20 % of ids only (skewed)
-#   archived      1.6 % of the rows, hashed (uniform)
-# Indexes: (customer_id, id), (product_id, id), (region, id), (id) WHERE
-# deleted_at IS NOT NULL, (id) WHERE archived.
+# The summary marks:
+#   miss       forced node > 15 % faster than the planner's choice, which is not it
+#   wrong      the planner chose the node, stock > 15 % faster
+#   bias       (node cost / ms) / (stock cost / ms); above 1 the node is overcosted
+#   est_ratio  entries expected / read; meaningful without LIMIT
 #
-# Every query runs three ways: leapfrog on (the planner's choice), forced
-# (the stock scans disabled, so that the node keeps its real estimate) and
-# off (stock).  For each the estimated total cost of the top node, the
-# median execution time over REPEATS runs and the shared buffers touched are
-# recorded; for the node also the entries the cost model expected each side
-# to read (EXPLAIN VERBOSE), the entries read and the skips.  The summary
-# marks
-#   miss    the forced node is more than 15 % faster than the planner's
-#           choice, and the planner did not choose it
-#   wrong   the planner chose the node and the stock plan is more than
-#           15 % faster
-#   bias    (node cost / node ms) / (stock cost / stock ms): above 1 the
-#           node is overcosted relative to the stock plan, below 1
-#           undercosted
-#   est_ratio  entries the cost model expected / entries read.  Meaningful
-#           for the queries without LIMIT: the estimate is for the whole
-#           merge, a Limit above stops it early.  Near 1 there, a miss is in
-#           the cost per entry or page, not in the entries estimate.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
-# bench_db.sh); ROWS (1000000), REPEATS (5), RANDOM_PAGE_COST (4), BENCH_OUT
-# (a directory that must not exist yet).
-# Output: tests/performance/results/cost-<timestamp>/cost.csv and a summary.
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); ROWS (1000000),
+# REPEATS (5), RANDOM_PAGE_COST (4), BENCH_OUT (must not exist).
+# Output: results/cost-<timestamp>/cost.csv and a summary.
 set -euo pipefail
 
 cd "$(dirname "$0")"

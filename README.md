@@ -5,6 +5,9 @@ and 19 extension that lets the planner combine general B-tree indexes at query t
 — `(customer_id, id)` with `(product_id, id)`, or with a shared
 `(id) WHERE deleted_at IS NULL` — into one ordered stream, so that a table does
 not need a dedicated composite or partial index for every filter combination.
+It is built for one narrow case: a list query with several equality filters
+that each match many rows, a combination that matches few, and `ORDER BY id
+LIMIT n`; everything else gets the stock plan.
 No query changes: the planner picks the node where it is cheaper, per query and
 with the current statistics, and `leapfrog.enabled = off` stops new plans from
 using it (see [Operational safety](#operational-safety) for plans already cached).
@@ -20,23 +23,24 @@ part of the cases where the node is faster (see
 ## Contents
 
 1. [The problem: one index per query shape](#the-problem-one-index-per-query-shape)
-2. [Why index composition matters](#why-index-composition-matters)
-3. [How Index Merge Intersect works](#how-index-merge-intersect-works)
-4. [Example](#example)
-5. [Compared with Index Scan and BitmapAnd](#compared-with-index-scan-and-bitmapand)
-6. [Requirements](#requirements)
-7. [Installation](#installation)
-8. [Docker quick start](#docker-quick-start)
-9. [Loading the library](#loading-the-library)
-10. [Settings](#settings)
-11. [Reading EXPLAIN](#reading-explain)
-12. [Tests](#tests)
-13. [Benchmarks](#benchmarks)
-14. [Cost model](#cost-model)
-15. [Known limitations and planned improvements](#known-limitations-and-planned-improvements)
-16. [Known issues](#known-issues)
-17. [Operational safety](#operational-safety)
-18. [License](#license)
+2. [What it looks like at 100M rows](#what-it-looks-like-at-100m-rows)
+3. [Why index composition matters](#why-index-composition-matters)
+4. [How Index Merge Intersect works](#how-index-merge-intersect-works)
+5. [Example](#example)
+6. [Compared with Index Scan and BitmapAnd](#compared-with-index-scan-and-bitmapand)
+7. [Requirements](#requirements)
+8. [Installation](#installation)
+9. [Docker quick start](#docker-quick-start)
+10. [Loading the library](#loading-the-library)
+11. [Settings](#settings)
+12. [Reading EXPLAIN](#reading-explain)
+13. [Tests](#tests)
+14. [Benchmarks](#benchmarks)
+15. [Cost model](#cost-model)
+16. [Known limitations and planned improvements](#known-limitations-and-planned-improvements)
+17. [Known issues](#known-issues)
+18. [Operational safety](#operational-safety)
+19. [License](#license)
 
 ## The problem: one index per query shape
 
@@ -67,59 +71,115 @@ leapfrog adds the missing plan node: an ordered intersection of two or more
 B-tree indexes that stops early at `LIMIT` and visits the heap only for rows
 that passed all of them.
 
+## What it looks like at 100M rows
+
+A list query with two or three filters, each matching many rows and the
+combination few, scattered over the table, on 100M rows (12 GB).
+`deleted_at IS NULL` is one such filter; any column behaves the same:
+
+```sql
+SELECT * FROM orders
+WHERE customer_id = $1 AND product_id = $2 [AND deleted_at IS NULL]
+ORDER BY id DESC LIMIT 100;
+```
+
+Indexes `(customer_id, id)` and `(product_id, id)`, 3 GB each, and
+`(id) WHERE deleted_at IS NULL`, 101 MB. "Exact index" is a composite index
+built for the query afterwards; "leapfrog" is the planner's choice with the
+extension loaded, the node in every row; "stock" the planner's choice without
+it; `BitmapAnd` forced. One laptop, 14 GB of memory, `shared_buffers` 512MB,
+median of 3 runs.
+
+Rows in random physical order, as a table is after years of updates; 5 % of
+the rows are live, the customer has 500 live rows spread over its history:
+
+| Query | Exact index | leapfrog | Stock | `BitmapAnd` |
+|---|---:|---:|---:|---:|
+| `customer_id` with 1M rows `AND deleted_at IS NULL` | **0.4 ms** | 159 ms | Index Scan 2.3 s (cold 22 s) | 1.6 s |
+| `customer_id` with 5M rows `AND deleted_at IS NULL` | **0.3 ms** | 880 ms | Index Scan 92 s | 2.7 s |
+
+Stock scans one index and filters the other column on the heap: it expects
+the live rows near the top, they are not there, and it fetches 930,000 heap
+rows for 100 results, 937,000 random pages from disk. The node walks the two
+indexes together, 6,500 pages, and fetches the 100 rows it returns.
+
+Rows in `id` order, the best case for stock's Index Scan, whose heap reads
+then come out sequential:
+
+| Query | Exact index | leapfrog | Stock | `BitmapAnd` |
+|---|---:|---:|---:|---:|
+| 1M × 2M `AND deleted_at IS NULL`: 11 match | **0.1 ms** | 259 ms (cold 3.8 s) | Index Scan 168 s | 1.1 s |
+| 1M × 200k, 5,000 match, one row in 20,000 | **1.1 ms** | 2.5 ms | `BitmapAnd` 384 ms | 373 ms |
+| 10k × 1M, 100 match | **0.4 ms** | 104 ms | `BitmapAnd` 338 ms | 295 ms |
+| 1M × 200k, 500 match, all in the middle of the table | **0.6 ms** | 66 ms | `BitmapAnd` 353 ms | 371 ms |
+
+Where stock picks `BitmapAnd` it reads both indexes whole and sorts. With 5M
+rows matching out of 20M × 25M every plan but `BitmapAnd` returns in under a
+millisecond: when matches are common the index choice stops mattering.
+
+The two tables are
+[`tests/performance/list_bench.sh`](tests/performance/list_bench.sh)
+(`SIZE=100000000`, `ORDER=random` and `ORDER=id`) and one-off data sets; the whole
+runs, the data generators and the plans are in
+[BENCHMARKS.md](BENCHMARKS.md#100m-rows-the-list-query-needles-and-the-middle-fed2cfb).
+
 ## Why index composition matters
 
 Measured with [`tests/performance/write_bench.sh`](tests/performance/write_bench.sh):
-500,000 rows, 12 filter columns of 100 values each, soft deletes, then writes
-of 100,000 rows; PostgreSQL 18.6 in Docker on a laptop
-(details and caveats in [BENCHMARKS.md](BENCHMARKS.md)).
+20M rows, 12 filter columns of 100 values each, soft deletes, then writes of
+100,000 rows; PostgreSQL 18.6 in Docker on a laptop, one load.
 
-- **S, specialised**: per filter column `(fK, id) WHERE deleted_at IS NULL` and
-  `(fK, id) WHERE deleted_at IS NOT NULL`, plus composite indexes for frequent
-  combinations — 6 pairs, 2 triples, 1 quadruple — **33 indexes**.
-- **G, general**: per filter column `(fK, id)`, plus `(id) WHERE deleted_at IS
+- **M, specialised**: composite indexes for the 9 frequent filter combinations
+  (6 pairs, 2 triples, 1 quadruple, all `WHERE deleted_at IS NULL`) plus
+  `(fK, id)` for the 6 columns no composite starts with — **15 indexes**.
+- **G, general**: `(fK, id)` per filter column, plus `(id) WHERE deleted_at IS
   NULL` and `(id) WHERE deleted_at IS NOT NULL` — **14 indexes**; read with
   stock PostgreSQL or with leapfrog (**G+L**), which combines 2–4 of them per
   query.
 
-Storage and writes (index size and WAL are deterministic; rows per second vary
-up to 2× between runs on this machine):
+Storage and writes. The extension plays no part in these numbers: they compare
+the two index sets, and stock PostgreSQL with G writes the same. Rows per
+second are one run.
 
-| | S (33 indexes) | G (14 indexes) | G vs S |
-|---|---|---|---|
-| Index size, excluding PK | 375 MB | **201 MB** | −46 % |
-| `INSERT` 100,000 rows: WAL | 481 MB | **159 MB** | −67 % |
-| `INSERT`: rows per second | 4,035 | **23,017** | 5.7× faster |
-| `UPDATE` of a filter column: WAL | 291 MB | **73 MB** | −75 % |
-| `UPDATE` of `deleted_at` (soft delete): WAL | **82 MB** | 91 MB | +11 % |
-| `DELETE`: WAL | 18 MB | 18 MB | same |
+| | M (15 indexes) | G (14 indexes) | G vs M |
+|---|---:|---:|---:|
+| Index size, excluding PK | 11.2 GB | **8.0 GB** | −28 % |
+| `INSERT` 100,000 rows: WAL | 3,595 MB | **166 MB** | −95 % |
+| `INSERT`: rows per second | 945 | **12,592** | 13× faster |
+| `UPDATE` of a filter column, 25,000 rows: WAL | 1,004 MB | **70 MB** | −93 % |
+| `UPDATE` of `deleted_at` (soft delete), 25,000 rows: WAL | **46 MB** | 77 MB | +67 % |
+| `DELETE`, 25,000 rows: WAL | 18 MB | 18 MB | same |
 
-Reads, `LIMIT 100`, median time, `random_page_cost = 1.1` (data in memory):
+One index more, 22× the WAL: nearly all of it is the 9 composite indexes.
+Adding the index groups one at a time, M's 6 single-column indexes write
+89 MB, the 6 pairs add 461 MB, the 2 triples 2.2 GB and the quadruple 0.9 GB.
+In an index with many distinct prefixes every new row lands on a page of its
+own, and the first write to a page after a checkpoint logs it in full; a
+single-column `(fK, id)` index appends at the end of 100 runs and keeps
+hitting the same pages (BENCHMARKS.md, "Where the INSERT WAL comes from").
 
-| Query | S | G stock | G+L (planner, indexes) |
-|---|---|---|---|
-| one filter, live rows | **0.06 ms** | 0.06 ms | 0.07 ms |
-| one filter, deleted rows | **0.13 ms** | 1.35 ms | 0.57 ms (2) |
-| 2 filters, composite index in S | **0.07 ms** | 1.48 ms | 0.68 ms (2) |
-| 2 filters, no composite in S | 5.56 ms | 1.48 ms | **0.65 ms** (2) |
-| 3 filters, composite index in S | **0.02 ms** | 1.49 ms | 0.62 ms (2) |
-| 3 filters, no composite in S | 5.98 ms | 1.48 ms | **0.62 ms** (2) |
-| 4 filters, composite index in S | **0.04 ms** | 1.43 ms | 0.80 ms (3) |
-| 4 filters, no composite in S | 6.76 ms | 1.59 ms | **0.63 ms** (2) |
+Reads on G at the same 20M rows, `LIMIT 100`, `work_mem` 256MB,
+`random_page_cost` 1.1, median of 5 runs. "Exact index" is a composite index
+built for that query; "node" and "stock" are what the planner picks with and
+without the extension; `BitmapAnd` is forced:
+
+| Query | Rows found | Exact index | Node | Stock | `BitmapAnd` |
+|---|---:|---:|---:|---:|---:|
+| 2 filters | 100 | **0.16 ms** | 1.0 ms | `BitmapAnd` 71 ms | 72 ms |
+| 3 filters | 21 | **0.06 ms** | 33 ms | `BitmapAnd` 71 ms | 74 ms |
+| 4 filters | 0 | **0.03 ms** | 31 ms | `BitmapAnd` 59 ms | 65 ms |
 
 What this shows, plainly:
 
-- The write side is the reason to compose: half the index storage, a third of
-  the WAL on inserts, and inserts several times faster — and S grows with
-  every combination of filters it serves, G does not.
+- The write side is the reason to drop the composite indexes: 95 % less WAL on
+  inserts and 13× the insert rate, from the index set alone. M grows with every
+  combination of filters it serves, G does not.
 - A dedicated index is still the fastest read for the exact query it was built
-  for. Composition trades that for fewer indexes; the specialised scheme pays
-  3–7 ms whenever a combination has no index of its own.
-- With general indexes, leapfrog answers every combination of 2, 3 and 4
-  filters in 0.6–1.0 ms, chosen by the planner, 2–3× faster than stock
-  PostgreSQL on the same indexes. It picks a third index where the cost model
-  sees it pay and stays with two where it does not (the default page cost
-  and more results in BENCHMARKS.md).
+  for, by 6 to 1,000 times here. Composition trades that for fewer indexes.
+- With general indexes the planner with leapfrog answers two filters in 1 ms
+  where stock PostgreSQL takes 71 ms on the same indexes. With three or four
+  filters fewer rows match than the `LIMIT` asks, so the merge runs to the end
+  of the sparsest stream: about 30 ms here, 2× faster than stock.
 
 ## How Index Merge Intersect works
 
@@ -299,37 +359,40 @@ IS NOT NULL`; 100 customers, 50 products, 10 % of the rows deleted. Two
 queries with `LIMIT 100` — a pair of ordinary indexes
 (`customer_id = 7 AND product_id = 3`) and a customer's deleted rows
 (`customer_id = 7 AND deleted_at IS NOT NULL`) — and the pair without
-`LIMIT`. Three runs on the C code of commit `daf9ece`, each on a freshly
-loaded table, with `work_mem` 256MB at every size, as a tuned server would
-have, so that every bitmap is exact; 5 warm-up and 11 measured runs each, the four plans
-interleaved in ABBA order; one laptop, `shared_buffers` 512MB. Median and,
-in brackets, 90th percentile of the 33 measured runs, in milliseconds.
+`LIMIT`. One load of each size, `work_mem` 256MB at 20M rows and 512MB at 100M, so that
+every bitmap is exact; 5 warm-up and 11 measured runs, the plans interleaved in ABBA
+order; one laptop with 14 GB of memory, `shared_buffers` 512MB. Median and, in brackets,
+90th percentile, in milliseconds.
 
-| Rows | Query | Index Merge Intersect | BitmapAnd | Stock PostgreSQL's choice |
-|---:|---|---:|---:|---|
-| 1M | pair | 1.32 (1.69) | 4.19 (5.04) | BitmapAnd 4.11 (5.30) |
-| 10M | pair | 1.27 (1.53) | 53.0 (60.4) | BitmapAnd 53.3 (61.6) in two runs, Index Scan 2.85 (3.13) in one |
-| 50M | pair | 1.27 (1.72) | 231 (236) | Index Scan 3.13 (3.70) |
-| 1M | deleted | 0.95 (1.20) | 9.02 (13.2) | Index Scan 2.88 (3.54) |
-| 10M | deleted | 0.85 (1.27) | 80.9 (84.0) | Index Scan 2.37 (2.59) |
-| 50M | deleted | 0.87 (1.22) | 409 (415) | Index Scan 2.18 (3.02) |
-| 1M | pair, no `LIMIT` | 2.08 (2.85) | 4.30 (5.99) | BitmapAnd 4.22 (6.07) |
-| 10M | pair, no `LIMIT` | 17.1 (19.1) | 45.2 (50.3) | BitmapAnd 44.4 (51.8) |
-| 50M | pair, no `LIMIT` | 84.3 (85.0) | 223 (228) | BitmapAnd 222 (229) |
+"Exact index" adds the indexes made for these queries, with the extension off, and runs as
+a separate block after the others on the same table.
 
-- With a `LIMIT` the node's work does not depend on the table size: 133–179
-  buffers and 10,752–18,621 index entries at 1M, 10M and 50M rows, the same
-  in every run. `BitmapAnd` cannot return a row before it has read every
-  entry of both conditions — 1.5 million for the pair and 5.5 million for
-  the deleted rows at 50M — so the gap grows with the table: 3.2–9.5× at 1M
-  rows, 42–95× at 10M, 180–470× at 50M.
-- Without a `LIMIT` both read the same entries and buffers; the node is
-  2.1–2.6× faster because it builds no bitmaps and does not sort.
-- The plan stock PostgreSQL picks is the fairer comparison. Where it turns
-  to an Index Scan that stops early too, the node is 2.2–3.0× faster; where
-  it keeps `BitmapAnd`, 3.1× at 1M rows and 42× at 10M. Which of the two it
-  picks for the pair at 10M rows changed from one load of the same data to
-  the next (the statistics are a sample); the node's plan did not.
+| Rows | Query | Exact index | Index Merge Intersect | Stock PostgreSQL's choice | BitmapAnd |
+|---:|---|---:|---:|---|---:|
+| 20M | pair | **0.09** (0.11) | 1.84 (1.98) | Index Scan 3.91 (4.33) | 172 (193) |
+| 100M | pair | **0.13** (0.14) | 1.01 (1.34) | Index Scan 2.79 (3.11) | 495 (498) |
+| 20M | deleted | **0.09** (0.12) | 0.83 (1.24) | Index Scan 2.65 (3.71) | 161 (190) |
+| 100M | deleted | **0.14** (0.21) | 1.01 (1.12) | Index Scan 4.41 (7.70) | 1,264 (1,271) |
+| 20M | pair, no `LIMIT` | **8.18** (8.96) | 33.9 (35.3) | BitmapAnd 78.3 (81.1) | 75.4 (82.5) |
+| 100M | pair, no `LIMIT` | **44.2** (49.1) | 166 (168) | BitmapAnd 478 (498) | 485 (494) |
+
+Index sizes at 100M rows: 8.18 GB for the small indexes with the primary key; the three
+exact indexes add 4.45 GB, on a table of 10.99 GB.
+
+- With a `LIMIT` the node's work does not depend on the table size: 139 to 164 buffers at
+  both sizes. `BitmapAnd` cannot return a row before it has read every entry of both
+  conditions, 31,337 buffers for the pair at 100M, so the gap grows: 93–193× at 20M rows
+  and 490–1,250× at 100M.
+- Without a `LIMIT` both read the same buffers; the node is 2.2–2.9× faster because it
+  builds no bitmaps and does not sort. The time grows with the rows found, 3,962 and 19,973.
+- An exact index beats the node 7 to 20 times with a `LIMIT` and 4 times without.
+- The plan stock PostgreSQL picks is the fairer comparison. Where it is an Index Scan that
+  stops early too, the node is 2.1–4.4× faster, where it keeps `BitmapAnd`, 2.3–2.9×.
+  Which of the two it picks can change from one load of the same data to the next (the
+  statistics are a sample): for the pair at 10M rows, `BitmapAnd` at 77 ms in one load and an
+  Index Scan at 3.6 ms in another.
+- With leapfrog on, the planner picks the node for the pair and an Index Scan for these
+  deleted rows, 2.2–2.4× slower than the node. It misses that case.
 
 **Deleted rows in batches.** Above, the deleted rows are spread evenly, as
 PostgreSQL assumes. In real tables they are usually deleted in batches,
@@ -339,36 +402,23 @@ of `id`s deleted all or none, rows in random physical order; the queried
 customer has no deleted rows among its newest ones while other customers
 do. Stock PostgreSQL still expects its deleted rows right at the top and
 picks an Index Scan on `(customer_id, id)` filtering `deleted_at`, which
-fetches every newer live row of the customer from the heap. Same settings
-and three runs, the deleted-rows query with `LIMIT 100`:
+fetches every newer live row of the customer from the heap. Same settings,
+the deleted-rows query with `LIMIT 100`, in milliseconds:
 
-| Rows | Pages | Index Merge Intersect | Stock PostgreSQL: Index Scan | BitmapAnd | Pages read, Index Merge Intersect / Index Scan |
-|---:|---|---:|---:|---:|---:|
-| 1M | in memory | 1.3 ms | 0.8 ms | 11 ms | 146 / 1,042 |
-| 10M | in memory | 6.8 ms | 6.3 ms | 120 ms | 470 / 9,556 |
-| 50M | in memory (`shared_buffers` 1.5GB) | 32 ms | 32 ms | 857 ms | 1,896 / 47,200 |
-| 50M | **read from disk** | **45 ms, at worst 0.4 s** | **4.5 s, 4.0–5.2 s** | 1.5 s | from disk: up to 1,600 / about 43,000 |
+| Rows | Exact index | Index Merge Intersect | Stock PostgreSQL: Index Scan | BitmapAnd | Buffers, Index Merge Intersect / Index Scan |
+|---:|---:|---:|---:|---:|---:|
+| 20M | **0.13** (0.14) | 11.8 (12.2) | 11.7 (13.1) | 270 (289) | 828 / 18,787 |
+| 100M | **0.07** (0.12) | 67.6 (69.2) | 445 (452) | 2,278 (2,305) | 3,681 / 94,689 |
 
-Median of 33 runs (three loads of 11). At 50M rows the table does not fit
-in the laptop's memory. "In memory" at 50M is a separate run of three loads
-with `shared_buffers` 1.5GB, where all pages the three plans read stay in
-shared buffers (none read from outside). "Read from disk" are the runs with
-`shared_buffers` 512MB right after `BitmapAnd`, which reads 78,797 pages and
-evicts the other plans' pages (15 to 18 runs per plan, and all runs of
-`BitmapAnd` itself).
+- Here the node's work grows with the table: it steps through the deleted entries of the
+  other customers, which lie too close together to skip.
+- At 20M rows, with the pages in memory, the node and the Index Scan take the same time. At
+  100M most of their pages come from outside `shared_buffers` (up to 3,625 and 90,437),
+  and the Index Scan takes 6.6× as long.
+- With leapfrog the planner picks the node at both sizes.
 
-- While the pages are in memory the Index Scan is as fast or faster: the
-  node reads fewer pages, but steps through the deleted entries of the
-  other customers (13,692, 127,838 and 633,657 index entries), which lie
-  too close together to skip.
-- When the pages have to come from disk, the Index Scan reads about 43,000
-  heap pages back and takes 4–5 s, the case this data set is for. Most of
-  the node's 1,896 pages stay cached; when about 1,500 of them had to be
-  read back (6 of 18 runs) it took 0.24–0.38 s.
-- With leapfrog the planner picks the node at every size.
-
-Details, runs at the default `work_mem` and the caveats (one laptop, a
-50M-row table larger than its memory) are in [BENCHMARKS.md](BENCHMARKS.md#against-bitmapand-as-the-table-grows).
+More sizes, all six queries and the caveats are in
+[BENCHMARKS.md](BENCHMARKS.md#10m-to-100m-rows-reads-and-writes-fed2cfb).
 
 ### Compared with a self join
 
@@ -675,14 +725,16 @@ restarts the server and drops the OS page cache. The Docker server above,
 or one started for the purpose, is the intended target.
 
 ```bash
-bash tests/performance/write_bench.sh            # storage, writes and reads for 12 filter columns
+BASE_ROWS=20000000 bash tests/performance/write_bench.sh   # storage, writes and reads for 12 filter columns
 bash tests/performance/run.sh                    # reads: 3 strategies, uniform and skewed, 1/10/50/90 % deleted
 BENCH_RANDOM_PAGE_COST=1.1 bash tests/performance/run.sh
 BENCH_SIZES="10000000" bash tests/performance/run.sh
 bash tests/performance/cost_bench.sh             # cost model: estimate against time, skewed and correlated data
 bash tests/performance/skip_bench.sh             # skip-ahead thresholds: buffers and entries read
 bash tests/performance/planning_bench.sh         # planning time: 10/20/50 indexes on the table, 1/2/6 used by the query
-SIZES="1000000 10000000 50000000" WORK_MEM=256MB WARMUP=5 bash tests/performance/bitmap_bench.sh   # against BitmapAnd as the table grows, exact bitmaps; DELETED=hashed or batches for one data set
+SIZES="20000000" WORK_MEM=256MB WARMUP=5 bash tests/performance/bitmap_bench.sh   # against BitmapAnd and an exact index, exact bitmaps; DELETED=hashed or batches for one data set
+SIZES="100000000" WORK_MEM=512MB WARMUP=5 bash tests/performance/bitmap_bench.sh
+SIZE=100000000 WORK_MEM=512MB bash tests/performance/list_bench.sh   # the list query with rare, scattered matches, rows in random order; ORDER=id for id order
 BENCH_LABEL=old BENCH_OUT=results/types-old bash tests/performance/types_bench.sh   # equality types, one build
 bash tests/performance/types_compare.sh tests/performance/results/types-old tests/performance/results/types-new
 ```
@@ -902,9 +954,10 @@ Verified against `src/` and the tests.
 - `VACUUM` while the node's scan is positioned on a leaf page is not in the
   isolation tests: `isolationtester` does not see buffer pin waits. It was
   checked by hand (see Known issues).
-- Benchmarks ran on one laptop with data in memory; timings vary up to 2×
-  between runs. Runs with the OS page cache dropped and 10M+ row runs have
-  not been made.
+- Benchmarks ran on one laptop; timings vary up to 2× between runs, and one
+  load per size at 10M to 100M rows. The OS page cache was never dropped on
+  purpose: up to 20M rows everything is read from it, at 50M and 100M a part
+  comes from disk, which the scripts do not tell apart.
 
 ### Roadmap
 

@@ -2,9 +2,8 @@
  *
  * indexstream.c
  *	  Reading one btree index as a sorted stream of (sortcol value, heap
- *	  TID) entries: positioning it on the equality values and a bound on
- *	  sortcol, and taking entries without visiting the heap.  Used by the
- *	  executor's merge and by the planner's range probe.
+ *	  TID) entries without visiting the heap.  Used by the executor's merge
+ *	  and by the planner's range probe.
  *
  * IDENTIFICATION
  *	  src/indexstream.c
@@ -29,9 +28,8 @@
 /*
  * lf_scan_leaf_position
  *		The leaf page the scan is positioned on and its neighbour in scan
- *		direction; false when it is positioned nowhere.  This is the only read
- *		of nbtree's private scan state, for the skip-ahead's landing check:
- *		the merge itself needs nothing of it.
+ *		direction; false when it is positioned nowhere.  The only read of
+ *		nbtree's private scan state, for the skip-ahead's landing check.
  */
 bool
 lf_scan_leaf_position(IndexScanDesc scan, bool backward, BlockNumber *page,
@@ -47,11 +45,9 @@ lf_scan_leaf_position(IndexScanDesc scan, bool backward, BlockNumber *page,
 
 /*
  * lf_rescan_with_keys
- *		Position an index scan on the current equality values of one stream
- *		and on what is asked of sortcol, the key column right after them.  The
- *		scan was opened with room for nequal + 1 keys; without a condition on
- *		sortcol it gets nequal, and no type has a value that lets every entry
- *		through, so the scan's number of keys follows.
+ *		Position an index scan on the stream's equality values and on what is
+ *		asked of sortcol.  Opened with room for nequal + 1 keys; numberOfKeys
+ *		follows the keys used, as no value lets every entry through.
  */
 void
 lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, SortBound kind,
@@ -99,10 +95,9 @@ lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, SortBound kind,
 
 /*
  * lf_init_key_procs
- *		Look up what the scan keys need once the operators are set: each
- *		equality operator's function and right input type, and for the bound
- *		the operator family's ">=" or "<=" of the sort type, by the direction
- *		of the pathkey.
+ *		Look up each equality operator's function and right input type, and
+ *		for the bound the opfamily's ">=" or "<=" of the sort type, by the
+ *		direction of the pathkey.
  */
 void
 lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
@@ -132,18 +127,16 @@ lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
 
 /*
  * lf_read_index_entry
- *		Fetch the next (sortcol value, heap TID) entry from an index without
- *		visiting the heap.  *entries_read counts every entry taken from the
- *		index, including the skipped ones.  A by-reference value points into
+ *		Fetch the next (sortcol value, heap TID) entry.  *entries_read counts
+ *		every entry taken, skipped ones too.  A by-reference value points into
  *		the scan's index tuple: it stays valid until the scan moves on.
  *
- * With skip_nulls the planner found the sort column NOT NULL, but that
- * describes the live rows: an index can still hold dead entries with NULL
- * until VACUUM, for instance when a NULL was updated away before SET NOT
- * NULL.  Such entries are skipped.  They cannot belong to a row the merge
- * has to return, since NULL never satisfies the equality the merge is
- * built on, and treating them as a value would derail it: a backward scan
- * reads them first.  Otherwise a NULL is a value of the merge like any other.
+ * skip_nulls means the planner found sortcol NOT NULL, but that describes the
+ * live rows: an index can hold dead NULL entries until VACUUM, for instance
+ * when a NULL was updated away before SET NOT NULL.  They cannot belong to a
+ * row the merge returns, since NULL never satisfies the equality the merge is
+ * built on, and treated as values they would derail it: a backward scan reads
+ * them first.  Otherwise a NULL is a value of the merge like any other.
  */
 bool
 lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,

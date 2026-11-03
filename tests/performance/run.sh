@@ -1,40 +1,18 @@
 #!/usr/bin/env bash
-# Reproducible benchmark of three index strategies for
+# Three index strategies for
+#   WHERE customer_id = :owner AND deleted_at IS [NOT] NULL ORDER BY id DESC LIMIT :limit
 #
-#   SELECT * FROM orders
-#   WHERE customer_id = :owner AND deleted_at IS [NOT] NULL
-#   ORDER BY id DESC LIMIT :limit;
+#   A  stock:     (customer_id, id)
+#   B  leapfrog:  (customer_id, id), (id) WHERE deleted_at IS [NOT] NULL
+#   C  partial:   (customer_id, id) WHERE deleted_at IS [NOT] NULL
 #
-#   A  standard PostgreSQL:   (customer_id, id)
-#   B  PostgreSQL + leapfrog: (customer_id, id) + (id) WHERE deleted_at IS NULL
-#                                                + (id) WHERE deleted_at IS NOT NULL
-#   C  specialised partial:   (customer_id, id) WHERE deleted_at IS NULL
-#                             (customer_id, id) WHERE deleted_at IS NOT NULL
+# Environment (defaults in brackets): PGHOST/PGPORT/PGUSER/PGPASSWORD; BENCH_DB (see
+# bench_db.sh); BENCH_SIZES ("100000 1000000"), BENCH_DISTS ("uniform skewed"),
+# BENCH_DELETED ("1 10 50 90", percent), BENCH_LIMITS ("1 100 1000 0", 0 is no LIMIT),
+# BENCH_REPEATS (5), BENCH_SEED (0.42), BENCH_FORCE (1: also B under leapfrog.force),
+# BENCH_OUT (must not exist).  Output in results/<timestamp>/: results.csv, plans.jsonl.
 #
-# For every data size, distribution and deleted share, the script loads the
-# data once, builds the indexes of one strategy, warms the cache and runs
-# every query of the mix BENCH_REPEATS times through EXPLAIN (ANALYZE,
-# BUFFERS, FORMAT JSON).  Results are appended to
-# tests/performance/results/<timestamp>/results.csv; the full plans go to
-# plans.jsonl next to it.
-#
-# Environment (all optional):
-#   PGHOST/PGPORT/PGUSER/PGPASSWORD   connection
-#   BENCH_DB         leapfrog_bench             database (see bench_db.sh)
-#   BENCH_SIZES      "100000 1000000"           row counts
-#   BENCH_DISTS      "uniform skewed"           distributions
-#   BENCH_DELETED    "1 10 50 90"               deleted share, percent
-#   BENCH_LIMITS     "1 100 1000 0"             0 means no LIMIT
-#   BENCH_REPEATS    5
-#   BENCH_SEED       0.42
-#   BENCH_FORCE      0|1   also run strategy B with leapfrog.force = on
-#   BENCH_OUT        output directory instead of results/<timestamp>; it
-#                    must not exist, so that a run never writes into the
-#                    results of another one
-#
-# The 10M and 100M profiles are not run by default:
-#   BENCH_SIZES="10000000" bash tests/performance/run.sh
-#   BENCH_SIZES="100000000" BENCH_DELETED="10" bash tests/performance/run.sh
+# Larger: BENCH_SIZES="100000000" BENCH_DELETED="10" bash tests/performance/run.sh
 set -euo pipefail
 
 cd "$(dirname "$0")"
