@@ -132,6 +132,36 @@ typedef struct IntersectScanState
 } IntersectScanState;
 
 
+/*
+ * The node's instrumentation under EXPLAIN ANALYZE: PostgreSQL 19 wraps
+ * Instrumentation in a NodeInstrumentation with the loop count.
+ */
+static inline bool
+node_need_timer(PlanState *ps)
+{
+#if PG_VERSION_NUM >= 190000
+	return ps->instrument != NULL && ps->instrument->instr.need_timer;
+#else
+	return ps->instrument != NULL && ps->instrument->need_timer;
+#endif
+}
+
+static inline bool
+node_need_bufusage(PlanState *ps)
+{
+#if PG_VERSION_NUM >= 190000
+	return ps->instrument != NULL && ps->instrument->instr.need_bufusage;
+#else
+	return ps->instrument != NULL && ps->instrument->need_bufusage;
+#endif
+}
+
+static inline double
+node_nloops(PlanState *ps)
+{
+	return ps->instrument != NULL ? ps->instrument->nloops : 0;
+}
+
 static Node *intersect_create_scan_state(CustomScan *cscan);
 static void intersect_begin(CustomScanState *node, EState *estate,
 							int eflags);
@@ -538,12 +568,11 @@ intersect_start(IntersectScanState *state)
 	for (int i = 0; i < state->nstreams; i++)
 	{
 		IndexStream *stream = &state->streams[i];
-		Instrumentation *instr = state->css.ss.ps.instrument;
 		StreamClock clock;
 
 		/* allocated after BeginCustomScan: read here, before the first use */
-		stream->instr.timer = instr != NULL && instr->need_timer;
-		stream->instr.bufusage = instr != NULL && instr->need_bufusage;
+		stream->instr.timer = node_need_timer(&state->css.ss.ps);
+		stream->instr.bufusage = node_need_bufusage(&state->css.ss.ps);
 		stream->loop_base = stream->instr.time;
 		stream->started = false;
 		lf_instr_start(&stream->instr, &clock);
@@ -1145,11 +1174,10 @@ static void
 intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	IntersectScanState *state = (IntersectScanState *) node;
-	Instrumentation *instr = node->ss.ps.instrument;
 	List	   *context = set_deparse_context_plan(es->deparse_cxt,
 												   node->ss.ps.plan, ancestors);
 	bool		useprefix = es->verbose || es->rtable_size > 1;
-	double		nloops = instr != NULL ? instr->nloops : 0;
+	double		nloops = node_nloops(&node->ss.ps);
 	int64		skips = 0;
 	int64		short_skips = 0;
 	int64		group_overflows = 0;
