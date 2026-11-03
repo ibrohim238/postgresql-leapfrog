@@ -95,13 +95,17 @@ the rows are live, the customer has 500 live rows spread over its history:
 
 | Query | Exact index | leapfrog | Stock | `BitmapAnd` |
 |---|---:|---:|---:|---:|
-| `customer_id` with 1M rows `AND deleted_at IS NULL` | **0.4 ms** | 159 ms | Index Scan 2.3 s (cold 22 s) | 1.6 s |
-| `customer_id` with 5M rows `AND deleted_at IS NULL` | **0.3 ms** | 880 ms | Index Scan 92 s | 2.7 s |
+| `customer_id` with 1M rows `AND deleted_at IS NULL` | **0.14 ms** | 122 ms (cold 151) | Index Scan 1.8 s (cold 4.8 s) | 1.5 s |
+| `customer_id` with 5M rows `AND deleted_at IS NULL` | **0.14 ms** | 160 ms (cold 559) | Index Scan 117 s | 2.7 s |
+| the first `AND product_id = $2` (2M rows): 11 match | **0.07 ms** | 843 ms (cold 2.0 s) | `BitmapAnd` 1.3 s | 2.2 s |
 
-Stock scans one index and filters the other column on the heap: it expects
+Stock scans one index and filters the other columns on the heap: it expects
 the live rows near the top, they are not there, and it fetches 930,000 heap
-rows for 100 results, 937,000 random pages from disk. The node walks the two
-indexes together, 6,500 pages, and fetches the 100 rows it returns.
+rows for 100 results, 937,000 random pages from disk. The node walks the
+indexes together, 6,500 pages for the second row, and fetches the 100 rows
+it returns; for the third it merges three indexes, 7.7 million entries, for
+11 rows. Its leaf pages are asked for one ahead (`leapfrog.prefetch`), which
+is what keeps the cold runs close to the warm ones.
 
 Rows in `id` order, the best case for stock's Index Scan, whose heap reads
 then come out sequential:
@@ -157,6 +161,19 @@ In an index with many distinct prefixes every new row lands on a page of its
 own, and the first write to a page after a checkpoint logs it in full; a
 single-column `(fK, id)` index appends at the end of 100 runs and keeps
 hitting the same pages (BENCHMARKS.md, "Where the INSERT WAL comes from").
+
+M is also the cheapest form a specialised set can take: its composites serve
+live rows only (`WHERE deleted_at IS NULL`). A real schema needs two more
+variants of each, for the trash view (`WHERE deleted_at IS NOT NULL`) and for
+lists without a condition on `deleted_at`: 27 composite indexes instead of 9.
+Writes then get worse both ways. An `INSERT` lands in the 9 `IS NULL`
+composites and the 9 without a predicate, about twice the WAL above; a soft
+delete writes the new row version into the 9 `IS NOT NULL` composites and the
+9 without a predicate, where the M above touches only its 6 single-column
+indexes, so M's edge on soft deletes (46 MB against G's 77 MB) holds only
+while it covers live rows alone. G stays at 14 indexes: the node merges
+`(fK, id)` with either partial `(id)` index, or does without, and nothing
+changes for it. This is a count of indexes, not a measurement.
 
 Reads on G at the same 20M rows, `LIMIT 100`, `work_mem` 256MB,
 `random_page_cost` 1.1, median of 5 runs. "Exact index" is a composite index
@@ -276,21 +293,27 @@ ORDER BY id DESC LIMIT 100;
 ```
 
 ```text
- Limit (actual time=0.092..1.882 rows=100.00 loops=1)
+ Limit (actual time=0.101..2.506 rows=100.00 loops=1)
    Buffers: shared hit=166
-   ->  Custom Scan (Index Merge Intersect) on orders (actual time=0.091..1.866 rows=100.00 loops=1)
-         Outer Index: idx_orders_customer_id
-         Inner Index: idx_orders_deleted_id
-         Outer Entries Read: 585
-         Inner Entries Read: 20131
+   ->  Custom Scan (Index Merge Intersect) on orders (actual time=0.100..2.485 rows=100.00 loops=1)
          Matched TIDs: 100
          Heap Fetches: 100
          Peak Group Memory: 96 B
          Skips: 4
          Short Skips: 3
+         ->  Outer Stream on idx_orders_customer_id (actual time=0.021..0.060 rows=585.00 loops=1)
+               Index Cond: (customer_id = 100)
+               Skips: 1
+               Short Skips: 0
+               Buffers: shared hit=8
+         ->  Inner Stream on idx_orders_deleted_id (actual time=0.018..1.166 rows=20131.00 loops=1)
+               Index Pred: (deleted_at IS NOT NULL)
+               Skips: 3
+               Short Skips: 3
+               Buffers: shared hit=62
          Buffers: shared hit=166
- Planning Time: 0.106 ms
- Execution Time: 1.907 ms
+ Planning Time: 0.297 ms
+ Execution Time: 2.540 ms
 ```
 
 The customer's ~1,500 recent orders are live; the outer side skips past them
@@ -582,6 +605,7 @@ replaces the file instead of rewriting it.
 | `leapfrog.force` | `off` | `USERSET` | The node is preferred over every other plan whenever a suitable set of indexes exists (the counterpart of MySQL's `INDEX_MERGE` hint); among several sets the cheapest still wins. The plan-time check of the group estimate against `work_mem` is skipped as well. **Diagnostic setting**: it can make a query many times slower. |
 | `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search. |
 | `leapfrog.min_indexes` | `2` | `USERSET` | Developer setting: smaller sets are not offered and the set that reaches the size is offered whatever its cost, so that a larger set can be run against the stock plans (the tests use it). Not in `postgresql.conf.sample`. |
+| `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
 | `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by `tests/performance/skip_bench.sh`; not in `postgresql.conf.sample`. |
 | `leapfrog.trace_planner` | `off` | `USERSET` | Developer setting: a `NOTICE` with what planning did (candidates, sets costed, range scans, statistics reads, fallbacks, correlations, candidates pruned); the tests check the planner by these counts. |
 
@@ -596,13 +620,13 @@ nodes.
 
 ## Reading EXPLAIN
 
+Every index of the node is a block of its own, in the manner of a child
+node: its role, index, conditions, and under `ANALYZE` its time, entries and
+buffers.
+
 ```text
-Custom Scan (Index Merge Intersect) on orders
+Custom Scan (Index Merge Intersect) on orders (actual time=0.100..2.485 rows=100.00 loops=1)
   Filter: (payload <> 'x'::text)
-  Outer Index: idx_orders_customer_id
-  Inner Index: idx_orders_deleted_id
-  Outer Entries Read: 585
-  Inner Entries Read: 20131
   Matched TIDs: 100
   Heap Fetches: 100
   Peak Group Memory: 96 B
@@ -610,22 +634,36 @@ Custom Scan (Index Merge Intersect) on orders
   Short Skips: 3
   Group Overflows: 0        -- shown only when non-zero
   Rows Checked by Predicate: 0
+  ->  Outer Stream on idx_orders_customer_id (actual time=0.021..0.060 rows=585.00 loops=1)
+        Index Cond: (customer_id = 100)
+        Skips: 1
+        Short Skips: 0
+        Buffers: shared hit=8
+  ->  Inner Stream on idx_orders_deleted_id (actual time=0.018..1.166 rows=20131.00 loops=1)
+        Index Pred: (deleted_at IS NOT NULL)
+        Skips: 3
+        Short Skips: 3
+        Buffers: shared hit=62
+  Buffers: shared hit=166
 ```
 
 | Field | Meaning |
 |---|---|
-| `Outer Index` / `Inner Index` | the chosen indexes; separate properties in `FORMAT JSON/YAML/XML`. With more than two, the further inner streams are `Inner Index 2`, `Inner Index 3`, …, and their counters below carry the same suffix (`Inner Entries Read 2`). |
+| `Outer Stream` / `Inner Stream` | one block per index. The outer stream's matched entries are fetched from the heap; the inner ones are looked up. In `FORMAT JSON/YAML/XML` the blocks are the array `Index Streams`, each with `Role` and `Index Name`. |
+| `Index Cond` | the equalities the stream scans with, as an Index Scan shows them. |
+| `Index Pred` | the predicate of a partial index. |
 | `Filter` | conditions the node checks on the row. The equalities of every stream and conditions implied by an inner predicate are not in `Filter` (like `Index Cond` of an Index Scan); the exception is the target relation of `UPDATE/DELETE/SELECT FOR UPDATE`, where predicate-implied conditions are kept for EvalPlanQual. |
-| `Outer Entries Read` / `Inner Entries Read` | entries read from each index, including dead entries with a NULL sort value that are skipped. |
-| `Outer Entries Estimated` / `Inner Entries Estimated` | with `VERBOSE` (and costs on): the entries the cost model expected each stream to read, to set against the counters above. `tests/performance/cost_bench.sh` records both and their ratio per query. |
+| `actual time`, `rows` of a stream | time of the stream's descents and of the reads that step to another leaf page, where the page reads happen (the entries within a page are not clocked, which keeps `TIMING` cheap), until the first entry and in total; and the entries read, per loop as a node's rows; `Entries Read` in the structured formats, total over all loops. Dead entries with a NULL sort value that are skipped count. The heap fetches are in the node's time, not in a stream's. |
+| `Buffers` of a stream | pages touched by the stream's index calls, shared and local; the node's own `Buffers` line, printed after the blocks, has everything including the heap. |
+| `Prefetches` of a stream | leaf pages asked for ahead of time (`leapfrog.prefetch`), when any. |
+| `Entries Estimated` | with `VERBOSE` (and costs on): the entries the cost model expected the stream to read, to set against its rows. `tests/performance/cost_bench.sh` records both and their ratio per query. |
+| `Skips` / `Short Skips` of a stream | re-descents of this scan to the frontmost value, and those that landed on the leaf page they left or the next one, which doubles the stream's threshold (see Skip-ahead). The node's lines are the totals. |
+| `Group Overflows` of a stream | how many times a value's group in this inner stream exceeded its share of `work_mem`. |
 | `Matched TIDs` | entries found by TID in every stream. |
 | `Heap Fetches` | `index_fetch_heap` calls (including HOT chain continuations). |
 | `Rows Removed by Filter` | the standard counter of rows dropped by `Filter`. |
 | `Peak Group Memory` | largest total capacity of the TID group arrays, bytes. |
-| `Skips` | re-descents of a lagging scan to the frontmost value. |
-| `Short Skips` | skips that landed on the leaf page they left or the next one; each doubles that stream's threshold (see Skip-ahead). |
-| `Group Overflows` | how many times a value's group exceeded its share of `work_mem` and the node fell back to checking that stream's conditions on the row. |
-| `Rows Checked by Predicate` | outer rows of overflowed groups fetched and checked that way. |
+| `Rows Checked by Predicate` | outer rows of overflowed groups fetched and checked that way, when a group overflowed. |
 
 Counters are summed over all rescans of the node (inside a Nested Loop they
 are the total over iterations; `loops` shows their number). Without

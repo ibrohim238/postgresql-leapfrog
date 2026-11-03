@@ -1062,6 +1062,29 @@ heap, 20,012 random fetches, where the ordered load got three streams and 11 fet
 with the pages cached that is 0.4 s, cold 3.5–4 s, against stock's `BitmapAnd` at
 1.5 s: not a win here, and the cause (the third stream's cost) is to be looked into.
 
+### The random-order data set with the leaf page prefetch (`9e8b7cd`)
+
+The same load through `list_bench.sh` (`SIZE=100000000 WORK_MEM=512MB`, rows in random
+order) on the code with `leapfrog.prefetch` and the stream blocks of `EXPLAIN`, one
+run of the three queries, 3 measured runs in ABBA order, ms, cold run in brackets:
+
+| Query | exact | node | auto | stock | indexscan | bitmap |
+|---|---:|---:|---:|---:|---:|---:|
+| customer 4 (1M rows) | 0.14 | 121 (58–123) | 122 (152) | Index Scan 1,762 (4,755) | 1,822 (7,415) | 1,497 |
+| customer 5 (5M rows) | 0.14 | 228 (104–228) | 160 (559) | Index Scan 117,411 | 112,480 | 2,715 |
+| customer 4 and product 120 | 0.07 | 1,983 (831–2,001) | 843 (2,021) | `BitmapAnd` 1,267 | 112,025 | 2,187 |
+
+Against the run above without the prefetch: the planner's node for customer 5 went
+from 880 ms to 160 (the cold run from 886 to 559), its 6,292 pages read from outside
+`shared_buffers` in both. For the third query the planner took three streams this
+time, 7,702,855 entries and 11 heap fetches, where the earlier load got two streams
+and 20,012 fetches: the estimate of the third stream sits close to the line, and the
+statistics of a new load fell on the other side. With three streams the node beats
+stock's `BitmapAnd` here, 843 against 1,267 ms. The stream blocks of the text plans
+(`explain-*.txt`) show where the time goes: for customer 5, 269 ms in the customer's
+index (995,834 entries, 3,815 pages read) and 90 ms in the live-rows index (934,626
+entries, 2,554 pages) of a 619 ms cold run.
+
 ### Two filters, 100 matches spread one per million ids
 
 Customers with 10k, 100k and 1M rows, products with 1M and 10M rows (`h1 =
@@ -1133,6 +1156,35 @@ heap filter 14.8 s (1,620,154 buffers), Index Scan 167.5 s (1,701,786 buffers). 
 node iterates 100 million entries at about 0.6 µs each: where neither stream is
 sparse it reads everything, like `BitmapAnd`, and is slower per entry. Not a case
 anyone writes an index for; it bounds the node's per-entry cost.
+
+## Leaf page prefetch (against `a598e73`)
+
+20M rows in `id` order, customer 5 with 5 % of the rows and one live row per 40,000
+`id`s, 5 % of all rows live; indexes `(customer_id, id)` and `(id) WHERE deleted_at IS
+NULL`; `customer_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100`, the node
+forced: 197,987 outer and 188,536 inner entries, 762 and 519 index pages. One laptop,
+`shared_buffers` 2GB. Cold means a server restart and the OS page cache of the table
+and index files dropped (`dd iflag=nocache`) before every run; `leapfrog.prefetch` on
+and off in ABBA order, `EXPLAIN (ANALYZE, TIMING OFF)`, ms:
+
+| Round | Prefetch on | Prefetch off |
+|---:|---:|---:|
+| 1 | 199 | 397 |
+| 2 | 186 | 390 |
+| 3 | 177 | 334 |
+| 4 | 108 | 224 |
+| 5 | 106 | 208 |
+
+Warm, on or off: 21–27 ms. The rounds get faster as the kernel keeps more of the
+files despite the drop; the ratio holds at about 2×. The prefetch asks for the leaf
+page after the one just reached (`PrefetchBuffer`, the sibling link of the leaf), so
+one page is in flight per stream while its entries are merged.
+
+The per-stream clock of `EXPLAIN ANALYZE` was measured on the same query: clocking
+every entry doubled the time under `TIMING` (92 ms against 48); clocking only the
+descents and the reads that step to another leaf page costs nothing measurable (49.8
+against 48.0 ms) and reports 12.5 and 11.2 ms for the two streams, the rest being
+the merge itself.
 
 ## Not done
 

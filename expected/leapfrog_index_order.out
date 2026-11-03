@@ -38,10 +38,13 @@ SELECT * FROM lf_plan($$ SELECT id FROM lf_ord WHERE a = 3 AND b = 2 AND c = 1 O
 -----------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_ord
-         Outer Index: lf_ord_c
-         Inner Index: lf_ord_b
-         Inner Index 2: lf_ord_a
-(5 rows)
+         ->  Outer Stream on lf_ord_c
+               Index Cond: (c = 1)
+         ->  Inner Stream on lf_ord_b
+               Index Cond: (b = 2)
+         ->  Inner Stream on lf_ord_a
+               Index Cond: (a = 3)
+(8 rows)
 
 RESET leapfrog.min_indexes;
 -- Mixed directions, in both query directions, with duplicates and LIMIT.

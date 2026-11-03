@@ -86,10 +86,10 @@ BEGIN
 		   FROM unnest(times) t)::numeric(10, 3);
 	buffers := (plan -> 0 -> 'Plan' ->> 'Shared Hit Blocks')::bigint +
 		(plan -> 0 -> 'Plan' ->> 'Shared Read Blocks')::bigint;
-	outer_est := (custom ->> 'Outer Entries Estimated')::numeric;
-	inner_est := (custom ->> 'Inner Entries Estimated')::numeric;
-	outer_read := (custom ->> 'Outer Entries Read')::bigint;
-	inner_read := (custom ->> 'Inner Entries Read')::bigint;
+	outer_est := (custom -> 'Index Streams' -> 0 ->> 'Entries Estimated')::numeric;
+	inner_est := (custom -> 'Index Streams' -> 1 ->> 'Entries Estimated')::numeric;
+	outer_read := (custom -> 'Index Streams' -> 0 ->> 'Entries Read')::bigint;
+	inner_read := (custom -> 'Index Streams' -> 1 ->> 'Entries Read')::bigint;
 	skips := coalesce((custom ->> 'Skips')::bigint, 0);
 	rows := (plan -> 0 -> 'Plan' ->> 'Actual Rows')::numeric::bigint;
 	RETURN NEXT;

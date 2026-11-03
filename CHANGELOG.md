@@ -5,8 +5,26 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `leapfrog.prefetch` (default on): every stream asks for its next leaf page as
+  soon as it reaches one, so that the read overlaps the entries of the current
+  page, not when nbtree already knows the scan ends there. Cold, the node took
+  half the time on two dense streams at 20M rows, and at 100M rows in random
+  order the list query for a customer with 5M rows went from 880 to 160 ms
+  (BENCHMARKS.md, "Leaf page prefetch"); warm, no change. `EXPLAIN ANALYZE`
+  counts them per stream as `Prefetches`; test in `leapfrog_explain`.
+
 ### Changed
 
+- `EXPLAIN` shows every index of the node as a block of its own, like a child
+  node: `Outer Stream on` / `Inner Stream on` with the index, the equalities as
+  `Index Cond`, a partial index's predicate as `Index Pred`, and under `ANALYZE`
+  the time of its descents and leaf page steps, the entries read as its rows,
+  its skips and its buffers. The structured formats carry the array
+  `Index Streams`. The flat `Outer Index` / `Inner Index` / `Outer Entries Read`
+  properties are gone; `Skips`, `Short Skips` and `Group Overflows` on the node
+  are now the totals of the streams' own. Test `leapfrog_explain`.
 - README: `leapfrog.enabled = off` does not change plans already cached, and
   `DISCARD PLANS` does; every stream holds its own buffer pin.
 - BENCHMARKS.md: the list query `customer_id = $1 AND deleted_at IS NULL` at 100M rows

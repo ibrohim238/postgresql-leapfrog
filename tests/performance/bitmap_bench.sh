@@ -190,7 +190,7 @@ $PSQL <<-'SQL'
 		(plan -> 'Plan' ->> 'Shared Hit Blocks')::bigint
 			+ (plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers,
 		(plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers_read,
-		coalesce((SELECT sum(value::bigint) FROM jsonb_each_text(n) WHERE key LIKE '%Entries Read%'),
+		coalesce((SELECT sum((s ->> 'Entries Read')::bigint) FROM jsonb_array_elements(n -> 'Index Streams') s),
 				 (SELECT sum((m ->> 'Actual Rows')::numeric)::bigint
 				  FROM jsonb_path_query(plan, 'strict $.Plan.**') m
 				  WHERE m ->> 'Node Type' = 'Bitmap Index Scan')) AS index_entries,

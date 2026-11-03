@@ -34,9 +34,11 @@ NOTICE:  leapfrog planner: 3 candidates, 1 sets, 2 range scans, 1 statistics rea
 ----------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_pl
-         Outer Index: lf_pl_f2
-         Inner Index: lf_pl_f1
-(4 rows)
+         ->  Outer Stream on lf_pl_f2
+               Index Cond: (f2 = 2)
+         ->  Inner Stream on lf_pl_f1
+               Index Cond: (f1 = 1)
+(6 rows)
 
 -- Six equalities: the third stream makes the set dearer, and what is left to
 -- fetch cannot pay for a fourth: no set, no range probe for it.
@@ -48,9 +50,11 @@ NOTICE:  leapfrog planner: 7 candidates, 2 sets, 3 range scans, 1 statistics rea
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_pl
          Filter: ((f2 = 2) AND (f3 = 3) AND (f4 = 4) AND (f6 = 6))
-         Outer Index: lf_pl_f5
-         Inner Index: lf_pl_f1
-(5 rows)
+         ->  Outer Stream on lf_pl_f5
+               Index Cond: (f5 = 5)
+         ->  Inner Stream on lf_pl_f1
+               Index Cond: (f1 = 1)
+(7 rows)
 
 -- leapfrog.min_indexes wants the larger set: it is costed all the same.
 SET leapfrog.min_indexes = 4;
@@ -107,9 +111,11 @@ NOTICE:  leapfrog planner: 2 candidates, 1 sets, 2 range scans, 1 statistics rea
 ----------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_pl
-         Outer Index: lf_pl_f2_val
-         Inner Index: lf_pl_f1_val
-(4 rows)
+         ->  Outer Stream on lf_pl_f2_val
+               Index Cond: (f2 = 2)
+         ->  Inner Stream on lf_pl_f1_val
+               Index Cond: (f1 = 1)
+(6 rows)
 
 RESET leapfrog.force;
 RESET leapfrog.trace_planner;

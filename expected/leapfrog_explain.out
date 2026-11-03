@@ -25,9 +25,11 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
 ---------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_explain
-         Outer Index: lf_explain_owner_id
-         Inner Index: lf_explain_live_id
-(4 rows)
+         ->  Outer Stream on lf_explain_owner_id
+               Index Cond: (owner_id = 1)
+         ->  Inner Stream on lf_explain_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
 
 EXPLAIN (COSTS OFF, VERBOSE)
 SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
@@ -37,10 +39,92 @@ SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id 
    Output: id
    ->  Custom Scan (Index Merge Intersect) on public.lf_explain
          Output: id
-         Outer Index: lf_explain_owner_id
-         Inner Index: lf_explain_live_id
-(6 rows)
+         ->  Outer Stream on lf_explain_owner_id
+               Index Cond: (lf_explain.owner_id = 1)
+         ->  Inner Stream on lf_explain_live_id
+               Index Pred: (lf_explain.deleted_at IS NULL)
+(8 rows)
 
+-- Every stream is a block of its own, in the manner of a child node: its
+-- index, the equalities as an Index Cond, the predicate of a partial index,
+-- the entries read as its rows, and its counters.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Limit (actual rows=10.00 loops=1)
+   ->  Custom Scan (Index Merge Intersect) on lf_explain (actual rows=10.00 loops=1)
+         Matched TIDs: 10
+         Heap Fetches: 10
+         Peak Group Memory: 96 B
+         ->  Outer Stream on lf_explain_owner_id (actual rows=10.00 loops=1)
+               Index Cond: (owner_id = 1)
+               Prefetches: 1
+         ->  Inner Stream on lf_explain_live_id (actual rows=21.00 loops=1)
+               Index Pred: (deleted_at IS NULL)
+               Prefetches: 1
+(11 rows)
+
+-- In the structured formats the streams are an array
+CREATE FUNCTION lf_plan_streams(query text) RETURNS SETOF jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+	plan jsonb;
+BEGIN
+	PERFORM set_config('leapfrog.force', 'on', true);
+	EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF, FORMAT JSON) ' ||
+		query INTO plan;
+	RETURN QUERY
+		SELECT s FROM jsonb_path_query(plan, 'strict $[0].Plan.**') AS n,
+			jsonb_array_elements(n -> 'Index Streams') AS s
+		WHERE n ->> 'Custom Plan Provider' = 'Index Merge Intersect';
+END
+$$;
+SELECT s ->> 'Role' AS role, s ->> 'Index Name' AS index, s ->> 'Index Cond' AS cond,
+	s ->> 'Index Pred' AS pred, s ? 'Entries Read' AS counted
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$) s;
+ role  |        index        |      cond      |         pred         | counted 
+-------+---------------------+----------------+----------------------+---------
+ Outer | lf_explain_owner_id | (owner_id = 1) |                      | t
+ Inner | lf_explain_live_id  |                | (deleted_at IS NULL) | t
+(2 rows)
+
+-- leapfrog.prefetch asks for the next leaf page of every stream ahead of
+-- time, counted per stream; the result does not depend on it.
+SHOW leapfrog.prefetch;
+ leapfrog.prefetch 
+-------------------
+ on
+(1 row)
+
+SELECT s ->> 'Role' AS role, (s ->> 'Prefetches')::int > 0 AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
+ role  | prefetched 
+-------+------------
+ Outer | t
+ Inner | t
+(2 rows)
+
+SET leapfrog.prefetch = off;
+SELECT s ->> 'Role' AS role, s ? 'Prefetches' AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
+ role  | prefetched 
+-------+------------
+ Outer | f
+ Inner | f
+(2 rows)
+
+SELECT lf_check($$ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+RESET leapfrog.prefetch;
+DROP FUNCTION lf_plan_streams(text);
 -- VERBOSE with costs adds the entries the cost model expects each side to
 -- read, to set against the ANALYZE counters (numbers masked).
 CREATE FUNCTION lf_plan_verbose(query text) RETURNS SETOF text
@@ -59,8 +143,8 @@ SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id 
 WHERE lf_plan_verbose ~ 'Entries Estimated';
           lf_plan_verbose           
 ------------------------------------
-         Outer Entries Estimated: N
-         Inner Entries Estimated: N
+               Entries Estimated: N
+               Entries Estimated: N
 (2 rows)
 
 -- not without VERBOSE, not with COSTS OFF
@@ -443,14 +527,16 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
 -------------------------------------------------------------------------------------
  Limit (actual rows=10.00 loops=1)
    ->  Custom Scan (Index Merge Intersect) on lf_explain (actual rows=10.00 loops=1)
-         Outer Index: lf_explain_owner_id
-         Inner Index: lf_explain_live_id
-         Outer Entries Read: 10
-         Inner Entries Read: 21
          Matched TIDs: 10
          Heap Fetches: 10
          Peak Group Memory: 96 B
-(9 rows)
+         ->  Outer Stream on lf_explain_owner_id (actual rows=10.00 loops=1)
+               Index Cond: (owner_id = 1)
+               Prefetches: 1
+         ->  Inner Stream on lf_explain_live_id (actual rows=21.00 loops=1)
+               Index Pred: (deleted_at IS NULL)
+               Prefetches: 1
+(11 rows)
 
 -- Owner 1 has odd ids only, all of them live: LIMIT 10 reads 10 outer
 -- entries and about 20 inner ones, matches and fetches 10.
@@ -525,8 +611,18 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
            "Relation Name": "lf_explain",                  +
            "Alias": "lf_explain",                          +
            "Disabled": false,                              +
-           "Outer Index": "lf_explain_owner_id",           +
-           "Inner Index": "lf_explain_live_id"             +
+           "Index Streams": [                              +
+             {                                             +
+               "Role": "Outer",                            +
+               "Index Name": "lf_explain_owner_id",        +
+               "Index Cond": "(owner_id = 1)"              +
+             },                                            +
+             {                                             +
+               "Role": "Inner",                            +
+               "Index Name": "lf_explain_live_id",         +
+               "Index Pred": "(deleted_at IS NULL)"        +
+             }                                             +
+           ]                                               +
          }                                                 +
        ]                                                   +
      }                                                     +
@@ -552,8 +648,13 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
          Relation Name: "lf_explain"                  +
          Alias: "lf_explain"                          +
          Disabled: false                              +
-         Outer Index: "lf_explain_owner_id"           +
-         Inner Index: "lf_explain_live_id"
+         Index Streams:                               +
+           - Role: "Outer"                            +
+             Index Name: "lf_explain_owner_id"        +
+             Index Cond: "(owner_id = 1)"             +
+           - Role: "Inner"                            +
+             Index Name: "lf_explain_live_id"         +
+             Index Pred: "(deleted_at IS NULL)"
 (1 row)
 
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF, FORMAT XML)
@@ -581,13 +682,25 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
            <Actual-Rows>10.00</Actual-Rows>                                  +
            <Actual-Loops>1</Actual-Loops>                                    +
            <Disabled>false</Disabled>                                        +
-           <Outer-Index>lf_explain_owner_id</Outer-Index>                    +
-           <Inner-Index>lf_explain_live_id</Inner-Index>                     +
-           <Outer-Entries-Read>10</Outer-Entries-Read>                       +
-           <Inner-Entries-Read>21</Inner-Entries-Read>                       +
            <Matched-TIDs>10</Matched-TIDs>                                   +
            <Heap-Fetches>10</Heap-Fetches>                                   +
            <Peak-Group-Memory>96</Peak-Group-Memory>                         +
+           <Index-Streams>                                                   +
+             <Index-Stream>                                                  +
+               <Role>Outer</Role>                                            +
+               <Index-Name>lf_explain_owner_id</Index-Name>                  +
+               <Index-Cond>(owner_id = 1)</Index-Cond>                       +
+               <Entries-Read>10</Entries-Read>                               +
+               <Prefetches>1</Prefetches>                                    +
+             </Index-Stream>                                                 +
+             <Index-Stream>                                                  +
+               <Role>Inner</Role>                                            +
+               <Index-Name>lf_explain_live_id</Index-Name>                   +
+               <Index-Pred>(deleted_at IS NULL)</Index-Pred>                 +
+               <Entries-Read>21</Entries-Read>                               +
+               <Prefetches>1</Prefetches>                                    +
+             </Index-Stream>                                                 +
+           </Index-Streams>                                                  +
          </Plan>                                                             +
        </Plans>                                                              +
      </Plan>                                                                 +
@@ -620,8 +733,18 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id L
            "Relation Name": "lf_explain",                  +
            "Alias": "lf_explain",                          +
            "Disabled": false,                              +
-           "Outer Index": "lf_explain_owner_id",           +
-           "Inner Index": "lf_explain_live_id"             +
+           "Index Streams": [                              +
+             {                                             +
+               "Role": "Outer",                            +
+               "Index Name": "lf_explain_owner_id",        +
+               "Index Cond": "(owner_id = 1)"              +
+             },                                            +
+             {                                             +
+               "Role": "Inner",                            +
+               "Index Name": "lf_explain_live_id",         +
+               "Index Pred": "(deleted_at IS NULL)"        +
+             }                                             +
+           ]                                               +
          }                                                 +
        ]                                                   +
      }                                                     +
@@ -636,13 +759,13 @@ SELECT * FROM lf_explain WHERE owner_id = 9 AND deleted_at IS NULL ORDER BY id L
 ------------------------------------------------------------------------------------
  Limit (actual rows=0.00 loops=1)
    ->  Custom Scan (Index Merge Intersect) on lf_explain (actual rows=0.00 loops=1)
-         Outer Index: lf_explain_owner_id
-         Inner Index: lf_explain_live_id
-         Outer Entries Read: 0
-         Inner Entries Read: 0
          Matched TIDs: 0
          Heap Fetches: 0
          Peak Group Memory: 96 B
+         ->  Outer Stream on lf_explain_owner_id (actual rows=0.00 loops=1)
+               Index Cond: (owner_id = 9)
+         ->  Inner Stream on lf_explain_live_id (actual rows=0.00 loops=1)
+               Index Pred: (deleted_at IS NULL)
 (9 rows)
 
 RESET leapfrog.force;

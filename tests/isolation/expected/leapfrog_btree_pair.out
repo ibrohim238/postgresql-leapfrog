@@ -11,9 +11,11 @@ QUERY PLAN
 Limit                                                         
   ->  LockRows                                                
         ->  Custom Scan (Index Merge Intersect) on lf_iso_pair
-              Outer Index: lf_iso_pair_product_id             
-              Inner Index: lf_iso_pair_customer_id            
-(5 rows)
+              ->  Outer Stream on lf_iso_pair_product_id      
+                    Index Cond: (product_id = 1)              
+              ->  Inner Stream on lf_iso_pair_customer_id     
+                    Index Cond: (customer_id = 2)             
+(7 rows)
 
 
 starting permutation: s1_begin s1_move_product s2_lock s1_commit

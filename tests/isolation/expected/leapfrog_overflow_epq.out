@@ -9,16 +9,19 @@ QUERY PLAN
 -------------------------------------------------------------------------------------
 LockRows (actual rows=15000.00 loops=1)                                              
   ->  Custom Scan (Index Merge Intersect) on lf_iso_oe (actual rows=15000.00 loops=1)
-        Outer Index: lf_iso_oe_customer_grp                                          
-        Inner Index: lf_iso_oe_product_grp                                           
-        Outer Entries Read: 20000                                                    
-        Inner Entries Read: 15000                                                    
         Matched TIDs: 0                                                              
         Heap Fetches: 20000                                                          
         Peak Group Memory: 65532 B                                                   
         Group Overflows: 1                                                           
         Rows Checked by Predicate: 20000                                             
-(11 rows)
+        ->  Outer Stream on lf_iso_oe_customer_grp (actual rows=20000.00 loops=1)    
+              Index Cond: (customer_id = 1)                                          
+              Prefetches: 17                                                         
+        ->  Inner Stream on lf_iso_oe_product_grp (actual rows=15000.00 loops=1)     
+              Index Cond: (product_id = 2)                                           
+              Group Overflows: 1                                                     
+              Prefetches: 12                                                         
+(14 rows)
 
 
 starting permutation: s1_begin s1_move_product s2_lock s1_commit

@@ -6,14 +6,16 @@ step s2_plan:
 	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 
-QUERY PLAN                                                     
----------------------------------------------------------------
-Limit                                                          
-  ->  LockRows                                                 
-        ->  Custom Scan (Index Merge Intersect) on lf_iso_types
-              Outer Index: lf_iso_types_status_id              
-              Inner Index: lf_iso_types_owner_id               
-(5 rows)
+QUERY PLAN                                                                               
+-----------------------------------------------------------------------------------------
+Limit                                                                                    
+  ->  LockRows                                                                           
+        ->  Custom Scan (Index Merge Intersect) on lf_iso_types                          
+              ->  Outer Stream on lf_iso_types_status_id                                 
+                    Index Cond: (status = 'error'::text)                                 
+              ->  Inner Stream on lf_iso_types_owner_id                                  
+                    Index Cond: (owner_id = '00000000-0000-0000-0000-000000000007'::uuid)
+(7 rows)
 
 
 starting permutation: s1_begin s1_move_status s2_lock s1_commit

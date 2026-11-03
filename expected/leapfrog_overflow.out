@@ -44,9 +44,11 @@ SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY gro
                       lf_plan                       
 ----------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_overflow
-   Outer Index: lf_overflow_owner_group
-   Inner Index: lf_overflow_live_group
-(3 rows)
+   ->  Outer Stream on lf_overflow_owner_group
+         Index Cond: (owner_id = 1)
+   ->  Inner Stream on lf_overflow_live_group
+         Index Pred: (deleted_at IS NULL)
+(5 rows)
 
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_overflow WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY group_id $$);
@@ -220,9 +222,11 @@ SELECT * FROM lf_overflow_unique WHERE owner_id = 7 AND flag ORDER BY id;
                         QUERY PLAN                         
 -----------------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_overflow_unique
-   Outer Index: lf_overflow_unique_owner_id
-   Inner Index: lf_overflow_unique_flag_id
-(3 rows)
+   ->  Outer Stream on lf_overflow_unique_owner_id
+         Index Cond: (owner_id = 7)
+   ->  Inner Stream on lf_overflow_unique_flag_id
+         Index Pred: flag
+(5 rows)
 
 RESET enable_seqscan;
 RESET enable_indexscan;

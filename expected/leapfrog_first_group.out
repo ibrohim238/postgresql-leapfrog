@@ -26,7 +26,7 @@ DECLARE
 	n integer := 0;
 BEGIN
 	FOR line IN EXECUTE 'EXPLAIN ' || query LOOP
-		IF line ~ '(Outer Index|Inner Index( [0-9]+)?):' THEN
+		IF line ~ '->  (Outer|Inner) Stream on ' THEN
 			n := n + 1;
 		END IF;
 	END LOOP;

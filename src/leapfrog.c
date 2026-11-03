@@ -75,6 +75,7 @@ bool		intersect_enabled = true;
 bool		intersect_force = false;
 int			intersect_skip_after = INTERSECT_SKIP_AFTER;
 bool		intersect_trace_planner = false;
+bool		intersect_prefetch = true;
 PlannerTrace lf_trace;
 int			intersect_max_streams = 4;
 int			intersect_min_streams = 2;
@@ -93,6 +94,17 @@ _PG_init(void)
 							 "Enables the planner's use of Index Merge Intersect.",
 							 NULL,
 							 &intersect_enabled,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("leapfrog.prefetch",
+							 "Prefetches the next leaf page of every index stream.",
+							 NULL,
+							 &intersect_prefetch,
 							 true,
 							 PGC_USERSET,
 							 0,

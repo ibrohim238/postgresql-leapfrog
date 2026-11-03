@@ -133,7 +133,7 @@ $PSQL <<-SQL
 		(plan ->> 'Execution Time')::float8 AS execution_ms,
 		(plan -> 'Plan' ->> 'Shared Hit Blocks')::bigint AS shared_hit,
 		(plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS shared_read,
-		(SELECT sum(value::bigint) FROM jsonb_each_text(n) WHERE key LIKE '%Entries Read%') AS entries_read,
+		(SELECT sum((s ->> 'Entries Read')::bigint) FROM jsonb_array_elements(n -> 'Index Streams') s) AS entries_read,
 		(n ->> 'Heap Fetches')::bigint AS heap_fetches,
 		(n ->> 'Peak Group Memory')::bigint AS peak_group_bytes,
 		(plan -> 'Planning' ->> 'Memory Used')::float8 AS planning_memory_kb,

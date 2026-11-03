@@ -39,9 +39,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_by_owner(3);
 -------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_param
-         Outer Index: lf_param_owner_id
-         Inner Index: lf_param_live_id
-(4 rows)
+         ->  Outer Stream on lf_param_owner_id
+               Index Cond: (owner_id = $1)
+         ->  Inner Stream on lf_param_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
 
 EXECUTE lf_by_owner(3);
   id   | owner_id 
@@ -95,9 +97,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_by_owner_int4(3);
 -------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_param
-         Outer Index: lf_param_owner_id
-         Inner Index: lf_param_live_id
-(4 rows)
+         ->  Outer Stream on lf_param_owner_id
+               Index Cond: (owner_id = $1)
+         ->  Inner Stream on lf_param_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
 
 EXECUTE lf_by_owner_int4(3);
  id | owner_id 
@@ -119,15 +123,17 @@ FROM (VALUES (1::bigint), (5), (12345), (7)) v (owner_id),
 	LATERAL (SELECT id FROM lf_param
 			 WHERE owner_id = v.owner_id AND deleted_at IS NULL
 			 ORDER BY id DESC LIMIT 3) s;
-                         QUERY PLAN                          
--------------------------------------------------------------
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
  Nested Loop
    ->  Values Scan on "*VALUES*"
    ->  Limit
          ->  Custom Scan (Index Merge Intersect) on lf_param
-               Outer Index: lf_param_owner_id
-               Inner Index: lf_param_live_id
-(6 rows)
+               ->  Outer Stream on lf_param_owner_id
+                     Index Cond: (lf_param.owner_id = "*VALUES*".column1)
+               ->  Inner Stream on lf_param_live_id
+                     Index Pred: (lf_param.deleted_at IS NULL)
+(8 rows)
 
 SELECT v.owner_id, s.id
 FROM (VALUES (1::bigint), (5), (12345), (7)) v (owner_id),
@@ -190,17 +196,19 @@ FROM (VALUES (2::bigint), (3)) o (owner_id),
 	LATERAL (SELECT id FROM lf_param
 			 WHERE owner_id = o.owner_id AND kind_id = k.kind_id AND deleted_at IS NULL
 			 ORDER BY id DESC LIMIT 2) s;
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    ->  Values Scan on "*VALUES*_1"
    ->  Nested Loop
          ->  Values Scan on "*VALUES*"
          ->  Limit
                ->  Custom Scan (Index Merge Intersect) on lf_param
-                     Outer Index: lf_param_owner_kind_id
-                     Inner Index: lf_param_live_id
-(8 rows)
+                     ->  Outer Stream on lf_param_owner_kind_id
+                           Index Cond: ((lf_param.owner_id = "*VALUES*".column1) AND (lf_param.kind_id = "*VALUES*_1".column1))
+                     ->  Inner Stream on lf_param_live_id
+                           Index Pred: (lf_param.deleted_at IS NULL)
+(10 rows)
 
 SELECT lf_check($$
 SELECT o.owner_id, k.kind_id, s.id
@@ -246,16 +254,18 @@ FROM lf_owners o
 				  WHERE owner_id = o.owner_id AND deleted_at IS NULL
 				  ORDER BY id DESC LIMIT 2) s ON true
 WHERE o.owner_id IN (2, 3);
-                         QUERY PLAN                          
--------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Nested Loop
    ->  Seq Scan on lf_owners o
          Filter: (owner_id = ANY ('{2,3}'::bigint[]))
    ->  Limit
          ->  Custom Scan (Index Merge Intersect) on lf_param
-               Outer Index: lf_param_owner_id
-               Inner Index: lf_param_live_id
-(7 rows)
+               ->  Outer Stream on lf_param_owner_id
+                     Index Cond: (lf_param.owner_id = o.owner_id)
+               ->  Inner Stream on lf_param_live_id
+                     Index Pred: (lf_param.deleted_at IS NULL)
+(9 rows)
 
 SELECT lf_check($$
 SELECT o.name, s.id
@@ -281,12 +291,14 @@ ORDER BY s.id DESC LIMIT 10;
  Limit
    ->  Nested Loop
          ->  Custom Scan (Index Merge Intersect) on lf_param s
-               Outer Index: lf_param_owner_id
-               Inner Index: lf_param_live_id
+               ->  Outer Stream on lf_param_owner_id
+                     Index Cond: (s.owner_id = 3)
+               ->  Inner Stream on lf_param_live_id
+                     Index Pred: (s.deleted_at IS NULL)
          ->  Materialize
                ->  Seq Scan on lf_owners o
                      Filter: (owner_id = 3)
-(8 rows)
+(10 rows)
 
 SELECT lf_check($$
 SELECT o.name, s.id
@@ -316,9 +328,11 @@ ORDER BY s.id;
          ->  Seq Scan on lf_owners o
                Filter: (name = ANY ('{"owner 2","owner 3"}'::text[]))
          ->  Custom Scan (Index Merge Intersect) on lf_param s
-               Outer Index: lf_param_owner_id
-               Inner Index: lf_param_live_id
-(8 rows)
+               ->  Outer Stream on lf_param_owner_id
+                     Index Cond: (s.owner_id = o.owner_id)
+               ->  Inner Stream on lf_param_live_id
+                     Index Pred: (s.deleted_at IS NULL)
+(10 rows)
 
 SELECT lf_check($$
 SELECT o.name, s.id
@@ -392,11 +406,13 @@ ORDER BY s.id LIMIT 5 $$);
  Limit
    ->  Nested Loop
          ->  Custom Scan (Index Merge Intersect) on lf_param s
-               Outer Index: lf_param_owner_id
-               Inner Index: lf_param_live_id
+               ->  Outer Stream on lf_param_owner_id
+                     Index Cond: (s.owner_id = 3)
+               ->  Inner Stream on lf_param_live_id
+                     Index Pred: (s.deleted_at IS NULL)
          ->  Materialize
                ->  Seq Scan on lf_owners o
-(7 rows)
+(9 rows)
 
 -- Rescan with the same parameter twice in a row (duplicate outer values)
 SELECT lf_check($$
@@ -434,9 +450,11 @@ ORDER BY id LIMIT 5 $$);
              ->  Limit
                    ->  Index Only Scan using lf_owners_pkey on lf_owners
    ->  Custom Scan (Index Merge Intersect) on lf_param
-         Outer Index: lf_param_owner_id
-         Inner Index: lf_param_live_id
-(10 rows)
+         ->  Outer Stream on lf_param_owner_id
+               Index Cond: (lf_param.owner_id = (InitPlan expr_1).col1)
+         ->  Inner Stream on lf_param_live_id
+               Index Pred: (lf_param.deleted_at IS NULL)
+(12 rows)
 
 -- A correlated subquery in the target list runs the node once per row.
 SELECT lf_check($$
@@ -463,9 +481,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_cached(3);
 -------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_param
-         Outer Index: lf_param_owner_id
-         Inner Index: lf_param_live_id
-(4 rows)
+         ->  Outer Stream on lf_param_owner_id
+               Index Cond: (owner_id = $1)
+         ->  Inner Stream on lf_param_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
 
 EXECUTE lf_cached(3);
   id   
@@ -499,9 +519,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_cached(3);
 -------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_param
-         Outer Index: lf_param_owner_id
-         Inner Index: lf_param_live_id
-(4 rows)
+         ->  Outer Stream on lf_param_owner_id
+               Index Cond: (owner_id = $1)
+         ->  Inner Stream on lf_param_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
 
 DEALLOCATE lf_cached;
 RESET plan_cache_mode;

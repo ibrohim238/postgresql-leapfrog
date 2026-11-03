@@ -20,11 +20,14 @@
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "rewrite/rewriteManip.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
 
 #include "leapfrog.h"
 
@@ -77,6 +80,13 @@ typedef struct IndexStream
 	/* instrumentation, summed over all rescans */
 	int64		read;
 	int64		group_overflows;
+	int64		skips;			/* re-descents of this scan */
+	int64		short_skips;	/* skips that landed on the next leaf page */
+	bool		started;		/* has read its first entry of this loop */
+	StreamInstr instr;			/* descents and page steps, under ANALYZE */
+	instr_time	startup;		/* of that time, until the first entry of each
+								 * loop, summed */
+	instr_time	loop_base;		/* instr.time when the loop started */
 	double		estimate;		/* entries the cost model expected */
 } IndexStream;
 
@@ -119,9 +129,38 @@ typedef struct IntersectScanState
 	int64		pred_checked;	/* overflow entries checked by predicate */
 	int64		heap_fetches;
 	int			peak_capacity;	/* largest total of the group arrays */
-	int64		skips;			/* re-descents of a lagging scan */
-	int64		short_skips;	/* skips that landed on the next leaf page */
 } IntersectScanState;
+
+
+/*
+ * The node's instrumentation under EXPLAIN ANALYZE: PostgreSQL 19 wraps
+ * Instrumentation in a NodeInstrumentation with the loop count.
+ */
+static inline bool
+node_need_timer(PlanState *ps)
+{
+#if PG_VERSION_NUM >= 190000
+	return ps->instrument != NULL && ps->instrument->instr.need_timer;
+#else
+	return ps->instrument != NULL && ps->instrument->need_timer;
+#endif
+}
+
+static inline bool
+node_need_bufusage(PlanState *ps)
+{
+#if PG_VERSION_NUM >= 190000
+	return ps->instrument != NULL && ps->instrument->instr.need_bufusage;
+#else
+	return ps->instrument != NULL && ps->instrument->need_bufusage;
+#endif
+}
+
+static inline double
+node_nloops(PlanState *ps)
+{
+	return ps->instrument != NULL ? ps->instrument->nloops : 0;
+}
 
 static Node *intersect_create_scan_state(CustomScan *cscan);
 static void intersect_begin(CustomScanState *node, EState *estate,
@@ -456,9 +495,11 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
 		   bool bound_isnull)
 {
 	MemoryContext oldcxt;
+	StreamClock clock;
 
 	SkipAhead  *skip = &stream->skip;
 
+	lf_instr_start(&stream->instr, &clock);
 	skip->landing = lf_scan_leaf_position(stream->scan,
 										  ScanDirectionIsBackward(stream->dir),
 										  &skip->from_page, &skip->from_next);
@@ -479,8 +520,9 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
 		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_VALUE, bound);
 		stream->bounded = state->nulls_ahead;
 	}
+	lf_instr_stop(&stream->instr, &clock);
 	skip->behind = 0;
-	state->skips++;
+	stream->skips++;
 }
 
 /*
@@ -504,7 +546,7 @@ check_landing(IntersectScanState *state, IndexStream *stream)
 								 &next_page);
 	if (page == skip->from_page || page == skip->from_next)
 	{
-		state->short_skips++;
+		stream->short_skips++;
 		skip->threshold = Min(skip->threshold * 2,
 							  (int64) intersect_skip_after * 64);
 	}
@@ -526,9 +568,17 @@ intersect_start(IntersectScanState *state)
 	for (int i = 0; i < state->nstreams; i++)
 	{
 		IndexStream *stream = &state->streams[i];
+		StreamClock clock;
 
+		/* allocated after BeginCustomScan: read here, before the first use */
+		stream->instr.timer = node_need_timer(&state->css.ss.ps);
+		stream->instr.bufusage = node_need_bufusage(&state->css.ss.ps);
+		stream->loop_base = stream->instr.time;
+		stream->started = false;
+		lf_instr_start(&stream->instr, &clock);
 		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
 							(Datum) 0);
+		lf_instr_stop(&stream->instr, &clock);
 		stream->bounded = false;
 		init_skip(&stream->skip);
 	}
@@ -595,10 +645,19 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream)
 {
 	for (;;)
 	{
+		StreamClock clock;
+
 		if (lf_read_index_entry(stream->scan, stream->dir, stream->sort_attno,
 								state->sort_notnull, &stream->value,
-								&stream->isnull, &stream->tid, &stream->read))
+								&stream->isnull, &stream->tid, &stream->read,
+								&stream->instr))
 		{
+			if (!stream->started)
+			{
+				stream->started = true;
+				INSTR_TIME_ACCUM_DIFF(stream->startup, stream->instr.time,
+									  stream->loop_base);
+			}
 			stream->have = true;
 			check_landing(state, stream);
 			return;
@@ -606,8 +665,10 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream)
 		if (!stream->bounded)
 			break;
 		stream->bounded = false;
+		lf_instr_start(&stream->instr, &clock);
 		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NULL,
 							(Datum) 0);
+		lf_instr_stop(&stream->instr, &clock);
 	}
 	stream->eof = true;
 }
@@ -892,9 +953,12 @@ intersect_next(ScanState *ss)
 		for (int i = 0; i < state->nstreams; i++)
 		{
 			IndexStream *stream = &state->streams[i];
+			StreamClock clock;
 
+			lf_instr_start(&stream->instr, &clock);
 			lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
 								(Datum) 0);
+			lf_instr_stop(&stream->instr, &clock);
 		}
 	}
 	state->done = true;
@@ -977,59 +1041,165 @@ intersect_rescan(CustomScanState *node)
 }
 
 /*
- * stream_property
- *		Name of a per-stream EXPLAIN property: "Outer <name>" for the outer
- *		index, "Inner <name>" for the first inner one and "Inner <name> N"
- *		for the others, so that a two-index node prints what it always did.
+ * stream_conditions
+ *		The equalities of a stream as text, each index column against its
+ *		value expression, deparsed like an Index Cond.  NULL without any.
  */
-static const char *
-stream_property(int stream, const char *name)
+static char *
+stream_conditions(IntersectScanState *state, int i, List *context,
+				  bool useprefix)
 {
-	if (stream == 0)
-		return psprintf("Outer %s", name);
-	if (stream == 1)
-		return psprintf("Inner %s", name);
-	return psprintf("Inner %s %d", name, stream);
+	CustomScan *cscan = (CustomScan *) state->css.ss.ps.plan;
+	IndexStream *stream = &state->streams[i];
+	List	   *exprs = list_nth_node(List, cscan->custom_exprs,
+									  i * STREAM_EXPRS_COUNT + STREAM_EXPRS_KEYS);
+	TupleDesc	indexdesc = RelationGetDescr(stream->index);
+	List	   *clauses = NIL;
+	int			k = 0;
+	ListCell   *lc;
+
+	foreach(lc, exprs)
+	{
+		Form_pg_attribute attr = TupleDescAttr(indexdesc, k);
+		Var		   *column = makeVar(cscan->scan.scanrelid,
+									 stream->keys.attnos[k], attr->atttypid,
+									 attr->atttypmod, attr->attcollation, 0);
+
+		clauses = lappend(clauses,
+						  make_opclause(stream->keys.operators[k], BOOLOID,
+										false, (Expr *) column,
+										(Expr *) lfirst(lc), InvalidOid,
+										stream->keys.collations[k]));
+		k++;
+	}
+	if (clauses == NIL)
+		return NULL;
+	return deparse_expression((Node *) make_ands_explicit(clauses), context,
+							  useprefix, false);
 }
 
+/*
+ * stream_predicate
+ *		The predicate of a partial index as text, from the index itself, so
+ *		that the outer stream shows it too (the node checks it on the row,
+ *		as Filter, not in the stream).  NULL for a full index.
+ */
+static char *
+stream_predicate(IntersectScanState *state, int i, List *context,
+				 bool useprefix)
+{
+	CustomScan *cscan = (CustomScan *) state->css.ss.ps.plan;
+	List	   *pred = RelationGetIndexPredicate(state->streams[i].index);
+
+	if (pred == NIL)
+		return NULL;
+	/* a copy of the relcache's list: free to rewrite */
+	ChangeVarNodes((Node *) pred, 1, cscan->scan.scanrelid, 0);
+	return deparse_expression((Node *) make_ands_explicit(pred), context,
+							  useprefix, false);
+}
+
+/* One kind of buffers in the text form: " shared hit=N read=M", nonzero parts. */
+static void
+buffers_text(StringInfo str, const char *kind, int64 hit, int64 read,
+			 int64 dirtied, int64 written)
+{
+	appendStringInfoString(str, kind);
+	if (hit > 0)
+		appendStringInfo(str, " hit=%lld", (long long) hit);
+	if (read > 0)
+		appendStringInfo(str, " read=%lld", (long long) read);
+	if (dirtied > 0)
+		appendStringInfo(str, " dirtied=%lld", (long long) dirtied);
+	if (written > 0)
+		appendStringInfo(str, " written=%lld", (long long) written);
+}
+
+/* The buffers of a stream's index calls, in the manner of a node's. */
+static void
+stream_buffers(IndexStream *stream, ExplainState *es)
+{
+	BufferUsage *usage = &stream->instr.buffers;
+
+	bool		has_shared = usage->shared_blks_hit + usage->shared_blks_read +
+		usage->shared_blks_dirtied + usage->shared_blks_written > 0;
+	bool		has_local = usage->local_blks_hit + usage->local_blks_read +
+		usage->local_blks_dirtied + usage->local_blks_written > 0;
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		if (!has_shared && !has_local)
+			return;
+		ExplainIndentText(es);
+		appendStringInfoString(es->str, "Buffers:");
+		if (has_shared)
+			buffers_text(es->str, " shared", usage->shared_blks_hit,
+						 usage->shared_blks_read, usage->shared_blks_dirtied,
+						 usage->shared_blks_written);
+		if (has_local)
+			buffers_text(es->str, " local", usage->local_blks_hit,
+						 usage->local_blks_read, usage->local_blks_dirtied,
+						 usage->local_blks_written);
+		appendStringInfoChar(es->str, '\n');
+	}
+	else
+	{
+		ExplainPropertyInteger("Shared Hit Blocks", NULL,
+							   usage->shared_blks_hit, es);
+		ExplainPropertyInteger("Shared Read Blocks", NULL,
+							   usage->shared_blks_read, es);
+		ExplainPropertyInteger("Shared Dirtied Blocks", NULL,
+							   usage->shared_blks_dirtied, es);
+		ExplainPropertyInteger("Shared Written Blocks", NULL,
+							   usage->shared_blks_written, es);
+		ExplainPropertyInteger("Local Hit Blocks", NULL,
+							   usage->local_blks_hit, es);
+		ExplainPropertyInteger("Local Read Blocks", NULL,
+							   usage->local_blks_read, es);
+		ExplainPropertyInteger("Local Dirtied Blocks", NULL,
+							   usage->local_blks_dirtied, es);
+		ExplainPropertyInteger("Local Written Blocks", NULL,
+							   usage->local_blks_written, es);
+	}
+}
+
+/*
+ * intersect_explain
+ *		The node's counters, then one block per stream in the manner of a
+ *		child node: its index, conditions, time, entries read and buffers.
+ *		Counters are summed over all rescans like the executor's own; the
+ *		text form shows entries and times per loop, as a node's rows.
+ */
 static void
 intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	IntersectScanState *state = (IntersectScanState *) node;
+	List	   *context = set_deparse_context_plan(es->deparse_cxt,
+												   node->ss.ps.plan, ancestors);
+	bool		useprefix = es->verbose || es->rtable_size > 1;
+	double		nloops = node_nloops(&node->ss.ps);
+	int64		skips = 0;
+	int64		short_skips = 0;
 	int64		group_overflows = 0;
 
 	for (int i = 0; i < state->nstreams; i++)
-		ExplainPropertyText(stream_property(i, "Index"),
-							RelationGetRelationName(state->streams[i].index),
-							es);
-
-	/* the cost model's expectation, to set against the counters below */
-	if (es->verbose && es->costs)
 	{
-		for (int i = 0; i < state->nstreams; i++)
-			ExplainPropertyFloat(stream_property(i, "Entries Estimated"), NULL,
-								 state->streams[i].estimate, 0, es);
+		skips += state->streams[i].skips;
+		short_skips += state->streams[i].short_skips;
+		group_overflows += state->streams[i].group_overflows;
 	}
 
-	/* summed over all rescans, like the executor's own counters */
 	if (es->analyze)
 	{
-		for (int i = 0; i < state->nstreams; i++)
-		{
-			ExplainPropertyInteger(stream_property(i, "Entries Read"), NULL,
-								   state->streams[i].read, es);
-			group_overflows += state->streams[i].group_overflows;
-		}
 		ExplainPropertyInteger("Matched TIDs", NULL, state->matched, es);
 		ExplainPropertyInteger("Heap Fetches", NULL, state->heap_fetches, es);
 		ExplainPropertyInteger("Peak Group Memory", "B",
 							   (int64) state->peak_capacity *
 							   sizeof(ItemPointerData), es);
-		if (state->skips > 0)
+		if (skips > 0)
 		{
-			ExplainPropertyInteger("Skips", NULL, state->skips, es);
-			ExplainPropertyInteger("Short Skips", NULL, state->short_skips,
-								   es);
+			ExplainPropertyInteger("Skips", NULL, skips, es);
+			ExplainPropertyInteger("Short Skips", NULL, short_skips, es);
 		}
 		if (group_overflows > 0)
 		{
@@ -1039,4 +1209,87 @@ intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 								   state->pred_checked, es);
 		}
 	}
+
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+		ExplainOpenGroup("Index Streams", "Index Streams", false, es);
+	for (int i = 0; i < state->nstreams; i++)
+	{
+		IndexStream *stream = &state->streams[i];
+		const char *role = i == 0 ? "Outer" : "Inner";
+		const char *index_name = RelationGetRelationName(stream->index);
+		char	   *cond = stream_conditions(state, i, context, useprefix);
+		char	   *pred = stream_predicate(state, i, context, useprefix);
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			ExplainIndentText(es);
+			appendStringInfo(es->str, "->  %s Stream on %s", role, index_name);
+			if (es->analyze)
+			{
+				if (nloops <= 0)
+					appendStringInfoString(es->str, " (never executed)");
+				else if (es->timing)
+					appendStringInfo(es->str,
+									 " (actual time=%.3f..%.3f rows=%.2f loops=%.0f)",
+									 INSTR_TIME_GET_MILLISEC(stream->startup) / nloops,
+									 INSTR_TIME_GET_MILLISEC(stream->instr.time) / nloops,
+									 stream->read / nloops, nloops);
+				else
+					appendStringInfo(es->str,
+									 " (actual rows=%.2f loops=%.0f)",
+									 stream->read / nloops, nloops);
+			}
+			appendStringInfoChar(es->str, '\n');
+			es->indent += 3;
+		}
+		else
+		{
+			ExplainOpenGroup("Index Stream", NULL, true, es);
+			ExplainPropertyText("Role", role, es);
+			ExplainPropertyText("Index Name", index_name, es);
+		}
+		if (cond != NULL)
+			ExplainPropertyText("Index Cond", cond, es);
+		if (pred != NULL)
+			ExplainPropertyText("Index Pred", pred, es);
+		if (es->verbose && es->costs)
+			ExplainPropertyFloat("Entries Estimated", NULL, stream->estimate,
+								 0, es);
+		if (es->analyze)
+		{
+			if (es->format != EXPLAIN_FORMAT_TEXT)
+			{
+				if (es->timing && nloops > 0)
+				{
+					ExplainPropertyFloat("Actual Startup Time", "ms",
+										 INSTR_TIME_GET_MILLISEC(stream->startup) / nloops,
+										 3, es);
+					ExplainPropertyFloat("Actual Total Time", "ms",
+										 INSTR_TIME_GET_MILLISEC(stream->instr.time) / nloops,
+										 3, es);
+				}
+				ExplainPropertyInteger("Entries Read", NULL, stream->read, es);
+			}
+			if (stream->skips > 0)
+			{
+				ExplainPropertyInteger("Skips", NULL, stream->skips, es);
+				ExplainPropertyInteger("Short Skips", NULL,
+									   stream->short_skips, es);
+			}
+			if (stream->group_overflows > 0)
+				ExplainPropertyInteger("Group Overflows", NULL,
+									   stream->group_overflows, es);
+			if (stream->instr.prefetches > 0)
+				ExplainPropertyInteger("Prefetches", NULL,
+									   stream->instr.prefetches, es);
+			if (es->buffers)
+				stream_buffers(stream, es);
+		}
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			es->indent -= 3;
+		else
+			ExplainCloseGroup("Index Stream", NULL, true, es);
+	}
+	if (es->format != EXPLAIN_FORMAT_TEXT)
+		ExplainCloseGroup("Index Streams", "Index Streams", false, es);
 }

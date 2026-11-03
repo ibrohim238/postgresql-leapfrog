@@ -20,6 +20,7 @@
 #include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 
@@ -28,8 +29,9 @@
 /*
  * lf_scan_leaf_position
  *		The leaf page the scan is positioned on and its neighbour in scan
- *		direction; false when it is positioned nowhere.  The only read of
- *		nbtree's private scan state, for the skip-ahead's landing check.
+ *		direction; false when it is positioned nowhere.  For the skip-ahead's
+ *		landing check; with scan_will_step and prefetch_next_leaf below, the
+ *		reads of nbtree's private scan state.
  */
 bool
 lf_scan_leaf_position(IndexScanDesc scan, bool backward, BlockNumber *page,
@@ -138,17 +140,76 @@ lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
  * built on, and treated as values they would derail it: a backward scan reads
  * them first.  Otherwise a NULL is a value of the merge like any other.
  */
+/*
+ * scan_will_step
+ *		Whether the next entry comes from another leaf page: the scan has
+ *		no position, or stands on the last item of its page.  Reads
+ *		nbtree's scan position, like lf_scan_leaf_position.
+ */
+static inline bool
+scan_will_step(IndexScanDesc scan, ScanDirection dir)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+
+	if (!BTScanPosIsValid(so->currPos))
+		return true;
+	if (ScanDirectionIsForward(dir))
+		return so->currPos.itemIndex >= so->currPos.lastItem;
+	return so->currPos.itemIndex <= so->currPos.firstItem;
+}
+
+/*
+ * prefetch_next_leaf
+ *		Ask for the leaf page after the one just reached, so that its read
+ *		overlaps the entries of this one; not when nbtree already knows the
+ *		scan ends on this page.  Returns whether a page was asked for.
+ */
+static inline bool
+prefetch_next_leaf(IndexScanDesc scan, ScanDirection dir)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+	bool		forward = ScanDirectionIsForward(dir);
+	BlockNumber next;
+
+	if (!BTScanPosIsValid(so->currPos))
+		return false;
+	if (forward ? !so->currPos.moreRight : !so->currPos.moreLeft)
+		return false;
+	next = forward ? so->currPos.nextPage : so->currPos.prevPage;
+	if (!BlockNumberIsValid(next))
+		return false;
+	PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, next);
+	return true;
+}
+
+/*
+ * instr is the stream's instrumentation, clocked on page steps, which also
+ * prefetch the next leaf page; NULL from a planner probe: neither.
+ */
 bool
 lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
 					bool skip_nulls, Datum *value, bool *isnull,
-					ItemPointer tid, int64 *entries_read)
+					ItemPointer tid, int64 *entries_read, StreamInstr *instr)
 {
 	for (;;)
 	{
 		Datum		datum;
 		bool		datum_isnull;
+		bool		found;
 
-		if (index_getnext_tid(scan, dir) == NULL)
+		if (instr != NULL && scan_will_step(scan, dir))
+		{
+			StreamClock clock;
+
+			lf_instr_start(instr, &clock);
+			found = index_getnext_tid(scan, dir) != NULL;
+			lf_instr_stop(instr, &clock);
+			if (found && intersect_prefetch && prefetch_next_leaf(scan, dir))
+				instr->prefetches++;
+		}
+		else
+			found = index_getnext_tid(scan, dir) != NULL;
+		if (!found)
 			return false;
 		(*entries_read)++;
 

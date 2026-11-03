@@ -72,36 +72,44 @@ SELECT * FROM lf_plan($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY v
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_null
-         Outer Index: lf_null_a_last
-         Inner Index: lf_null_b_last
-(4 rows)
+         ->  Outer Stream on lf_null_a_last
+               Index Cond: (a = 3)
+         ->  Inner Stream on lf_null_b_last
+               Index Cond: (b = 2)
+(6 rows)
 
 SELECT * FROM lf_plan($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val ASC NULLS FIRST LIMIT 5 $$);
                        lf_plan                        
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_null
-         Outer Index: lf_null_a_first
-         Inner Index: lf_null_b_first
-(4 rows)
+         ->  Outer Stream on lf_null_a_first
+               Index Cond: (a = 3)
+         ->  Inner Stream on lf_null_b_first
+               Index Cond: (b = 2)
+(6 rows)
 
 SELECT * FROM lf_plan($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val DESC NULLS LAST LIMIT 5 $$);
                        lf_plan                        
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_null
-         Outer Index: lf_null_a_first
-         Inner Index: lf_null_b_first
-(4 rows)
+         ->  Outer Stream on lf_null_a_first
+               Index Cond: (a = 3)
+         ->  Inner Stream on lf_null_b_first
+               Index Cond: (b = 2)
+(6 rows)
 
 SELECT * FROM lf_plan($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val DESC NULLS FIRST LIMIT 5 $$);
                        lf_plan                        
 ------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_null
-         Outer Index: lf_null_a_last
-         Inner Index: lf_null_b_last
-(4 rows)
+         ->  Outer Stream on lf_null_a_last
+               Index Cond: (a = 3)
+         ->  Inner Stream on lf_null_b_last
+               Index Cond: (b = 2)
+(6 rows)
 
 -- Indexes with their NULLs at the other end are no use for this order.
 DROP INDEX lf_null_a_first, lf_null_b_first;

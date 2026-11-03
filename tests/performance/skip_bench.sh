@@ -83,8 +83,8 @@ BEGIN
 	buffers := (plan -> 0 -> 'Plan' ->> 'Shared Hit Blocks')::bigint +
 		(plan -> 0 -> 'Plan' ->> 'Shared Read Blocks')::bigint;
 	read := (plan -> 0 -> 'Plan' ->> 'Shared Read Blocks')::bigint;
-	outer_read := (node ->> 'Outer Entries Read')::bigint;
-	inner_read := (node ->> 'Inner Entries Read')::bigint;
+	outer_read := (node -> 'Index Streams' -> 0 ->> 'Entries Read')::bigint;
+	inner_read := (node -> 'Index Streams' -> 1 ->> 'Entries Read')::bigint;
 	skips := coalesce((node ->> 'Skips')::bigint, 0);
 	rows := (plan -> 0 -> 'Plan' ->> 'Actual Rows')::numeric::bigint;
 	ms := (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY t)

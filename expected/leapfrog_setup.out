@@ -159,12 +159,19 @@ BEGIN
 		SELECT n FROM jsonb_path_query(plan, 'strict $[0].Plan.**') AS n
 		WHERE n->>'Custom Plan Provider' = 'Index Merge Intersect'
 	LOOP
+		-- the streams, named Outer, Inner, Inner 2, ... as the tests know them
+		RETURN QUERY
+			SELECT CASE WHEN s.i = 1 THEN 'Outer ' ELSE 'Inner ' END || k.name
+					|| CASE WHEN s.i > 2 THEN ' ' || (s.i - 1) ELSE '' END,
+				s.stream -> k.key
+			FROM (VALUES (1, 'Index', 'Index Name'), (2, 'Entries Read', 'Entries Read'))
+				AS k(ord, name, key),
+				jsonb_array_elements(node -> 'Index Streams') WITH ORDINALITY AS s(stream, i)
+			WHERE s.stream ? k.key
+			ORDER BY k.ord, s.i;
 		RETURN QUERY
 			SELECT key, node->key FROM unnest(ARRAY[
-				'Outer Index', 'Inner Index', 'Inner Index 2', 'Inner Index 3',
-				'Outer Entries Read', 'Inner Entries Read',
-				'Inner Entries Read 2', 'Inner Entries Read 3', 'Matched TIDs',
-				'Heap Fetches', 'Skips', 'Short Skips',
+				'Matched TIDs', 'Heap Fetches', 'Skips', 'Short Skips',
 				'Rows Checked by Predicate', 'Group Overflows',
 				'Peak Group Memory', 'Actual Rows', 'Actual Loops',
 				'Rows Removed by Filter']) AS key

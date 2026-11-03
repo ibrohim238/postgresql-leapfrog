@@ -7,9 +7,11 @@ QUERY PLAN
 Limit                                                       
   ->  LockRows                                              
         ->  Custom Scan (Index Merge Intersect) on lf_iso_st
-              Outer Index: lf_iso_st_b                      
-              Inner Index: lf_iso_st_a                      
-(5 rows)
+              ->  Outer Stream on lf_iso_st_b               
+                    Index Cond: (b = 1)                     
+              ->  Inner Stream on lf_iso_st_a               
+                    Index Cond: (a = 2)                     
+(7 rows)
 
 
 starting permutation: s1_begin s1_b s2_lock s1_commit

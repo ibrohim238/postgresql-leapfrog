@@ -528,14 +528,14 @@ probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 	candidate->range_empty = !lf_read_index_entry(scan, low_end,
 												  sort_keyno, true,
 												  &candidate->range_lo, &isnull,
-												  &tid, &entries);
+												  &tid, &entries, NULL);
 	if (!candidate->range_empty)
 	{
 		candidate->range_lo = datumCopy(candidate->range_lo, attr->attbyval,
 										attr->attlen);
 		lf_rescan_with_keys(scan, &keys, SORT_BOUND_NOT_NULL, (Datum) 0);
 		if (lf_read_index_entry(scan, -low_end, sort_keyno, true,
-								&candidate->range_hi, &isnull, &tid, &entries))
+								&candidate->range_hi, &isnull, &tid, &entries, NULL))
 			candidate->range_hi = datumCopy(candidate->range_hi, attr->attbyval,
 											attr->attlen);
 		else
@@ -928,7 +928,7 @@ stream_holds_group(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *stream,
 										 BackwardScanDirection :
 										 ForwardScanDirection,
 										 stream->sortpos + 1, false, &found,
-										 &found_null, &tid, &entries);
+										 &found_null, &tid, &entries, NULL);
 	if (probe->present && !isnull)
 		probe->present = !found_null &&
 			range_compare(sort, found, value) == 0;

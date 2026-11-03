@@ -51,16 +51,22 @@ ORDER BY id DESC LIMIT 100 $$);
 ----------------------------------------------------------------------------------
  Limit (actual rows=100.00 loops=1)
    ->  Custom Scan (Index Merge Intersect) on orders (actual rows=100.00 loops=1)
-         Outer Index: idx_orders_customer_id
-         Inner Index: idx_orders_deleted_id
-         Outer Entries Read: 585
-         Inner Entries Read: 20131
          Matched TIDs: 100
          Heap Fetches: 100
          Peak Group Memory: 96 B
          Skips: 4
          Short Skips: 3
-(11 rows)
+         ->  Outer Stream on idx_orders_customer_id (actual rows=585.00 loops=1)
+               Index Cond: (customer_id = 100)
+               Skips: 1
+               Short Skips: 0
+               Prefetches: 4
+         ->  Inner Stream on idx_orders_deleted_id (actual rows=20131.00 loops=1)
+               Index Pred: (deleted_at IS NOT NULL)
+               Skips: 3
+               Short Skips: 3
+               Prefetches: 58
+(17 rows)
 
 RESET random_page_cost;
 -- With the default random_page_cost = 4 as well (estimated 798 against 933
@@ -72,9 +78,11 @@ ORDER BY id DESC LIMIT 100 $$);
 ---------------------------------------------------------------------------------
  Limit  (cost=N..N rows=N width=N)
    ->  Custom Scan (Index Merge Intersect) on orders  (cost=N..N rows=N width=N)
-         Outer Index: idx_orders_customer_id
-         Inner Index: idx_orders_deleted_id
-(4 rows)
+         ->  Outer Stream on idx_orders_customer_id
+               Index Cond: (customer_id = N)
+         ->  Inner Stream on idx_orders_deleted_id
+               Index Pred: (deleted_at IS NOT NULL)
+(6 rows)
 
 -- The stock plan: an Index Scan on the partial index that filters the
 -- customer on every deleted row.

@@ -35,9 +35,11 @@ SELECT * FROM lf_dup WHERE owner_id = 3 AND deleted_at IS NULL ORDER BY group_id
 -----------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_dup
-         Outer Index: lf_dup_owner_group
-         Inner Index: lf_dup_live_group
-(4 rows)
+         ->  Outer Stream on lf_dup_owner_group
+               Index Cond: (owner_id = 3)
+         ->  Inner Stream on lf_dup_live_group
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_dup WHERE owner_id = 3 AND deleted_at IS NULL ORDER BY group_id $$, false);
                        lf_check                        

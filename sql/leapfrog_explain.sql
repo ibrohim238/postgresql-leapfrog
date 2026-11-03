@@ -28,6 +28,44 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
 EXPLAIN (COSTS OFF, VERBOSE)
 SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
 
+-- Every stream is a block of its own, in the manner of a child node: its
+-- index, the equalities as an Index Cond, the predicate of a partial index,
+-- the entries read as its rows, and its counters.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
+-- In the structured formats the streams are an array
+CREATE FUNCTION lf_plan_streams(query text) RETURNS SETOF jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+	plan jsonb;
+BEGIN
+	PERFORM set_config('leapfrog.force', 'on', true);
+	EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF, FORMAT JSON) ' ||
+		query INTO plan;
+	RETURN QUERY
+		SELECT s FROM jsonb_path_query(plan, 'strict $[0].Plan.**') AS n,
+			jsonb_array_elements(n -> 'Index Streams') AS s
+		WHERE n ->> 'Custom Plan Provider' = 'Index Merge Intersect';
+END
+$$;
+SELECT s ->> 'Role' AS role, s ->> 'Index Name' AS index, s ->> 'Index Cond' AS cond,
+	s ->> 'Index Pred' AS pred, s ? 'Entries Read' AS counted
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$) s;
+-- leapfrog.prefetch asks for the next leaf page of every stream ahead of
+-- time, counted per stream; the result does not depend on it.
+SHOW leapfrog.prefetch;
+SELECT s ->> 'Role' AS role, (s ->> 'Prefetches')::int > 0 AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
+SET leapfrog.prefetch = off;
+SELECT s ->> 'Role' AS role, s ? 'Prefetches' AS prefetched
+FROM lf_plan_streams($$
+SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) s;
+SELECT lf_check($$ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
+RESET leapfrog.prefetch;
+DROP FUNCTION lf_plan_streams(text);
+
 -- VERBOSE with costs adds the entries the cost model expects each side to
 -- read, to set against the ANALYZE counters (numbers masked).
 CREATE FUNCTION lf_plan_verbose(query text) RETURNS SETOF text

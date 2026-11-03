@@ -10,12 +10,16 @@ Limit
         ->  Merge Append                                              
               Sort Key: lf_iso_part.id                                
               ->  Custom Scan (Index Merge Intersect) on lf_iso_part_1
-                    Outer Index: lf_iso_part_1_kind_id_idx            
-                    Inner Index: lf_iso_part_1_flag_id_idx            
+                    ->  Outer Stream on lf_iso_part_1_kind_id_idx     
+                          Index Cond: (lf_iso_part_1.kind = 1)        
+                    ->  Inner Stream on lf_iso_part_1_flag_id_idx     
+                          Index Cond: (lf_iso_part_1.flag = 2)        
               ->  Custom Scan (Index Merge Intersect) on lf_iso_part_2
-                    Outer Index: lf_iso_part_2_kind_id_idx            
-                    Inner Index: lf_iso_part_2_flag_id_idx            
-(10 rows)
+                    ->  Outer Stream on lf_iso_part_2_kind_id_idx     
+                          Index Cond: (lf_iso_part_2.kind = 1)        
+                    ->  Inner Stream on lf_iso_part_2_flag_id_idx     
+                          Index Cond: (lf_iso_part_2.flag = 2)        
+(14 rows)
 
 
 starting permutation: r_node w_begin w_kind r_lock w_commit

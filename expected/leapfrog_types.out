@@ -47,13 +47,15 @@ ANALYZE lf_types;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_types WHERE owner_id = '00000000-0000-0000-0000-000000000007'
 	AND status = 'sent' ORDER BY id LIMIT 20 $$);
-                        lf_plan                        
--------------------------------------------------------
+                                       lf_plan                                       
+-------------------------------------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_types
-         Outer Index: lf_types_status_id
-         Inner Index: lf_types_owner_id
-(4 rows)
+         ->  Outer Stream on lf_types_status_id
+               Index Cond: (status = 'sent'::text)
+         ->  Inner Stream on lf_types_owner_id
+               Index Cond: (owner_id = '00000000-0000-0000-0000-000000000007'::uuid)
+(6 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'sent' ORDER BY id $$);
                       lf_check                       
@@ -105,9 +107,11 @@ EXPLAIN (COSTS OFF) EXECUTE lf_types_by_status('sent', '00000000-0000-0000-0000-
 -------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_types
-         Outer Index: lf_types_status_id
-         Inner Index: lf_types_owner_id
-(4 rows)
+         ->  Outer Stream on lf_types_status_id
+               Index Cond: (status = $1)
+         ->  Inner Stream on lf_types_owner_id
+               Index Cond: (owner_id = $2)
+(6 rows)
 
 EXECUTE lf_types_by_status('sent', '00000000-0000-0000-0000-000000000007');
   id  
@@ -182,13 +186,15 @@ PREPARE lf_types_by_prefix(text, text) AS
 SELECT id FROM lf_types WHERE status = $1 || $2 AND model_type = 'App\Models\' || $2
 ORDER BY id LIMIT 5;
 EXPLAIN (COSTS OFF) EXECUTE lf_types_by_prefix('', 'Invoice');
-                      QUERY PLAN                       
--------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_types
-         Outer Index: lf_types_model_type_id
-         Inner Index: lf_types_status_id
-(4 rows)
+         ->  Outer Stream on lf_types_model_type_id
+               Index Cond: (model_type = ('App\Models\'::text || $2))
+         ->  Inner Stream on lf_types_status_id
+               Index Cond: (status = ($1 || $2))
+(6 rows)
 
 DEALLOCATE lf_types_by_prefix;
 RESET leapfrog.force;
@@ -400,9 +406,11 @@ SELECT * FROM lf_types_domain WHERE status = 'b' AND kind = 2 ORDER BY id DESC L
 --------------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_types_domain
-         Outer Index: lf_types_domain_status_id_idx
-         Inner Index: lf_types_domain_kind_id_idx
-(4 rows)
+         ->  Outer Stream on lf_types_domain_status_id_idx
+               Index Cond: (status = 'b'::text)
+         ->  Inner Stream on lf_types_domain_kind_id_idx
+               Index Cond: (kind = 2)
+(6 rows)
 
 SELECT lf_check($$ SELECT * FROM lf_types_domain WHERE status = 'b' AND kind = 2 ORDER BY id $$);
                        lf_check                        
@@ -446,13 +454,15 @@ SELECT * FROM lf_types_coll WHERE status = 'sent' AND kind = 1 ORDER BY id LIMIT
 
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_types_coll WHERE status = 'sent' COLLATE "C" AND kind = 1 ORDER BY id LIMIT 20 $$);
-                          lf_plan                           
-------------------------------------------------------------
+                            lf_plan                            
+---------------------------------------------------------------
  Limit
    ->  Custom Scan (Index Merge Intersect) on lf_types_coll
-         Outer Index: lf_types_coll_kind
-         Inner Index: lf_types_coll_status_c
-(4 rows)
+         ->  Outer Stream on lf_types_coll_kind
+               Index Cond: (kind = 1)
+         ->  Inner Stream on lf_types_coll_status_c
+               Index Cond: (status = 'sent'::text COLLATE "C")
+(6 rows)
 
 RESET leapfrog.force;
 DROP TABLE lf_types_coll;
