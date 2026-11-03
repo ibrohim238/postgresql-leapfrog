@@ -1,46 +1,20 @@
 #!/usr/bin/env bash
 # Equality columns of different types, for one build of the extension:
+#   WHERE <key column> = <value> AND f = 3 ORDER BY id DESC LIMIT :limit
+# Same rows in every case, only the key's type differs: int8_int8, int4_int8,
+# int2_int8, uuid_uuid, text_text, varchar_text.
+# Modes: auto, force (leapfrog.force), stock.  A build without support for a type
+# falls back to a stock plan; the summary shows the node that ran.
 #
-#   SELECT * FROM bench_types
-#   WHERE <key column> = <value> AND f = 3
-#   ORDER BY id DESC LIMIT :limit;
-#
-# The key has the same 200 values in every column, stored as bigint, integer,
-# smallint, uuid, text and varchar, each with an index (<column>, id); the
-# filter f has 20 values and an index (f, id).  So every case reads the same
-# rows and only the type of the equality differs:
-#
-#   int8_int8        bigint   = bigint
-#   int4_int8        integer  = bigint
-#   int2_int8        smallint = bigint
-#   uuid_uuid        uuid     = uuid
-#   text_text        text     = text
-#   varchar_text     varchar  = text
-#
-# Every query runs in three modes: auto (leapfrog enabled, the planner
-# chooses), force (leapfrog.force) and stock (leapfrog disabled), with
-# LIMIT 1, 10, 100 and 1000, WARMUP runs and then REPEATS runs through
-# EXPLAIN (ANALYZE, BUFFERS, MEMORY, FORMAT JSON) in one session per block.
-# A build that does not support a type falls back to a stock plan in every
-# mode; the summary shows the node that ran.
-#
-# Run it once per build (make install of that build in between; the library
-# is loaded per session) into separate output directories, then compare:
-#
+# Run once per build, then compare (the table is kept, so both read the same data):
 #   BENCH_LABEL=old BENCH_OUT=results/types-old bash types_bench.sh
 #   BENCH_LABEL=new BENCH_OUT=results/types-new bash types_bench.sh
 #   bash types_compare.sh results/types-old results/types-new
 #
-# The table is loaded when missing from BENCH_DB or with BENCH_RELOAD=1, so
-# both builds read the same data and the same physical layout.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
-# bench_db.sh); ROWS (1000000), REPEATS (15), WARMUP (2),
-# LIMITS ("1 10 100 1000"), MODES ("auto force stock"), CASES (all),
-# BENCH_LABEL (leapfrog_version()), BENCH_RELOAD (0), BENCH_OUT (a directory
-# that must not exist yet).
-# Output: tests/performance/results/types-<timestamp>/runs.csv (one row per
-# run), summary.csv and server.txt.
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); ROWS (1000000),
+# REPEATS (15), WARMUP (2), LIMITS ("1 10 100 1000"), MODES ("auto force stock"),
+# CASES (all), BENCH_LABEL (leapfrog_version()), BENCH_RELOAD (0), BENCH_OUT (must
+# not exist).  Output in results/types-<timestamp>/: runs.csv, summary.csv, server.txt.
 set -euo pipefail
 
 cd "$(dirname "$0")"

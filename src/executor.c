@@ -45,11 +45,10 @@ typedef struct SkipAhead
 } SkipAhead;
 
 /*
- * One index of the intersection, read as a sorted stream of (sortcol value,
- * heap TID).  Stream 0 is the outer index: its matched entries are fetched
- * from the heap.  Every other stream is an inner one: the entries of the
- * current value are collected into a sorted TID group that the outer
- * entries are looked up in.
+ * One index of the intersection.  Stream 0 is the outer index: its matched
+ * entries are fetched from the heap.  Of an inner stream, the entries of the
+ * current value are collected into a sorted TID group the outer entries are
+ * looked up in.
  */
 typedef struct IndexStream
 {
@@ -89,9 +88,6 @@ typedef enum SortCompareKind
 	SORT_COMPARE_INT32,
 } SortCompareKind;
 
-/*
- * Execution state of an Index Merge Intersect scan.
- */
 typedef struct IntersectScanState
 {
 	CustomScanState css;
@@ -370,10 +366,9 @@ evaluate_keys(EqualityKeys *keys, ExprContext *econtext, MemoryContext cxt)
 
 /*
  * evaluate_equal_values
- *		Evaluate the equality values of every stream once per (re)scan.
- *		Also used by the EvalPlanQual recheck, which runs on a planstate
- *		copy whose scan was never started.  Returns false when a value is
- *		NULL.
+ *		Evaluate the equality values of every stream once per (re)scan; false
+ *		when a value is NULL.  Also used by the EvalPlanQual recheck, which
+ *		runs on a planstate copy whose scan was never started.
  */
 static bool
 evaluate_equal_values(IntersectScanState *state)
@@ -400,8 +395,7 @@ evaluate_equal_values(IntersectScanState *state)
  * compare_values
  *		Compare two values of the merge in query order: above zero when a is
  *		further along than b.  bigint, timestamptz and the like compare as
- *		plain integers, inline: on a merge of bigint values the indirect call
- *		costs about a tenth of the node's time (BENCHMARKS.md).
+ *		plain integers, inline, to spare the indirect call (BENCHMARKS.md).
  */
 static inline int
 compare_values(IntersectScanState *state, Datum a, bool a_isnull, Datum b,
@@ -491,11 +485,8 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
 
 /*
  * check_landing
- *		After the first entry read since a skip: a skip that stayed on the
- *		leaf page it left or moved to the next one did not pay for its
- *		descent, so the stream waits twice as long before the next one; a
- *		longer skip halves the wait, down to leapfrog.skip_after.  The
- *		threshold stays within 64 times leapfrog.skip_after.
+ *		After the first entry read since a skip, adapt the stream's threshold
+ *		(see SkipAhead), within 64 times leapfrog.skip_after.
  */
 static void
 check_landing(IntersectScanState *state, IndexStream *stream)
@@ -570,10 +561,8 @@ row_matches_keys(TupleTableSlot *slot, EqualityKeys *keys)
 
 /*
  * row_matches_stream
- *		Would the stream's index hold an entry for this row version: does it
- *		satisfy the stream's equalities and, for a partial index, its
- *		predicate?  Used where the row was not matched against the index by
- *		TID.
+ *		Would the stream's index hold an entry for this row version?  For
+ *		where the row was not matched against the index by TID.
  */
 static bool
 row_matches_stream(IntersectScanState *state, IndexStream *stream,
@@ -695,15 +684,13 @@ group_contains(IndexStream *stream, ItemPointer tid)
  *		Advance the streams until all of them stand on one value, and keep a
  *		copy of it as the group value.  Returns false when a stream runs out.
  *
- * The invariant of RowIDIntersectionIterator::DoRead in MySQL, on the sort
- * value instead of the rowid: one stream holds the candidate and the others
- * catch up with it in turn.  A stream that reaches it confirms it; one that
- * passes it holds the new candidate.  The candidate's stream does not move
- * meanwhile, so its value stays valid.  Unlike there, the turns start again
- * from the sparsest stream after each new candidate (the order
- * find_intersect_order prefers there): a dense stream then has to reach only
- * the values all the sparser ones agree on, and skips the rest in one descent,
- * where taking turns in a circle makes it read nearly all of its entries.
+ * One stream holds the candidate and the others catch up with it in turn.  A
+ * stream that reaches it confirms it; one that passes it holds the new
+ * candidate.  The candidate's stream does not move meanwhile, so its value
+ * stays valid.  The turns start again from the sparsest stream after each new
+ * candidate: a dense stream then has to reach only the values all the sparser
+ * ones agree on, and skips the rest in one descent, where taking turns in a
+ * circle makes it read nearly all of its entries.
  *
  * A stream that has read its threshold of entries without catching up descends
  * its B-tree straight to the candidate: the entries in between cannot match,
@@ -782,8 +769,7 @@ find_common_value(IntersectScanState *state)
 
 /*
  * intersect_next
- *		Merge the sorted index streams, the counterpart of MySQL's
- *		RowIDIntersectionIterator::DoRead: advance the lagging streams until
+ *		Merge the sorted index streams: advance the lagging streams until
  *		every value meets, then match the entries of that value by TID.
  */
 static TupleTableSlot *
@@ -894,12 +880,12 @@ intersect_next(ScanState *ss)
 	}
 
 	/*
-	 * The merge ends when one stream runs out, with the others still
-	 * positioned on a leaf page.  The scans keep their leaf page pinned, as
-	 * an Index Only Scan does, since the sort value is read from the index
-	 * tuple (xs_want_itup); VACUUM of the index would wait for that pin as
-	 * long as an exhausted cursor stays open.  Resetting the scans releases
-	 * the pins; a rescan positions them again.
+	 * The merge ends when one stream runs out, with the others still on a
+	 * leaf page.  The scans keep it pinned, as an Index Only Scan does, since
+	 * the sort value is read from the index tuple (xs_want_itup); VACUUM of
+	 * the index would wait for that pin as long as an exhausted cursor stays
+	 * open.  Resetting the scans releases the pins; a rescan positions them
+	 * again.
 	 */
 	if (!state->done)
 	{
@@ -918,10 +904,9 @@ intersect_next(ScanState *ss)
 
 /*
  * intersect_recheck
- *		EvalPlanQual recheck: the row version may have changed since the
- *		index entries were matched, so the conditions the scan guaranteed by
- *		construction are evaluated again on the new version.  The node's
- *		qual is applied by ExecScan afterwards.
+ *		EvalPlanQual recheck: the row version may have changed since the index
+ *		entries were matched, so what the scan guaranteed by construction is
+ *		evaluated again.  ExecScan applies the node's qual afterwards.
  */
 static bool
 intersect_recheck(ScanState *ss, TupleTableSlot *slot)

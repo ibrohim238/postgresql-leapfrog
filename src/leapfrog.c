@@ -1,61 +1,36 @@
 /*-------------------------------------------------------------------------
  *
  * leapfrog.c
- *	  Index Merge Intersect custom scan: intersection of two btree indexes
- *	  by merging their sorted streams, modeled on MySQL's index merge
- *	  intersection (RowIDIntersectionIterator, ROR_intersect_plan).
+ *	  Index Merge Intersect custom scan: intersection of btree indexes by
+ *	  merging their sorted streams.  Module entry point, settings and
+ *	  SQL-callable functions.
  *
- * For every base relation of the query an index pair is chosen
- * automatically (planner.c):
+ * With every column before sortcol fixed by equality with a value known at
+ * execution time, the scans of the indexes produce sortcol values in the same
+ * order (planner.c).  The merge column may be of any type with a btree
+ * operator family: values compare with the comparator of the query's sort
+ * key, and NULLs are values of the merge, in the order the query asks for.
  *
- *	- the outer index (k1, ..., kN, sortcol): every kI is compared for
- *	  equality with a value known at execution time (a constant, a query
- *	  parameter or a column of an outer relation), and its last column is
- *	  the first sort key of the query;
- *	- the inner index (j1, ..., jM, sortcol, ...), M >= 0: every jI is
- *	  compared for equality in the same way, and if the index is partial its
- *	  predicate is implied by the query's restrictions.  With M = 0 it must
- *	  be partial, or it would not narrow anything down; an ordinary index
- *	  whose equality columns all appear in the outer index is not used
- *	  either.  Typical inner sides: (sortcol) WHERE deleted_at IS NULL, or
- *	  another (filter_column, sortcol).
- *
- * With every column before sortcol fixed by equality, both scans produce
- * sortcol values in the same order.
- *
- * Execution (executor.c) follows RowIDIntersectionIterator::DoRead: the indexes
- * are read sequentially and the streams catch up with a candidate in turn.  MySQL merges rowids; here
- * the entries of one value are matched by heap TID as well, so the merge
- * stays correct when sortcol is not unique or dead row versions are still
- * in the index.  The TIDs of one value are not in a usable order on both
+ * The entries of one value are matched by heap TID as well (executor.c), so
+ * the merge stays correct when sortcol is not unique or dead row versions are
+ * still in the index.  The TIDs of one value are not in a usable order on both
  * sides (a backward scan returns posting-list TIDs ascending), so the inner
- * entries of the value are collected into a sorted group and the outer
- * entries are looked up in it.  The group lives in memory: the path is
- * offered only when the estimated number of inner entries per value fits
- * into work_mem, and at execution time a group that outgrows work_mem is
- * abandoned for that value.  The outer entries of such a value are all
+ * entries of the value are collected into a sorted group and the outer entries
+ * are looked up in it.  The path is offered only when the estimated inner
+ * entries per value fit into work_mem, and at execution time a group that
+ * outgrows work_mem is abandoned for that value: its outer entries are all
  * fetched from the heap and checked against the inner index conditions
- * explicitly (its equalities and its predicate), before the node's qual sees
- * them, so the fallback does not depend on what the qual holds.
- * The heap is otherwise visited only for matches, walking HOT chains the
- * way index_getnext_slot does.
+ * (equalities and predicate) before the node's qual sees them, so the fallback
+ * does not depend on what the qual holds.  The heap is otherwise visited only
+ * for matches, walking HOT chains the way index_getnext_slot does.
  *
- * The merge column may be of any type with a btree operator family: values
- * are compared with the comparator of the query's sort key, and NULLs are
- * values of the merge, in the order the query asks for.
+ * leapfrog.force chooses the intersection whenever a suitable set of indexes
+ * exists, regardless of the cost of other plans; the cheapest set still wins.
+ * It is a diagnostic knob and can make a query far slower.
  *
- * Costing follows ROR_intersect_plan::add, with every component expressed
- * through the planner's own cost functions (costsize.c).
- *
- * leapfrog.force is the counterpart of MySQL's INDEX_MERGE hint
- * (ignore_cost in ROR_intersect_plan::add): the intersection is chosen
- * whenever a suitable index pair exists, regardless of the cost of the
- * other plans.  Among several pairs the cheapest one still wins.  It is a
- * diagnostic knob and can make a query far slower.
- *
- * Under EvalPlanQual the scan rechecks what it guaranteed by construction,
- * as an index scan rechecks indexqualorig: the equalities on the columns of
- * both indexes and the predicate of the inner index.
+ * Under EvalPlanQual the scan rechecks what it guaranteed by construction, as
+ * an index scan rechecks indexqualorig: the equalities on the columns of the
+ * indexes and the predicate of an inner index.
  *
  * Limitations: the scan covers a single relation only; a partitioned table
  * gets one per partition.
@@ -87,23 +62,15 @@ PG_MODULE_MAGIC_EXT(
 );
 
 /*
- * A lagging scan is re-positioned once it has read this many entries in a
- * row without catching up with the other side.  A re-descent through
- * index_rescan costs tree_height buffer accesses plus restarting the scan,
- * while a leaf page holds about 400 int8 entries, so a skip pays only when
- * it moves past the next leaf page.  The threshold is the starting point of
- * each side's adaptive threshold (SkipAhead in executor.c): it doubles after
- * a skip that landed on the next leaf page, and halves back after a longer
- * one.  Measured on 1M-row tables (tests/performance/skip_bench.sh): with
- * clustered gaps, 64 read up to 1.9 times fewer buffers than 1024; with
- * matches spread evenly it costs 0.2 % more buffers than not skipping, where
- * a fixed 128 cost 38 %; 16 and 32 differ from 64 by less than 5 %.  The
- * developer setting leapfrog.skip_after overrides it for measurements; 0
- * turns skipping off.
+ * A lagging scan is re-positioned once it has read this many entries in a row
+ * without catching up.  A re-descent costs tree_height buffer accesses plus
+ * restarting the scan, while a leaf page holds about 400 int8 entries, so a
+ * skip pays only when it moves past the next leaf page.  This is the start of
+ * each side's adaptive threshold (SkipAhead in executor.c); measurements are
+ * in the README, 16 and 32 differ from 64 by less than 5 %.
  */
 #define INTERSECT_SKIP_AFTER 64
 
-/* GUC variables */
 bool		intersect_enabled = true;
 bool		intersect_force = false;
 int			intersect_skip_after = INTERSECT_SKIP_AFTER;
@@ -112,7 +79,6 @@ PlannerTrace lf_trace;
 int			intersect_max_streams = 4;
 int			intersect_min_streams = 2;
 
-/* Set once the hook is installed */
 static bool intersect_hook_installed = false;
 
 void		_PG_init(void);
@@ -120,9 +86,6 @@ void		_PG_init(void);
 PG_FUNCTION_INFO_V1(leapfrog_version);
 PG_FUNCTION_INFO_V1(leapfrog_is_loaded);
 
-/*
- * Module load callback
- */
 void
 _PG_init(void)
 {
@@ -219,9 +182,9 @@ leapfrog_version(PG_FUNCTION_ARGS)
 
 /*
  * leapfrog_is_loaded
- *		SQL-callable: is the planner hook active in this session?  Calling
- *		the function loads the library, so the answer is true whenever the
- *		call succeeds; it exists for scripts that need an explicit check.
+ *		SQL-callable: is the planner hook active in this session?  Calling it
+ *		loads the library, so the answer is true whenever the call succeeds;
+ *		it exists for scripts that need an explicit check.
  */
 Datum
 leapfrog_is_loaded(PG_FUNCTION_ARGS)

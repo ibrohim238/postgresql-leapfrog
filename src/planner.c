@@ -81,7 +81,6 @@ typedef struct IntersectSearch
 	double		ndistinct;		/* -1 until looked up */
 } IntersectSearch;
 
-/* Saved hook value */
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
 
 static void intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
@@ -119,11 +118,10 @@ make_float8_const(double value)
 /*
  * match_column_var
  *		The Var of column attno of relation rti the node stands for, or NULL.
- *		A binary-compatible relabeling is looked through: a varchar column
- *		compared with texteq appears as (col)::text, and its text_ops index
- *		serves the comparison as it is, as match_index_to_operand accepts it.
- *		So does a domain column, relabeled to its base type in an
- *		equivalence class.
+ *		A binary-compatible relabeling is looked through, as
+ *		match_index_to_operand accepts it: a varchar column compared with texteq
+ *		appears as (col)::text, a domain column in an equivalence class is
+ *		relabeled to its base type.
  */
 static Var *
 match_column_var(Node *node, Index rti, AttrNumber attno)
@@ -143,10 +141,6 @@ match_column_var(Node *node, Index rti, AttrNumber attno)
 	return var;
 }
 
-/*
- * is_column_var
- *		Is the node column attno of relation rti (see match_column_var)?
- */
 static bool
 is_column_var(Node *node, Index rti, AttrNumber attno)
 {
@@ -156,15 +150,12 @@ is_column_var(Node *node, Index rti, AttrNumber attno)
 /*
  * match_index_equality
  *		Is the clause "x = y" with x key column col of the index, compared by
- *		an equality operator of the column's btree operator family, as an
- *		Index Scan would use it for an Index Cond?  Any type with a btree
- *		family qualifies: bigint, integer, uuid, text, varchar, timestamptz.
- *		Fills *equality with the value y, the operator with x on the left
- *		(the commutator when the clause has x on the right) and the
- *		collation the clause compares in.  As for an Index Cond, the index
- *		column must be sorted in that collation, unless it has none, and the
- *		clause must be safe to run before the row security quals: a scan key
- *		sees every entry of the index, also those of rows the quals hide.
+ *		an equality operator of the column's btree family, as for an Index
+ *		Cond?  Fills *equality with y, the operator with x on the left (the
+ *		commutator when x is on the right) and the clause's collation.  The
+ *		index column must be sorted in that collation, unless it has none, and
+ *		the clause must be safe to run before the row security quals: a scan
+ *		key sees every entry of the index, also those of rows the quals hide.
  */
 static bool
 match_index_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
@@ -237,11 +228,10 @@ ec_member_is_column(PlannerInfo *root, RelOptInfo *rel, EquivalenceClass *ec,
 
 /*
  * find_join_equality
- *		Pick "col = value" from a list of join clauses: the value is an
- *		expression of other relations only, not volatile, as
- *		match_clause_to_indexcol accepts for an Index Cond; its columns
- *		become nestloop parameters.  Returns false when there is no such
- *		clause.
+ *		Pick "col = value" from a list of join clauses: the value is a
+ *		non-volatile expression of other relations only, as
+ *		match_clause_to_indexcol accepts for an Index Cond; its columns become
+ *		nestloop parameters.  False when there is no such clause.
  */
 static bool
 find_join_equality(PlannerInfo *root, List *clauses, RelOptInfo *rel,
@@ -274,12 +264,10 @@ find_join_equality(PlannerInfo *root, List *clauses, RelOptInfo *rel,
 
 /*
  * find_equality_clause
- *		Look for "col = value" among the restrictions of rel, among its
- *		join clauses when the value is a column of another relation, or
- *		among the equalities implied by the equivalence classes the column
- *		belongs to (a mergejoinable join clause lives there, not in
- *		joininfo), the way match_eclass_clauses_to_index does.  Returns
- *		false when there is none.
+ *		Look for "col = value" among the restrictions of rel, its join clauses,
+ *		or the equalities implied by the column's equivalence classes (a
+ *		mergejoinable join clause lives there, not in joininfo), as
+ *		match_eclass_clauses_to_index does.  False when there is none.
  */
 static bool
 find_equality_clause(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -298,7 +286,7 @@ find_equality_clause(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		/*
 		 * A value known at execution time: a constant, or an expression of
 		 * constants and parameters without volatile functions, evaluated once
-		 * per (re)scan as for an Index Cond.  A NULL constant matches no row.
+		 * per (re)scan.  A NULL constant matches no row.
 		 */
 		if (IsA(equality->expr, Const))
 		{
@@ -358,10 +346,10 @@ pathkey_is_column(PathKey *pathkey, RelOptInfo *rel, Index rti,
 
 /*
  * is_notnull_column
- *		Can the sort column hold NULLs in the live rows?  The planner's
- *		notnullattnums is the source of truth: a NOT NULL constraint added NOT
- *		VALID sets pg_attribute.attnotnull while NULLs may still be in the
- *		column, and get_relation_info leaves such columns out of the set.
+ *		Is the sort column free of NULLs in the live rows?  notnullattnums is
+ *		the source of truth: a NOT NULL constraint added NOT VALID sets
+ *		pg_attribute.attnotnull while NULLs may still be in the column, and
+ *		get_relation_info leaves such columns out of the set.
  */
 static bool
 is_notnull_column(RelOptInfo *rel, AttrNumber attno)
@@ -404,14 +392,12 @@ is_backward_stream(IndexOptInfo *index, int pos, SortColumn *sort)
 
 /*
  * is_usable_btree
- *		A btree whose column at position pos is sorted in the operator family,
- *		input type and collation of the query's sort key, so that its values
- *		compare alike with the other streams', and which reads the query's
- *		order in one scan direction or the other.  So must the NULLs of a
- *		nullable column: an index with them at the wrong end for that direction
- *		is no stream.  Whether the duplicates are ordered by TID is checked
- *		last, by is_heapkeyspace, for the sets that pass everything else: it
- *		opens the index.
+ *		A btree whose column at pos is sorted in the operator family, input
+ *		type and collation of the query's sort key, so that its values compare
+ *		alike with the other streams', and which reads the query's order in one
+ *		scan direction, the NULLs of a nullable column included.
+ *		is_heapkeyspace is checked last, for the sets that pass everything
+ *		else: it opens the index.
  */
 static bool
 is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
@@ -430,14 +416,9 @@ is_usable_btree(IndexOptInfo *index, int pos, SortColumn *sort)
 
 /*
  * find_index_candidate
- *		Check whether index can produce sort_attno in order once the key
- *		columns before it are fixed by equalities.
- *
- * Every key column before sort_attno must be compared for equality with a
- * value known at execution time: the index then reads in the query's order,
- * as a MySQL secondary index with its leading columns fixed reads in primary
- * key order.  Returns false when sort_attno is not a key column or a column
- * before it has no usable equality.
+ *		Can the index produce sort_attno in order?  Every key column before it
+ *		must be compared for equality with a value known at execution time.
+ *		False when sort_attno is not a key column or an equality is missing.
  */
 static bool
 find_index_candidate(IntersectSearch *search, IndexOptInfo *index,
@@ -522,19 +503,12 @@ equality_column_in_set(IndexCandidate **streams, int nstreams,
 
 /*
  * adds_restriction
- *		Does the candidate narrow the rows of the set's other streams down?
- *		Every stream of the set restricts the rows it returns by the
- *		equalities on its leading columns and, for a partial index, by its
- *		predicate; the outer index as much as the inner ones.  A candidate
- *		adds a restriction through an equality column no other stream has,
- *		or through a predicate that the other streams' equalities and
- *		predicates together do not imply (predicate_implied_by: a predicate
- *		kind = 2 is implied by an equality kind = 2 with a constant, and
- *		deleted_at IS NULL by the same predicate of another partial index).
- *		A stream that adds nothing only makes the merge read more.
- *
- * candidate may itself be one of streams: it is then compared with the
- * others.
+ *		Does the candidate narrow the rows of the set's other streams down:
+ *		through an equality column no other stream has, or a predicate the
+ *		other streams' equalities and predicates do not imply (predicate kind =
+ *		2 is implied by an equality kind = 2 with a constant)?  A stream that
+ *		adds nothing only makes the merge read more.  candidate may itself be
+ *		one of streams: it is then compared with the others.
  */
 static bool
 adds_restriction(IndexCandidate **streams, int nstreams,
@@ -569,12 +543,12 @@ adds_restriction(IndexCandidate **streams, int nstreams,
 
 /*
  * is_inner_candidate
- *		Can the index join the set as an inner stream: (j1, ..., jM, sortcol)
- *		with equalities on every jI, not in the set yet, adding a
- *		restriction of its own, and leaving every stream already in the set
- *		with one of its own?  A pair of (membership_id, id) and (membership_id,
- *		id) WHERE deleted_at IS NULL is not a set: the partial index alone
- *		enforces what the other does, and an Index Scan on it is the plan.
+ *		Can the index join the set as an inner stream: not in the set yet,
+ *		adding a restriction of its own, and leaving every stream already in
+ *		the set with one of its own?  A pair of (customer_id, id) and
+ *		(customer_id, id) WHERE deleted_at IS NULL is not a set: the partial
+ *		index alone enforces what the other does, and an Index Scan on it is
+ *		the plan.
  */
 static bool
 is_inner_candidate(IndexCandidate **streams, int nstreams,
@@ -717,10 +691,9 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 /*
  * add_intersect_path
  *		Offer a built path to add_path, under leapfrog.force with its costs
- *		scaled down: the competition with the other plans is skipped, like
- *		MySQL does for the INDEX_MERGE hint, but the sets still compete among
- *		themselves.  The path can still be passed over for reasons other than
- *		cost, such as disabled_nodes or a parameterization the join order
+ *		scaled down: it skips the competition with other plans, but the sets
+ *		still compete among themselves.  It can still be passed over for other
+ *		reasons, such as disabled_nodes or a parameterization the join order
  *		cannot provide.
  */
 static void
@@ -737,9 +710,7 @@ add_intersect_path(RelOptInfo *rel, CustomPath *cpath)
 
 /*
  * candidate_entries_cmp
- *		Order of find_intersect_order in MySQL, less its first criterion, the
- *		columns an index covers, which matters there for a plan that reads no
- *		rows: fewest entries first.  The OID makes it deterministic.
+ *		Fewest entries first; the OID makes it deterministic.
  */
 static int
 candidate_entries_cmp(const void *a, const void *b)
@@ -754,12 +725,10 @@ candidate_entries_cmp(const void *a, const void *b)
 
 /*
  * build_set_path
- *		Build the path of a set of streams in merge order.  The first stream of
- *		a path is the outer one, whose entries are fetched from the heap, and
- *		the merge does not depend on which it is.  It is the densest stream
- *		without a predicate: the others are held in memory, value by value, so
- *		this keeps the groups small, and a predicate of the outer index would
- *		have to stay in the Filter.
+ *		Build the path of a set of streams in merge order.  The outer stream is
+ *		the densest without a predicate: the others are held in memory, value
+ *		by value, so this keeps the groups small, and a predicate of the outer
+ *		index would have to stay in the Filter.
  */
 static CustomPath *
 build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams,
@@ -788,15 +757,15 @@ build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams,
 
 /*
  * search_intersection
- *		One pass over the candidates, as get_best_ror_intersect in MySQL: a
- *		stream joins the set when it adds a restriction, even if the set costs
- *		more with it, and the cheapest set seen is offered, along with the one
- *		quickest to its first row when that is another: a stream that lowers the
- *		total can make the query wait for one more first group, which a LIMIT
- *		pays for.  A set smaller than leapfrog.min_indexes is not offered, and
- *		the first to reach it is whatever its cost: that lets a test run a larger
- *		set against the stock plans.  With plain_only the candidates that need a
- *		parameter stay out, so that the unparameterized set has its own chance.
+ *		One pass over the candidates: a stream joins the set when it adds a
+ *		restriction, even if the set costs more with it.  The cheapest set seen
+ *		is offered, along with the one quickest to its first row when that is
+ *		another: a stream that lowers the total can make the query wait for one
+ *		more first group, which a LIMIT pays for.  A set smaller than
+ *		leapfrog.min_indexes is not offered, and the first to reach it is kept
+ *		whatever its cost, so a test can run a larger set against the stock
+ *		plans.  With plain_only the candidates that need a parameter stay out,
+ *		so that the unparameterized set has its own chance.
  */
 static void
 search_intersection(IntersectSearch *search, bool plain_only)
@@ -828,11 +797,10 @@ search_intersection(IntersectSearch *search, bool plain_only)
 		/*
 		 * A stream saves at most the rows fetched from the heap and adds at
 		 * least its descent and a leaf page.  When the set cannot get below
-		 * the cheapest one that way, the costing and the range probe of this
-		 * stream are of no use.  There is no cheapest set before
-		 * leapfrog.min_indexes is reached.  This leaves out what a narrower
-		 * overlap of the ranges could save on the other streams, which only
-		 * the probe would tell.
+		 * the cheapest one that way, skip the stream's costing and range
+		 * probe.  There is no cheapest set before leapfrog.min_indexes is
+		 * reached.  This leaves out what a narrower overlap of the ranges
+		 * could save on the other streams, which only the probe would tell.
 		 */
 		if (best != NULL &&
 			last_cost - fetch_cost + lf_stream_min_cost(candidate->index) >=
@@ -869,11 +837,10 @@ search_intersection(IntersectSearch *search, bool plain_only)
 
 /*
  * intersect_set_rel_pathlist
- *		set_rel_pathlist_hook: offer Index Merge Intersect paths for every
- *		suitable set of indexes of the relation.  A partition is a relation of
- *		its own here: its sorted path goes into the parent's MergeAppend or
- *		ordered Append, and a partition without one is sorted there instead.
- *		The partitioned parent itself has no storage and is left to those.
+ *		set_rel_pathlist_hook: offer Index Merge Intersect paths for the
+ *		relation.  A partition is a relation of its own here: its sorted path
+ *		goes into the parent's MergeAppend or ordered Append, and a partition
+ *		without one is sorted there.  The partitioned parent has no storage.
  */
 static void
 intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -934,8 +901,8 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		return;
 
 	/*
-	 * Each index is checked once; the sets are then formed from the indexes
-	 * that can produce sortcol in order, usually a few of the relation's.
+	 * Each index is checked once; the sets are formed from those that can
+	 * produce sortcol in order, usually a few of the relation's.
 	 */
 	search.candidates = palloc(list_length(rel->indexlist) *
 							   sizeof(IndexCandidate));
@@ -1001,10 +968,6 @@ is_candidate_equality(RestrictInfo *rinfo, Index rti, IndexOptInfo *index,
 	return false;
 }
 
-/*
- * find_index_info
- *		The IndexOptInfo of the relation's index with the given OID.
- */
 static IndexOptInfo *
 find_index_info(RelOptInfo *rel, Oid indexoid)
 {
@@ -1050,15 +1013,14 @@ path_stream_exprs(CustomPath *best_path, int stream, int which)
 
 /*
  * lf_node_quals
- *		The clauses the node still has to evaluate on a fetched row, as
- *		create_indexscan_plan computes qpqual: the equalities on the columns
- *		of every stream are enforced by the scan keys and rechecked under
- *		EvalPlanQual by intersect_recheck, so they are dropped.  Clauses
- *		implied by the predicate of an inner index are dropped as well, except
- *		for a target relation of UPDATE/DELETE/SELECT FOR UPDATE, where
- *		check_index_predicates keeps them in the plan for EvalPlanQual.  The
- *		cost model charges exactly these clauses.  indexes[0] is the outer
- *		index, exprs[i] the value expressions of stream i.
+ *		The clauses the node still evaluates on a fetched row, as
+ *		create_indexscan_plan computes qpqual.  The equalities of every stream
+ *		are enforced by the scan keys and rechecked by intersect_recheck, so
+ *		they are dropped.  So are clauses implied by the predicate of an inner
+ *		index, except for a target relation of UPDATE/DELETE/SELECT FOR UPDATE,
+ *		where check_index_predicates keeps them for EvalPlanQual.  The cost
+ *		model charges exactly these clauses.  indexes[0] is the outer index,
+ *		exprs[i] the value expressions of stream i.
  *
  * Clauses implied by the predicate of a partial outer index are never
  * dropped: the node does not keep that predicate, so under EvalPlanQual
@@ -1101,10 +1063,6 @@ lf_node_quals(PlannerInfo *root, RelOptInfo *rel, IndexOptInfo **indexes,
 	return qpqual;
 }
 
-/*
- * intersect_scan_qual
- *		The plan's qual: lf_node_quals for the streams of the path.
- */
 static List *
 intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 					List *clauses)
@@ -1153,10 +1111,6 @@ intersect_plan_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	return &cscan->scan.plan;
 }
 
-/*
- * lf_planner_init
- *		Install the planner hook; called once from _PG_init.
- */
 void
 lf_planner_init(void)
 {

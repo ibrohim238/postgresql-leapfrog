@@ -3,8 +3,7 @@
  * costsize.c
  *	  Cost model of the Index Merge Intersect path.
  *
- * Costing follows ROR_intersect_plan::add, with every component expressed
- * through the planner's own cost functions:
+ * Every component is expressed through the planner's own cost functions:
  *
  *	  run = index_read_cost(each stream, entries read through the merge)
  *		   + cost of grouping the entries of each value, per inner stream
@@ -61,12 +60,7 @@
 
 #include "leapfrog.h"
 
-/*
- * Where the streams of a set can meet (stream_overlap).  lo and hi are the
- * overlap of their sortcol ranges, when probed and not empty.  table_share is
- * the share of the table's rows inside it, null_frac the share of the NULLs of
- * the sort column when every stream holds them, else 0.
- */
+/* Where the streams of a set can meet (stream_overlap). */
 typedef struct StreamOverlap
 {
 	RangeTblEntry *rte;
@@ -80,7 +74,7 @@ typedef struct StreamOverlap
 	double		null_frac;
 } StreamOverlap;
 
-/* Whether a stream holds a sort value, or the NULLs (stream_holds_group). */
+/* Cached result of stream_holds_group. */
 typedef struct GroupProbe
 {
 	Datum		value;
@@ -90,12 +84,10 @@ typedef struct GroupProbe
 
 /*
  * index_read_cost
- *		Cost of reading the given number of index entries sequentially,
- *		the counterpart of MySQL's index_read_cost.  Pages are charged the
- *		way genericcostestimate charges them: random_page_cost of the
- *		index's tablespace per page, and for a scan repeated loop_count
- *		times inside a nestloop the Mackert-Lohman estimate of the pages
- *		actually fetched, divided by the number of repetitions.
+ *		Cost of reading the given number of index entries sequentially, charged
+ *		as genericcostestimate does: random_page_cost of the tablespace per
+ *		page, and for a scan repeated loop_count times the Mackert-Lohman
+ *		estimate of the pages fetched, divided by the repetitions.
  */
 static Cost
 index_read_cost(PlannerInfo *root, IndexOptInfo *index, double entries,
@@ -124,16 +116,14 @@ index_read_cost(PlannerInfo *root, IndexOptInfo *index, double entries,
 
 /*
  * lf_outer_index_correlation
- *		Correlation of the heap with the outer index, estimated the way
- *		btcostestimate estimates it for an Index Scan on that index: the
- *		correlation of its leading column, times 0.75 for a multicolumn
- *		index.  Zero (no correlation) when there are no statistics.
+ *		Correlation of the heap with the outer index, as btcostestimate
+ *		estimates it for an Index Scan on that index: of its leading column,
+ *		times 0.75 for a multicolumn index.  Zero without statistics.
  *
- * The node visits the heap rows in sort column order, which with the
- * leading columns fixed may well be more correlated than that.  But an
- * Index Scan on the outer index visits the same rows in the same order and
- * is costed with this estimate; giving the node a better one would let it
- * win on heap pages both plans read alike.
+ * With the leading columns fixed the rows may well be more correlated, but an
+ * Index Scan on the outer index visits the same rows in the same order and is
+ * costed with this estimate; a better one would let the node win on heap pages
+ * both plans read alike.
  */
 static double column_correlation(PlannerInfo *root, Index rti,
 								 AttrNumber attno);
@@ -153,9 +143,9 @@ lf_outer_index_correlation(PlannerInfo *root, Index rti, IndexOptInfo *outer)
 
 /*
  * column_var
- *		A Var for column attno of relation rti, with the column's type,
- *		typmod and collation, as the selectivity functions expect it.  A
- *		domain column gets its base type, which the operators are found for.
+ *		A Var for column attno of relation rti, as the selectivity functions
+ *		expect it.  A domain column gets its base type, which the operators
+ *		are found for.
  */
 static Var *
 column_var(PlannerInfo *root, Index rti, AttrNumber attno)
@@ -210,12 +200,10 @@ column_correlation(PlannerInfo *root, Index rti, AttrNumber attno)
 
 /*
  * heap_fetch_cost
- *		Cost of fetching the result rows from the heap, the counterpart of
- *		MySQL's get_sweep_read_cost, charged the way cost_index charges heap
- *		pages: the rows are visited in sort column order, so the number of
- *		pages lies between the perfectly correlated case (consecutive pages,
- *		read sequentially) and the uncorrelated case (Mackert-Lohman), and
- *		the squared correlation interpolates between them.
+ *		Cost of fetching the result rows from the heap, as cost_index charges
+ *		heap pages: the rows are visited in sort column order, so the pages lie
+ *		between the perfectly correlated case (consecutive, read sequentially)
+ *		and the uncorrelated one (Mackert-Lohman), by the squared correlation.
  */
 static Cost
 heap_fetch_cost(PlannerInfo *root, RelOptInfo *rel, double rows,
@@ -236,10 +224,7 @@ heap_fetch_cost(PlannerInfo *root, RelOptInfo *rel, double rows,
 										pages_scanned, root);
 	max_IO_cost = pages_fetched * spc_random_page_cost / loop_count;
 
-	/*
-	 * Correlated: the rows sit on consecutive pages, their share of the heap,
-	 * as cost_index computes it from the index selectivity.
-	 */
+	/* correlated: consecutive pages, the rows' share of the heap */
 	pages_fetched = 1.0;
 	if (rel->tuples > 0)
 		pages_fetched = ceil(rows / rel->tuples * rel->pages);
@@ -265,14 +250,10 @@ heap_fetch_cost(PlannerInfo *root, RelOptInfo *rel, double rows,
  * group_cost
  *		Cost of sorting the entries of each value of one inner stream and
  *		looking the outer entries up in them: log2 of the group size
- *		comparisons per entry.  The comparisons are inline
- *		ItemPointerCompare calls, not operator calls through the function
- *		manager, and are charged as cost_bitmap_tree_node charges the per-TID
- *		work of a bitmap: 0.1 * cpu_operator_cost each.  Measured
- *		(cost_bench.sh, two ordinary indexes, 15,000 entries, the same 118
- *		buffers as BitmapAnd): the node runs 3 times faster than BitmapAnd,
- *		while a full cpu_operator_cost per comparison made it the dearer
- *		plan.
+ *		comparisons per entry.  These are inline ItemPointerCompare calls, not
+ *		operator calls through the function manager, and are charged as
+ *		cost_bitmap_tree_node charges a bitmap's per-TID work: 0.1 *
+ *		cpu_operator_cost each.
  */
 static Cost
 group_cost(double outer_entries, double inner_entries, double group_size)
@@ -283,10 +264,10 @@ group_cost(double outer_entries, double inner_entries, double group_size)
 
 /*
  * loop_count_for
- *		How many times a path parameterized by outer_relids is expected to be
- *		rescanned inside a nestloop: the smallest row estimate among the
- *		outer rels, as indxpath.c's get_loop_count computes it (without the
- *		semijoin adjustment, which is private to that file).
+ *		Expected rescans of a path parameterized by outer_relids inside a
+ *		nestloop: the smallest row estimate among the outer rels, as
+ *		get_loop_count computes it (its semijoin adjustment is private to
+ *		indxpath.c).
  */
 static double
 loop_count_for(PlannerInfo *root, Relids outer_relids)
@@ -318,8 +299,7 @@ loop_count_for(PlannerInfo *root, Relids outer_relids)
  * node_qual_cost
  *		Cost of the quals the node evaluates on a fetched row: the rel's own
  *		restrictions and the clauses pushed down into a parameterized path,
- *		less those the streams enforce (lf_node_quals), as cost_index leaves
- *		out what the index enforces.
+ *		less those the streams enforce (lf_node_quals).
  */
 static void
 node_qual_cost(PlannerInfo *root, RelOptInfo *rel, ParamPathInfo *param_info,
@@ -375,20 +355,21 @@ lf_stream_min_cost(IndexOptInfo *index)
 
 /*
  * merge_read_cost
- *		Cost of reading the index streams through the merge, with the
- *		skip-ahead of find_common_value.  reads[] holds the entries of each
- *		stream inside the overlap and is updated to what the merge reads;
- *		ranks[] gets each stream's turn in the merge, sparsest first.
+ *		Cost of reading the streams through the merge, with the skip-ahead of
+ *		find_common_value.  reads[] holds each stream's entries inside the
+ *		overlap and is updated to what the merge reads; ranks[] gets each
+ *		stream's turn in the merge, sparsest first.
  *
  * A stream has to reach only the values every sparser stream agrees on.  With
  * the streams independent, the sparsest stream's entries are the first such
  * values, and each further stream keeps the share of them that it holds among
  * the table's rows.  With the matches spread evenly, a stream has
- * entries/values entries between two of those values.  Up to leapfrog.skip_after
- * of them are read one by one; a gap longer by more than two leaf pages is
- * crossed by one more descent of the B-tree, charged as btcostestimate charges a
- * descent plus the leaf page it lands on.  A shorter gap is read through: the
- * executor backs off from skips that land on the next leaf page (check_landing).
+ * entries/values entries between two of those values.  Up to
+ * leapfrog.skip_after of them are read one by one; a gap longer by more than
+ * two leaf pages is crossed by one more descent, charged as btcostestimate
+ * charges a descent plus the leaf page it lands on.  A shorter gap is read
+ * through: the executor backs off from skips that land on the next leaf page
+ * (check_landing).
  */
 static Cost
 merge_read_cost(PlannerInfo *root, IndexCandidate **streams, int nstreams,
@@ -445,12 +426,10 @@ merge_read_cost(PlannerInfo *root, IndexCandidate **streams, int nstreams,
 
 /*
  * lf_sortcol_ndistinct
- *		Number of distinct sortcol values in the whole relation, which
- *		divides the inner entries into TID groups.  Taken from the column
- *		statistics: estimate_num_groups would clamp it to the relation's row
- *		estimate after the query's restrictions, and with a unique sort
- *		column and a selective query the groups would come out hundreds of
- *		entries large instead of one.
+ *		Distinct sortcol values in the whole relation, which divide the inner
+ *		entries into TID groups.  From the column statistics: with a unique
+ *		sort column and a selective query, estimate_num_groups' clamp to the
+ *		row estimate would make groups of hundreds of entries instead of one.
  */
 double
 lf_sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -469,16 +448,8 @@ lf_sortcol_ndistinct(PlannerInfo *root, RelOptInfo *rel, Index rti,
 }
 
 /*
- * probe_range
- *		The smallest and the largest sortcol value of the stream, read from
- *		the index with one descent from each end, as get_actual_variable_range
- *		reads the ends of a column for the selectivity functions.  Only when
- *		every equality value is a constant at plan time: a parameterized path
- *		or a generic plan is costed without it.  Entries are read regardless
- *		of visibility (SnapshotAny); a dead entry at an end only widens the
- *		range.  The values are copied: they outlive the scan.  The result is
- *		cached in the candidate; returns false when the range cannot be
- *		probed.
+ * candidate_const_keys
+ *		The scan keys of a stream; false unless every equality value is a constant.
  */
 static bool
 candidate_const_keys(SortColumn *sort, IndexCandidate *candidate,
@@ -510,6 +481,16 @@ candidate_const_keys(SortColumn *sort, IndexCandidate *candidate,
 	return true;
 }
 
+/*
+ * probe_range
+ *		The smallest and the largest sortcol value of the stream, one descent
+ *		from each end, as get_actual_variable_range reads a column's ends.
+ *		Only when every equality value is a constant at plan time: a
+ *		parameterized path or a generic plan is costed without it.  Entries
+ *		are read regardless of visibility (SnapshotAny); a dead entry at an end
+ *		only widens the range.  The values are copied: they outlive the scan.
+ *		Cached in the candidate; false when the range cannot be probed.
+ */
 static bool
 probe_range(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *candidate)
 {
@@ -874,8 +855,7 @@ sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)
 
 /*
  * stream_holds_nulls
- *		Whether NULLs of the sort column can be in the stream's index: not in a
- *		partial index whose predicate rules them out, nor for a NOT NULL column.
+ *		Can the stream's index hold NULLs of the sort column?
  */
 static bool
 stream_holds_nulls(PlannerInfo *root, Index rti, SortColumn *sort,
@@ -903,10 +883,9 @@ stream_holds_nulls(PlannerInfo *root, Index rti, SortColumn *sort,
 
 /*
  * stream_holds_group
- *		Whether a stream has entries of the sort value, or NULLs: one descent,
- *		regardless of visibility as in probe_range, and the merge reads a dead
- *		entry as well.  Cached in the candidate, as the sets share it; only for
- *		a common value that would raise a cost.
+ *		Does the stream have entries of this value, or NULLs?  One descent,
+ *		cached in the candidate; SnapshotAny, as the merge reads dead entries
+ *		too.
  */
 static bool
 stream_holds_group(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *stream,
@@ -964,10 +943,8 @@ stream_holds_group(RangeTblEntry *rte, SortColumn *sort, IndexCandidate *stream,
 
 /*
  * streams_hold_group
- *		Whether every stream of the set holds the group.  The merge reads a
- *		group only when all the streams stand on its value; one that lacks it
- *		takes the others past it.  Without a probe, as is assumed everywhere,
- *		they do.
+ *		Does every stream hold the group?  The merge passes it otherwise.
+ *		Assumed without a probe.
  */
 static bool
 streams_hold_group(SortColumn *sort, StreamOverlap *overlap, Datum value,
@@ -988,8 +965,7 @@ streams_hold_group(SortColumn *sort, StreamOverlap *overlap, Datum value,
 
 /*
  * average_group_share
- *		Share of the table's rows in a value out of the most common ones: its
- *		part of what they and the NULLs leave.
+ *		Table share of a value outside the most common ones.
  */
 static double
 average_group_share(PlannerInfo *root, Index rti, SortColumn *sort,
@@ -1006,13 +982,9 @@ average_group_share(PlannerInfo *root, Index rti, SortColumn *sort,
 
 /*
  * first_group_share
- *		Share of the table's rows in the largest group the merge reads before
- *		the rows wanted, expected within the first ahead_limit of the table's
- *		rows from the end it starts at.  The NULLs when they come first, the
- *		most common values there that every stream holds, or an average group of
- *		the others.  Without a probe the overlap is taken for the whole column,
- *		as everywhere in the costing of such a path.  Looking only at the value
- *		at the end would miss a common value behind one row or dead entry.
+ *		Table share of the largest group read before the rows wanted, which
+ *		lie within ahead_limit of the table from the end the merge starts at.
+ *		Without a probe the overlap is the whole column.
  */
 static double
 first_group_share(PlannerInfo *root, Index rti, SortColumn *sort,
@@ -1079,9 +1051,8 @@ first_group_share(PlannerInfo *root, Index rti, SortColumn *sort,
 
 /*
  * group_part
- *		Part of a stream's entries in a group holding the given share of the
- *		table's rows.  A stream follows the table's distribution within its own
- *		range, so the group takes more of a stream with a narrower one.
+ *		Part of a stream's entries in a group with this table share, within the
+ *		stream's own range.
  */
 static double
 group_part(PlannerInfo *root, Index rti, SortColumn *sort,
@@ -1103,8 +1074,7 @@ group_part(PlannerInfo *root, Index rti, SortColumn *sort,
 
 /*
  * inner_group_limit
- *		Entries of one group that fit into a stream's share of work_mem, as the
- *		executor divides it among the inner streams.
+ *		Entries of one group that fit in a stream's share of work_mem.
  */
 static double
 inner_group_limit(int nstreams)
@@ -1114,11 +1084,8 @@ inner_group_limit(int nstreams)
 
 /*
  * first_group_cost
- *		What the inner streams pay for the largest group read before the rows
- *		wanted: its pages and entries, in proportion of the stream's, and
- *		sorting it unless it overflows work_mem.  Those rows lie
- *		limit/(matches + 1) of the overlap away, for a query on this relation
- *		alone with a known LIMIT, else one row away.
+ *		What the inner streams pay for that group before the rows wanted:
+ *		reading it, and sorting it unless it overflows work_mem.
  */
 static Cost
 first_group_cost(PlannerInfo *root, Index rti, SortColumn *sort,
@@ -1156,12 +1123,9 @@ first_group_cost(PlannerInfo *root, Index rti, SortColumn *sort,
 
 /*
  * groups_cost
- *		Cost of holding the groups of every inner stream, the largest by their
- *		own size: the NULLs and the most common values inside the overlap, then
- *		the rest at the average size.  A group over its share of work_mem is not
- *		sorted; every outer entry of its value, returned in *overflow_rows, is
- *		fetched from the heap and checked on the row.  Common values are not
- *		looked up in the streams unless they would overflow.
+ *		Grouping cost of all values: NULLs and common values inside the overlap
+ *		at their own size, the rest at the average.  *overflow_rows gets the
+ *		outer entries of groups over work_mem, checked on the heap instead.
  */
 static Cost
 groups_cost(PlannerInfo *root, Index rti, SortColumn *sort,
@@ -1230,20 +1194,18 @@ groups_cost(PlannerInfo *root, Index rti, SortColumn *sort,
 /*
  * stream_overlap
  *		Where the streams can meet: the merge reads only the entries inside
- *		the overlap of their sortcol ranges, skipping ahead into it, and
- *		matches can only lie there.  Sets the share of each stream's entries
- *		inside the overlap, and the factor that turns a row estimate made
- *		with the conditions independent over the whole table into one where
- *		they are independent inside the overlap:
+ *		the overlap of their sortcol ranges, and matches can only lie there.
+ *		Sets the share of each stream's entries inside the overlap, and the
+ *		factor that turns a row estimate with the conditions independent over
+ *		the whole table into one where they are independent inside the overlap:
  *
  *			rows' = rows * prod(share_i) / table_share^(nstreams - 1)
  *
  *		A stream is assumed to follow the table's distribution of sortcol
  *		within its own range.  All are 1 when a range cannot be probed; an
  *		empty overlap gives 0.  The range holds values only: the NULLs of a
- *		nullable column form one more group, which the streams that hold them
- *		may reach, so their share counts in those streams' and, when every
- *		stream holds them, in the table's.
+ *		nullable column form one more group, whose share counts in the streams
+ *		that hold them and, when every stream does, in the table's.
  */
 static void
 stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
@@ -1371,15 +1333,11 @@ lf_index_entries(PlannerInfo *root, Index rti, IndexCandidate *candidate)
 
 /*
  * stream_rows
- *		Rows of the relation that satisfy the conditions the streams
- *		enforce: the equalities of every stream and the predicates of the
- *		partial indexes, estimated the way the planner estimates the
- *		relation's rows from its restrictions.  The node fetches these rows
- *		from the heap; the remaining restrictions filter them afterwards.
- *		A predicate the other conditions imply restricts nothing further and
- *		is left out, as btcostestimate's add_predicate_to_index_quals does:
- *		kind = 2 would otherwise count twice for an equality kind = 2 and a
- *		predicate kind = 2.
+ *		Rows that satisfy what the streams enforce: their equalities and the
+ *		predicates of partial indexes.  The node fetches these from the heap.
+ *		A predicate the other conditions imply is left out, as in
+ *		btcostestimate's add_predicate_to_index_quals: kind = 2 would otherwise
+ *		count twice for an equality kind = 2 and a predicate kind = 2.
  */
 static double
 stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -1411,16 +1369,14 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 /*
  * lf_cost_intersect_path
- *		Set the rows, startup and total cost of an Index Merge Intersect path
- *		whose parameterization is set and whose rows hold the planner's
- *		estimate for the relation, as cost_index does for an index path.
- *		streams[0] is the outer index; every candidate has its entries set.
- *		sort is the column the query sorts by.  ndistinct is
- *		lf_sortcol_ndistinct, correlation
- *		lf_outer_index_correlation of the outer index.  Returns in reads[]
- *		the entries each stream is expected to read, for EXPLAIN VERBOSE, and
- *		in ranks[] its turn in the merge, and in *fetch_cost what the rows
- *		fetched from the heap cost: all a further stream can save.
+ *		Set the rows, startup and total cost of a path whose parameterization
+ *		is set and whose rows hold the planner's estimate for the relation, as
+ *		cost_index does.  streams[0] is the outer index; every candidate has
+ *		its entries set.  ndistinct is lf_sortcol_ndistinct, correlation
+ *		lf_outer_index_correlation of the outer index.  Returns the entries
+ *		each stream is expected to read in reads[] (EXPLAIN VERBOSE), its turn
+ *		in the merge in ranks[], and in *fetch_cost what the rows fetched from
+ *		the heap cost: all a further stream can save.
  */
 void
 lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
@@ -1479,11 +1435,9 @@ lf_cost_intersect_path(CustomPath *cpath, PlannerInfo *root,
 								   &overlap, ndistinct, matches, loop_count);
 
 	/*
-	 * Reading the indexes, grouping the entries of each value of every inner
-	 * stream, fetching the agreed rows and running the qual on them, the
-	 * target list on the result rows.  The heap fetches are charged as for an
-	 * Index Scan on the outer index (see lf_outer_index_correlation); so are
-	 * the outer entries of a group that overflows work_mem.
+	 * The heap fetches, and the outer entries of a group that overflows
+	 * work_mem, are charged as for an Index Scan on the outer index (see
+	 * lf_outer_index_correlation).
 	 */
 	run_cost = merge_read_cost(root, streams, nstreams, reads, ranks,
 							   rel->tuples, loop_count);

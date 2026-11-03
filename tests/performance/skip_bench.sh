@@ -1,34 +1,16 @@
 #!/usr/bin/env bash
-# Skip-ahead threshold benchmark.
+# Skip-ahead threshold benchmark: (a, id) or (b, id) with partial indexes on id whose
+# deleted rows are uniform or in clusters with short, medium and long gaps, under
+# leapfrog.force, at every leapfrog.skip_after in THRESHOLDS (0 = no skipping).
 #
-# One table of ROWS rows with two filter columns, a (2 values, 50 %) and
-# b (100 values, 1 %), and four partial indexes on id: deleted rows spread
-# uniformly (1 %), and deleted rows in clusters of 20 ids every 2,000,
-# 20,000 and 200,000 ids (gaps short, medium and long).  Each query
-# intersects (a, id) or (b, id) with one of them under leapfrog.force, at
-# every starting threshold in THRESHOLDS (leapfrog.skip_after; 0 = no
-# skipping; the executor adapts it per side from there), and records the shared
-# buffers the plan touched (and of them read from outside shared buffers),
-# the index entries read, the skips and the median execution time over
-# REPEATS runs after a warm-up.
-#
-# Cold cache: with COLD_CMD set, that command runs before every measurement
-# and the query runs once, without a warm-up.  It must empty both caches:
-# restart the server (shared buffers) and drop the OS page cache, which needs
-# root on the machine the data lives on, for example
-#
+# Cold cache: COLD_CMD runs before every measurement, and must empty both caches:
 #   COLD_CMD='docker compose restart postgres &&
 #             sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"' \
 #     bash tests/performance/skip_bench.sh
 #
-# The script waits for the server (pg_isready) after the command.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
-# bench_db.sh); ROWS (1000000), THRESHOLDS ("0 128 256 512 1024 2048"),
-# REPEATS (5), COLD_CMD (unset), BENCH_OUT (a directory that must not exist
-# yet).
-# Output: tests/performance/results/skip-<timestamp>/skip.csv and a summary
-# on stdout.
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); ROWS (1000000),
+# THRESHOLDS ("0 128 256 512 1024 2048"), REPEATS (5), COLD_CMD (unset), BENCH_OUT
+# (must not exist).  Output: results/skip-<timestamp>/skip.csv and a summary.
 set -euo pipefail
 
 cd "$(dirname "$0")"
