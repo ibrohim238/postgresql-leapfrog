@@ -8,8 +8,7 @@
 # anything is dropped.  The server is reached through PGHOST/PGPORT/PGUSER;
 # CREATE DATABASE runs from BENCH_ADMIN_DB (default postgres).
 #
-# The database is kept after a run (types_bench.sh reuses its table across
-# builds); drop it with bench_db_drop or dropdb.
+# The database is kept after a run; drop it with bench_db_drop or dropdb.
 #
 # One benchmark at a time per database: two would drop each other's tables,
 # and their timings would disturb each other anyway.  A run holds an

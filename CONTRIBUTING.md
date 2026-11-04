@@ -108,7 +108,7 @@ visibility).
   predicate must stay (EvalPlanQual);
 - `costsize.c`: `lf_cost_intersect_path` — cost; accompany cost model changes
   with `tests/performance/cost_bench.sh` and a benchmark run
-  (`tests/performance/run.sh`), and update the "Cost model" section of the
+  (`tests/performance/list_bench.sh`), and update the "Cost model" section of the
   README;
 - `planner.c`: `intersect_plan_path` — plan dependencies (`relationOids`) and
   `custom_exprs` (outer `Var`s become nestloop parameters in

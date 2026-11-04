@@ -113,7 +113,7 @@ test-isolation:
 	$(pg_isolation_regress_installcheck) $(ISOLATION_OPTS) $(ISOLATION)
 
 bench:
-	bash tests/performance/run.sh
+	bash tests/performance/list_bench.sh
 
 bench-smoke:
 	bash tests/scripts/bench-smoke.sh

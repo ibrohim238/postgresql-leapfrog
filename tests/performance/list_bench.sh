@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
-# The list query with rare, scattered matches:
-#   customer_id = ? AND deleted_at IS NULL [AND product_id = ?] ORDER BY id DESC LIMIT 100
-# on a table whose rows are in random physical order (ORDER=id loads them in id order).
+# The list query with rare, scattered matches, one scenario at a time, the way a test
+# looks at one case: each has its query and its exact index, its results in a directory
+# of its own, and runs without the exact index of another.
 #
-# Table: SIZE rows, 5 % of them live. Customer 4 has 1 % of the rows and customer 5
-# has 5 %, each with one live row per 200,000 ids (500 at 100M rows); product 120 has
-# 2 %. Indexes (customer_id, id), (product_id, id), (id) WHERE deleted_at IS NULL.
+#   large_customer  a customer with 5 % of the rows, one live per 200,000 ids
+#   small_customer  a customer with 1 % of the rows, one live per 200,000 ids
+#   two_filters     that customer and a product with 2 % of the rows
 #
-# Queries: small (customer 4), big (customer 5), small_product (customer 4 and
-# product 120). Modes, in ABBA order:
+# At 100M rows each customer has 500 live rows and the two filters share 20,012 rows, 11
+# live. Below 20M rows the customers have fewer than the query's LIMIT 100 and it never
+# stops early: another workload, which a warning says.
+#
+# Table: SIZE rows in random physical order (ORDER=id: in id order), 5 % of them live.
+# Indexes (customer_id, id), (product_id, id), (id) WHERE deleted_at IS NULL. Loaded once.
+#
+# Modes, in ABBA order:
 #   node    leapfrog on, stock scans disabled
 #   bitmap  leapfrog off, a bitmap plan
 #   indexscan  leapfrog off, an Index Scan with a Filter
 #   stock   leapfrog off, the planner's choice
 #   auto    leapfrog on, the planner's choice
-#   exact   leapfrog off, with (customer_id, id) WHERE deleted_at IS NULL and
-#           (customer_id, product_id, id) WHERE deleted_at IS NULL; runs last
-# Text plans of node, stock and exact per query go to explain-<query>-<mode>.txt.
+#   exact   leapfrog off, with the scenario's exact index; runs last
+# Text plans of node, stock and exact go to explain-<mode>.txt.
 #
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); SIZE (1000000),
-# ORDER (random | id), QUERIES ("small big small_product"), REPEATS (3), WARMUP (1),
-# WORK_MEM (server's), EXACT (1), BENCH_OUT (must not exist). Output in results/list-<timestamp>/: runs.csv,
-# summary.csv, sizes.csv, server.txt, explain-*.txt.
+# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); SCENARIOS (all three),
+# SIZE (1000000), ORDER (random | id), REPEATS (3), WARMUP (1), WORK_MEM (server's),
+# EXACT (1), BENCH_OUT (must not exist). Output in results/list-<timestamp>/: server.txt,
+# sizes.csv, and <scenario>/ with runs.csv, summary.csv and explain-*.txt.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -34,7 +39,17 @@ WARMUP=${WARMUP:-1}
 WORK_MEM=${WORK_MEM:-}
 EXACT=${EXACT:-1}
 MODES="node bitmap indexscan stock auto"
-QUERIES=${QUERIES:-"small big small_product"}
+SCENARIOS=${SCENARIOS:-"large_customer small_customer two_filters"}
+
+for name in $SCENARIOS; do
+	case $name in
+		large_customer|small_customer|two_filters) ;;
+		*) echo "list_bench.sh: unknown scenario $name" >&2; exit 1 ;;
+	esac
+done
+if [ "$SIZE" -lt 20000000 ]; then
+	echo "list_bench.sh: at $SIZE rows the customers have fewer than 100 live rows: LIMIT 100 never stops early" >&2
+fi
 
 case $ORDER in
 	random) order="ORDER BY hashint8(g * 4 + 7)" ;;
@@ -89,14 +104,6 @@ $PSQL <<-'SQL'
 	$$;
 SQL
 
-query() {
-	case $1 in
-		small) echo "SELECT * FROM lf_list WHERE customer_id = 4 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
-		big) echo "SELECT * FROM lf_list WHERE customer_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
-		small_product) echo "SELECT * FROM lf_list WHERE customer_id = 4 AND product_id = 120 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" ;;
-	esac
-}
-
 # mode_settings <mode>: the SET lines of lf_list_run, for the text plans
 mode_settings() {
 	local lf=off ss=off is=off bs=off
@@ -110,34 +117,63 @@ mode_settings() {
 	echo "SET leapfrog.enabled = $lf; SET enable_seqscan = $ss; SET enable_indexscan = $is; SET enable_indexonlyscan = $is; SET enable_bitmapscan = $bs;"
 }
 
+$PSQL <<-'SQL'
+	CREATE VIEW lf_list_metrics AS
+	SELECT query, mode, run,
+		coalesce(n ->> 'Custom Plan Provider',
+				 (SELECT string_agg(DISTINCT (m ->> 'Node Type') || coalesce(' on ' || (m ->> 'Index Name'), ''), '+')
+				  FROM jsonb_path_query(plan, 'strict $.Plan.**') m
+				  WHERE m ->> 'Node Type' IN ('BitmapAnd', 'Bitmap Heap Scan', 'Index Scan', 'Seq Scan', 'Sort'))) AS node,
+		(plan ->> 'Execution Time')::float8 AS exec_ms,
+		(plan -> 'Plan' ->> 'Shared Hit Blocks')::bigint
+			+ (plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers,
+		(plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers_read,
+		(SELECT sum((s ->> 'Entries Read')::bigint) FROM jsonb_array_elements(n -> 'Index Streams') s) AS index_entries,
+		(n ->> 'Heap Fetches')::bigint AS heap_fetches,
+		(plan -> 'Plan' ->> 'Actual Rows')::float8 AS rows
+	FROM (SELECT *, jsonb_path_query_first(plan, '$.** ? (exists(@."Custom Plan Provider"))') AS n
+		  FROM lf_list_runs) r;
+SQL
+
+# scenario <name>: its query and exact index
+scenario() {
+	local exact_two="CREATE INDEX lf_list_exact ON lf_list (customer_id, product_id, id) WHERE deleted_at IS NULL"
+	local exact_one="CREATE INDEX lf_list_exact ON lf_list (customer_id, id) WHERE deleted_at IS NULL"
+	case $1 in
+		large_customer)
+			case_query="SELECT * FROM lf_list WHERE customer_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100"
+			case_exact=$exact_one ;;
+		small_customer)
+			case_query="SELECT * FROM lf_list WHERE customer_id = 4 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100"
+			case_exact=$exact_one ;;
+		two_filters)
+			case_query="SELECT * FROM lf_list WHERE customer_id = 4 AND product_id = 120 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100"
+			case_exact=$exact_two ;;
+	esac
+}
+
 run_modes() {
-	local modes=$1 name q run ms mode
-	for name in $QUERIES; do
-		q=$(query "$name")
-		echo "   $name: $modes"
-		{
-			echo "$settings"
-			for run in $(seq $((1 - WARMUP)) "$REPEATS"); do
-				if [ $((run % 2)) -eq 0 ]; then ms=$modes; else ms=$(echo $modes | tr ' ' '\n' | tac | tr '\n' ' '); fi
-				for mode in $ms; do
-					echo "SELECT lf_list_run('$name', '$mode', $run, \$q\$$q\$q\$);"
-				done
+	local modes=$1 run ms mode
+	echo "   $name: $modes"
+	{
+		echo "$settings"
+		for run in $(seq $((1 - WARMUP)) "$REPEATS"); do
+			if [ $((run % 2)) -eq 0 ]; then ms=$modes; else ms=$(echo $modes | tr ' ' '\n' | tac | tr '\n' ' '); fi
+			for mode in $ms; do
+				echo "SELECT lf_list_run('$name', '$mode', $run, \$q\$$case_query\$q\$);"
 			done
-		} | $PSQL -v work_mem="$WORK_MEM" >/dev/null
-	done
+		done
+	} | $PSQL -v work_mem="$WORK_MEM" >/dev/null
 }
 
 text_plans() {
-	local name q mode
-	for name in $QUERIES; do
-		q=$(query "$name")
-		for mode in "$@"; do
-			{
-				echo "$settings"
-				mode_settings "$mode"
-				echo "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) $q;"
-			} | $PSQL -v work_mem="$WORK_MEM" > "$out/explain-$name-$mode.txt"
-		done
+	local mode
+	for mode in "$@"; do
+		{
+			echo "$settings"
+			mode_settings "$mode"
+			echo "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) $case_query;"
+		} | $PSQL -v work_mem="$WORK_MEM" > "$out/$name/explain-$mode.txt"
 	done
 }
 
@@ -174,54 +210,39 @@ $PSQL -tAc "SELECT 'customer ' || customer_id || ': ' || count(*) || ' rows, ' |
 	FROM lf_list WHERE customer_id IN (4, 5) GROUP BY customer_id
 	UNION ALL SELECT 'live rows: ' || count(*) FROM lf_list WHERE deleted_at IS NULL" >> "$out/server.txt"
 
-run_modes "$MODES"
-text_plans node stock
-if [ "$EXACT" = 1 ]; then
-	echo "   exact: indexes"
-	$PSQL <<-SQL
-		CREATE INDEX lf_list_exact ON lf_list (customer_id, id) WHERE deleted_at IS NULL;
-		CREATE INDEX lf_list_exact_product ON lf_list (customer_id, product_id, id) WHERE deleted_at IS NULL;
-		ANALYZE lf_list;
-	SQL
-	run_modes exact
-	text_plans exact
-fi
+for name in $SCENARIOS; do
+	scenario "$name"
+	mkdir "$out/$name"
+	echo "== $name"
+	run_modes "$MODES"
+	text_plans node stock
+	if [ "$EXACT" = 1 ]; then
+		$PSQL -c "$case_exact" -c "ANALYZE lf_list"
+		run_modes exact
+		text_plans exact
+		$PSQL -c "INSERT INTO lf_list_sizes
+			SELECT '$name: lf_list_exact', pg_relation_size('lf_list_exact')"
+		$PSQL -c "DROP INDEX lf_list_exact" -c "ANALYZE lf_list"
+	fi
+	$PSQL -c "\\copy (SELECT * FROM lf_list_metrics WHERE query = '$name' ORDER BY mode, run) TO '$out/$name/runs.csv' CSV HEADER"
+	$PSQL -c "\\copy (SELECT query, mode, mode() WITHIN GROUP (ORDER BY node) AS node, count(*) AS runs,
+		round(percentile_cont(0.5) WITHIN GROUP (ORDER BY exec_ms)::numeric, 3) AS exec_median,
+		round(min(exec_ms)::numeric, 3) AS exec_min, round(max(exec_ms)::numeric, 3) AS exec_max,
+		percentile_disc(0.5) WITHIN GROUP (ORDER BY buffers) AS buffers,
+		max(buffers_read) AS max_buffers_read,
+		percentile_disc(0.5) WITHIN GROUP (ORDER BY index_entries) AS index_entries,
+		max(heap_fetches) AS heap_fetches, max(rows) AS rows
+		FROM lf_list_metrics WHERE query = '$name' GROUP BY 1, 2
+		ORDER BY array_position(ARRAY['exact', 'node', 'auto', 'stock', 'indexscan', 'bitmap'], mode)) TO '$out/$name/summary.csv' CSV HEADER"
+	echo "== $name"
+	column -s, -t < "$out/$name/summary.csv" 2>/dev/null || cat "$out/$name/summary.csv"
+done
 $PSQL -c "INSERT INTO lf_list_sizes
 	SELECT c.relname, pg_relation_size(c.oid) FROM pg_class c
 	WHERE c.oid = 'lf_list'::regclass
 		OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'lf_list'::regclass)"
 $PSQL -c "DROP TABLE IF EXISTS lf_list"
 
-$PSQL <<-'SQL'
-	CREATE VIEW lf_list_metrics AS
-	SELECT query, mode, run,
-		coalesce(n ->> 'Custom Plan Provider',
-				 (SELECT string_agg(DISTINCT (m ->> 'Node Type') || coalesce(' on ' || (m ->> 'Index Name'), ''), '+')
-				  FROM jsonb_path_query(plan, 'strict $.Plan.**') m
-				  WHERE m ->> 'Node Type' IN ('BitmapAnd', 'Bitmap Heap Scan', 'Index Scan', 'Seq Scan', 'Sort'))) AS node,
-		(plan ->> 'Execution Time')::float8 AS exec_ms,
-		(plan -> 'Plan' ->> 'Shared Hit Blocks')::bigint
-			+ (plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers,
-		(plan -> 'Plan' ->> 'Shared Read Blocks')::bigint AS buffers_read,
-		(SELECT sum((s ->> 'Entries Read')::bigint) FROM jsonb_array_elements(n -> 'Index Streams') s) AS index_entries,
-		(n ->> 'Heap Fetches')::bigint AS heap_fetches,
-		(plan -> 'Plan' ->> 'Actual Rows')::float8 AS rows
-	FROM (SELECT *, jsonb_path_query_first(plan, '$.** ? (exists(@."Custom Plan Provider"))') AS n
-		  FROM lf_list_runs) r;
-SQL
-
-$PSQL -c "\\copy (SELECT * FROM lf_list_metrics ORDER BY query, mode, run) TO '$out/runs.csv' CSV HEADER"
-$PSQL -c "\\copy (SELECT query, mode, mode() WITHIN GROUP (ORDER BY node) AS node, count(*) AS runs,
-	round(percentile_cont(0.5) WITHIN GROUP (ORDER BY exec_ms)::numeric, 3) AS exec_median,
-	round(min(exec_ms)::numeric, 3) AS exec_min, round(max(exec_ms)::numeric, 3) AS exec_max,
-	percentile_disc(0.5) WITHIN GROUP (ORDER BY buffers) AS buffers,
-	max(buffers_read) AS max_buffers_read,
-	percentile_disc(0.5) WITHIN GROUP (ORDER BY index_entries) AS index_entries,
-	max(heap_fetches) AS heap_fetches, max(rows) AS rows
-	FROM lf_list_metrics GROUP BY 1, 2
-	ORDER BY array_position(ARRAY['small', 'big', 'small_product'], query),
-		array_position(ARRAY['exact', 'node', 'auto', 'stock', 'indexscan', 'bitmap'], mode)) TO '$out/summary.csv' CSV HEADER"
 $PSQL -c "\\copy (SELECT * FROM lf_list_sizes ORDER BY 1) TO '$out/sizes.csv' CSV HEADER"
 
-column -s, -t < "$out/summary.csv" 2>/dev/null || cat "$out/summary.csv"
 echo "list_bench: results in $out"

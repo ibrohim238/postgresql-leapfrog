@@ -3,6 +3,25 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- README shows two measurements only: the list query with rare, scattered matches
+  at 100M rows, with the plans, and the write comparison; the rest is in
+  BENCHMARKS.md.
+- `bitmap_bench.sh` is `uniform_bench.sh`, named after its data.
+- `list_bench.sh` runs each scenario separately, with its own exact index and results
+  directory; `SCENARIOS` picks them, in place of `QUERIES`. The Compose `bench` profile,
+  `make bench` and the manual CI job run it, and `bench-smoke` checks the harness
+  through it.
+
+### Removed
+
+- `run.sh` with `bench.sql`, `schema.sql`, `summarize.sh` and `choices.sql`,
+  `types_bench.sh`, `types_compare.sh`, `skip_bench.sh`; the regression test
+  `leapfrog_skip` checks the skip-ahead counters.
+
 ## [0.0.5] — 2026-11-04
 
 ### Added
