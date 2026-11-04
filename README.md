@@ -215,70 +215,72 @@ ORDER BY id DESC LIMIT 100;
 
 | Exact index | leapfrog | Stock | `BitmapAnd` |
 |---:|---:|---:|---:|
-| **0.08 ms** | **206 ms** (2.3 s) | `BitmapAnd` 1.1 s (1.7 s) | 1.7 s (1.7 s) |
+| **0.03 ms** | **252 ms** (1.3 s) | `BitmapAnd` 746 ms (1.5 s) | 1.1 s (1.5 s) |
 
 No `LIMIT` to stop at: 11 rows exist and the query asks for 100, so every plan reads
 to the end. Stock picks `BitmapAnd`, which reads all 3M entries of both filters and
 sorts. The node merges the same entries, fetches the 20,012 rows in common and keeps
-the 11 live ones. From disk it is the slower one, which is the 2.3 s: it fetches those
-rows one at a time, while a Bitmap Heap Scan asks for its pages ahead. This is the edge
-of what the node is for: a frequent query of this shape wants its exact index.
+the 11 live ones. The brackets are from disk, cache evicted before each run. Since the
+`Filter` drops nearly every row, the node gathers matches ahead and asks for their heap
+pages (`Heap Prefetches`): 1.3 s against 2.4 s without it. This is the edge of what the
+node is for: a frequent query of this shape wants its exact index.
 
-Both plans with the pages in cache, from a second load of the same data. leapfrog:
+Both plans from disk. leapfrog:
 
 ```text
- Limit (actual time=7.307..206.034 rows=11.00 loops=1)
-   Buffers: shared hit=31516
-   ->  Custom Scan (Index Merge Intersect) on lf_list (actual time=7.305..206.025 rows=11.00 loops=1)
+ Limit (actual time=33.289..1287.042 rows=11.00 loops=1)
+   Buffers: shared hit=773 read=30743
+   ->  Custom Scan (Index Merge Intersect) on lf_list (actual time=33.287..1287.024 rows=11.00 loops=1)
          Filter: (deleted_at IS NULL)
          Rows Removed by Filter: 20001
          Matched TIDs: 20012
          Heap Fetches: 20012
+         Heap Prefetches: 20011
          Peak Group Memory: 96 B
-         ->  Outer Stream on lf_list_product_id_id_idx (actual time=0.006..60.608 rows=2001433.00 loops=1)
+         ->  Outer Stream on lf_list_product_id_id_idx (actual time=0.010..525.528 rows=2001433.00 loops=1)
                Index Cond: (product_id = 120)
                Prefetches: 7669
-               Buffers: shared hit=7673
-         ->  Inner Stream on lf_list_customer_id_id_idx (actual time=0.014..29.591 rows=999058.00 loops=1)
+               Buffers: shared hit=5 read=7668
+         ->  Inner Stream on lf_list_customer_id_id_idx (actual time=0.025..77.833 rows=999058.00 loops=1)
                Index Cond: (customer_id = 4)
                Prefetches: 3828
-               Buffers: shared hit=3831
-         Buffers: shared hit=31516
+               Buffers: shared hit=5 read=3826
+         Buffers: shared hit=773 read=30743
  Planning:
-   Buffers: shared hit=146 read=24
- Planning Time: 5.885 ms
- Execution Time: 206.077 ms
+   Buffers: shared hit=128 read=44 dirtied=1
+ Planning Time: 9.544 ms
+ Execution Time: 1287.112 ms
 ```
 
 Stock:
 
 ```text
- Limit (actual time=669.192..669.196 rows=11.00 loops=1)
-   Buffers: shared hit=31401
-   ->  Sort (actual time=669.190..669.193 rows=11.00 loops=1)
+ Limit (actual time=1543.183..1543.189 rows=11.00 loops=1)
+   Buffers: shared hit=573 read=30828
+   ->  Sort (actual time=1543.181..1543.184 rows=11.00 loops=1)
          Sort Key: id DESC
          Sort Method: quicksort  Memory: 26kB
-         Buffers: shared hit=31401
-         ->  Bitmap Heap Scan on lf_list (actual time=641.214..669.159 rows=11.00 loops=1)
+         Buffers: shared hit=573 read=30828
+         ->  Bitmap Heap Scan on lf_list (actual time=1035.666..1543.120 rows=11.00 loops=1)
                Recheck Cond: ((customer_id = 4) AND (product_id = 120))
                Filter: (deleted_at IS NULL)
                Rows Removed by Filter: 20001
                Heap Blocks: exact=19891
-               Buffers: shared hit=31398
-               ->  BitmapAnd (actual time=632.529..632.530 rows=0.00 loops=1)
-                     Buffers: shared hit=11507
-                     ->  Bitmap Index Scan on lf_list_customer_id_id_idx (actual time=208.146..208.147 rows=999058.00 loops=1)
+               Buffers: shared hit=570 read=30828
+               ->  BitmapAnd (actual time=991.926..991.927 rows=0.00 loops=1)
+                     Buffers: shared hit=3 read=11504
+                     ->  Bitmap Index Scan on lf_list_customer_id_id_idx (actual time=306.524..306.525 rows=999058.00 loops=1)
                            Index Cond: (customer_id = 4)
                            Index Searches: 1
-                           Buffers: shared hit=3834
-                     ->  Bitmap Index Scan on lf_list_product_id_id_idx (actual time=385.448..385.448 rows=2001436.00 loops=1)
+                           Buffers: shared hit=3 read=3831
+                     ->  Bitmap Index Scan on lf_list_product_id_id_idx (actual time=630.194..630.194 rows=2001436.00 loops=1)
                            Index Cond: (product_id = 120)
                            Index Searches: 1
-                           Buffers: shared hit=7673
+                           Buffers: shared read=7673
  Planning:
-   Buffers: shared hit=125
- Planning Time: 0.513 ms
- Execution Time: 673.992 ms
+   Buffers: shared hit=101 read=26
+ Planning Time: 3.560 ms
+ Execution Time: 1549.398 ms
 ```
 
 ## Why index composition matters
@@ -642,7 +644,7 @@ replaces the file instead of rewriting it.
 | `leapfrog.force` | `off` | `USERSET` | The node is preferred over every other plan whenever a suitable set of indexes exists (the counterpart of MySQL's `INDEX_MERGE` hint); among several sets the cheapest still wins. The plan-time check of the group estimate against `work_mem` is skipped as well. **Diagnostic setting**: it can make a query many times slower. |
 | `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search. |
 | `leapfrog.min_indexes` | `2` | `USERSET` | Developer setting: smaller sets are not offered and the set that reaches the size is offered whatever its cost, so that a larger set can be run against the stock plans (the tests use it). Not in `postgresql.conf.sample`. |
-| `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
+| `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page; where the node's `Filter` drops more rows than it passes, up to `effective_io_concurrency` matches are gathered ahead and their heap pages asked for. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
 | `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by the tests; not in `postgresql.conf.sample`. |
 | `leapfrog.trace_planner` | `off` | `USERSET` | Developer setting: a `NOTICE` with what planning did (candidates, sets costed, range scans, statistics reads, fallbacks, correlations, candidates pruned); the tests check the planner by these counts. |
 
@@ -698,6 +700,7 @@ Custom Scan (Index Merge Intersect) on orders (actual time=0.100..2.485 rows=100
 | `Group Overflows` of a stream | how many times a value's group in this inner stream exceeded its share of `work_mem`. |
 | `Matched TIDs` | entries found by TID in every stream. |
 | `Heap Fetches` | `index_fetch_heap` calls (including HOT chain continuations). |
+| `Heap Prefetches` | heap pages asked for ahead of time (`leapfrog.prefetch`), when any: only where the `Filter` drops more rows than it passes. |
 | `Rows Removed by Filter` | the standard counter of rows dropped by `Filter`. |
 | `Peak Group Memory` | largest total capacity of the TID group arrays, bytes. |
 | `Rows Checked by Predicate` | outer rows of overflowed groups fetched and checked that way, when a group overflowed. |
@@ -762,6 +765,7 @@ Regression tests (`sql/`):
 | `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 | `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
 | `leapfrog_planner` | by the counts of `leapfrog.trace_planner`: statistics, ranges and correlations read once, a stream that cannot pay for itself pruned; the estimate from the statistics read once, also inside one histogram bin |
+| `leapfrog_heap_prefetch` | matches gathered ahead where the `Filter` drops most rows: results and order against the stock plans, `LIMIT`, non-unique sort column, rescans, a cursor, `FOR UPDATE`, dead rows and HOT chains; none without a `Filter` or where it passes most rows, or with the setting off; a group overflowing `work_mem` after a queue, with two and three streams |
 | `leapfrog_first_group` | startup cost against the group read first: a common value at the end of the range, behind a row or a dead entry (the Index Scan then chosen), in a generic plan, without a histogram, within reach of a `LIMIT`; a value or NULLs one stream does not hold; a group overflowing `work_mem`, first or further on; sorting a later group; a stream with a narrow range; the group of the NULLs, also with ranges that do not meet, and partial indexes without NULLs; a value out of the most common ones; a unique sort column; a set quicker to start offered next to the cheapest |
 
 Every `lf_check(query)` runs the query with the stock plan and with

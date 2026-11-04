@@ -51,7 +51,8 @@ REGRESS = \
 	leapfrog_index_order \
 	leapfrog_merge_order \
 	leapfrog_planner \
-	leapfrog_first_group
+	leapfrog_first_group \
+	leapfrog_heap_prefetch
 
 ISOLATION = \
 	leapfrog_concurrent_update \

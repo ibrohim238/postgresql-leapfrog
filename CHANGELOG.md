@@ -5,6 +5,17 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Heap prefetch: where the node's `Filter` drops more rows than it passes, matches are
+  gathered ahead, doubling up to `effective_io_concurrency`, their heap pages asked for
+  and the rows fetched in the same order. A node without a `Filter`, or whose `Filter`
+  passes most rows, still fetches one match at a time, so that a `LIMIT` reads no further
+  in the indexes. MVCC snapshots only; under `leapfrog.prefetch`. `EXPLAIN ANALYZE` counts
+  the pages as `Heap Prefetches`; test in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query
+  fetching 20,012 rows for 11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm,
+  no change (BENCHMARKS.md, "Heap prefetch").
+
 ### Changed
 
 - README shows two measurements only: the list query with rare, scattered matches

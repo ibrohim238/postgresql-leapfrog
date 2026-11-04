@@ -1106,16 +1106,32 @@ cache differing from run to run:
 | customer 4 (1M rows) | 0.19 (0.19) | 44 (44) | 56 (79) | Index Scan 776 (1,102) | 768 (2,719) | 772 (919) |
 | customer 4 and product 120 | 0.08 (0.09) | 212 (219) | 206 (213) | `BitmapAnd` 1,085 (1,689) | 87,363 (87,857) | 1,682 (1,683) |
 
-The slowest runs of the third query's node were warm too: `max_buffers_read` is 1. Its
-text plan, the first run after the load, read 30,743 pages and took 2,318 ms, against
-`BitmapAnd`'s 1,689 from disk: the 20,012 heap rows are fetched one at a time, the Bitmap
-Heap Scan asks for its pages ahead. The first two queries fetch 100 heap rows and do not
-show this.
-
 `write_bench.sh` on the same commit, `BASE_ROWS=20000000 STRATEGIES="M G"`, one run: index
 size M 11.2 GB, G 8.0 GB; WAL within 0.2 % of the earlier run for every operation (`INSERT`
 3,600 and 166 MB, `UPDATE` of a filter column 1,004 and 70 MB, of `deleted_at` 46 and
 77 MB, `DELETE` 18 MB each); `INSERT` 935 and 11,526 rows per second.
+
+### Heap prefetch, the third query from disk
+
+The third query fetches 20,012 heap rows and keeps 11. One load of the same data, 100M
+rows in random order, on the working tree after `396a078`; ad hoc script, not in the
+repository. Heap prefetch on and off in ABBA order, off being `effective_io_concurrency = 1`,
+which leaves the leaf page prefetch as it is. Before each cold run the large customer's
+Index Scan evicted the caches: 30,743 pages read from outside `shared_buffers` in each. One
+run per line, ms:
+
+| Plan | Cold, each run | Cold, median | Warm, median of 4 |
+|---|---|---:|---:|
+| Node, heap prefetch on | 1,287 1,291 1,230 | **1,287** | 164 |
+| Node, heap prefetch off | 2,425 2,406 2,355 | 2,406 | 162 |
+| `BitmapAnd` | 1,549 1,488 1,480 | 1,488 | |
+
+From disk the prefetch takes the node from 1.6× slower than `BitmapAnd` to 13 % faster;
+warm the cost is within the spread of the runs. In a separate load through `list_bench.sh`
+(`SCENARIOS=two_filters`): exact 0.03, node 258 and the planner's node 252, stock's
+`BitmapAnd` 746, forced `BitmapAnd` 1,132, warm medians of 3. Warm times differ between
+loads with the same work (164 against 252 here, 206 above), so they compare within one
+load only.
 
 ### Two filters, 100 matches spread one per million ids
 
