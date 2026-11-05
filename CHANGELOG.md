@@ -13,6 +13,14 @@ versions: [SemVer](https://semver.org/).
   with a NULL there is in the result, so an index serves the order with its NULLs at either
   end, and the streams start past their NULLs and stop at them instead of reading them
   (`IS NOT NULL` scan key). Join clauses do not count. Tests in `leapfrog_nulls`.
+- `leapfrog.require_node` (`allow` | `require` | `forbid`, default `allow`), a developer
+  setting after TimescaleDB's `timescaledb.debug_require_vector_agg`: a `planner_hook`
+  fails a query at plan time when its final plan has no Index Merge Intersect node under
+  `require`, or has one under `forbid`, so that a test meant for the node cannot pass
+  through a stock plan unnoticed. Test `leapfrog_require`. The isolation sessions that
+  run the node set it to `require`, their steps with the stock plan to `forbid`; and
+  `lf_check` has a canary after TimescaleDB's `skip_scan` tests: the settings its two
+  runs saw must differ.
 
 - Planner: with an MCV list or dependencies covering two columns of the conditions, the
   first stream is priced in a pair with every other index, not only the next by size. The pass by size adds a large index

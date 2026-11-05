@@ -36,7 +36,7 @@ step s1_payload		{ UPDATE lf_iso_types SET payload = 'changed' WHERE id = 4997; 
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_plan	{
 	EXPLAIN (COSTS OFF)
 	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
@@ -48,9 +48,11 @@ step s2_lock	{
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
 permutation s2_plan

@@ -50,7 +50,7 @@ step s1_commit	{ COMMIT; }
 step s1_rollback	{ ROLLBACK; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_plan	{
 	EXPLAIN (COSTS OFF)
 	SELECT id, owner_id, deleted_at, payload FROM lf_iso
@@ -66,21 +66,27 @@ step s2_lock_deleted	{
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, owner_id, deleted_at, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, owner_id, deleted_at, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_std_deleted	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, owner_id, deleted_at IS NOT NULL AS deleted, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
 # The plan under test is the custom scan with LockRows above it.

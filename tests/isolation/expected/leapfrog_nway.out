@@ -43,9 +43,11 @@ step s1_begin: BEGIN;
 step s1_move_product: UPDATE lf_iso_nway SET product_id = 3 WHERE id = 4997;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_nway WHERE customer_id = 7 AND product_id = 2 AND deleted_at IS NULL
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -79,9 +81,11 @@ step s1_begin: BEGIN;
 step s1_soft_delete: UPDATE lf_iso_nway SET deleted_at = now() WHERE id = 4987;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_nway WHERE customer_id = 7 AND product_id = 2 AND deleted_at IS NULL
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -115,9 +119,11 @@ step s1_begin: BEGIN;
 step s1_payload: UPDATE lf_iso_nway SET payload = 'changed' WHERE id = 4997;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_nway WHERE customer_id = 7 AND product_id = 2 AND deleted_at IS NULL
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>

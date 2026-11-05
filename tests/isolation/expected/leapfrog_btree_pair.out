@@ -41,9 +41,11 @@ step s1_begin: BEGIN;
 step s1_move_product: UPDATE lf_iso_pair SET product_id = 0 WHERE id = 22;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
 	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -79,9 +81,11 @@ step s1_begin: BEGIN;
 step s1_move_customer: UPDATE lf_iso_pair SET customer_id = 3 WHERE id = 22;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
 	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -116,9 +120,11 @@ step s1_begin: BEGIN;
 step s1_join_product: UPDATE lf_iso_pair SET product_id = 1 WHERE id = 14;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
 	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 id|customer_id|product_id|payload
 --+-----------+----------+-------
@@ -153,9 +159,11 @@ step s1_begin: BEGIN;
 step s1_payload: UPDATE lf_iso_pair SET payload = 'changed' WHERE id = 22;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, customer_id, product_id, payload FROM lf_iso_pair
 	WHERE customer_id = 2 AND product_id = 1 ORDER BY id LIMIT 4 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>

@@ -33,7 +33,7 @@ step s1_restore		{ UPDATE lf_iso SET deleted_at = NULL WHERE owner_id = 2 AND de
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_begin_rr	{ BEGIN ISOLATION LEVEL REPEATABLE READ; }
 step s2_begin_rc	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
 step s2_live	{
@@ -46,11 +46,13 @@ step s2_deleted	{
 }
 step s2_both_std	{
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_commit	{ COMMIT; }
 

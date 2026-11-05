@@ -41,6 +41,12 @@
  * unloads a shared library, so the hook stays until the backend exits and
  * leapfrog.enabled = off is the way to switch it off.
  *
+ * leapfrog.require_node is a guard for the tests, after TimescaleDB's
+ * timescaledb.debug_require_vector_agg: a planner_hook looks at every final
+ * plan and raises an error when it lacks the node under "require" or holds
+ * one under "forbid", so that a test meant for the node cannot pass through a
+ * stock plan unnoticed.
+ *
  * IDENTIFICATION
  *	  src/leapfrog.c
  *
@@ -51,6 +57,9 @@
 #include <limits.h>
 
 #include "fmgr.h"
+#include "miscadmin.h"
+#include "nodes/plannodes.h"
+#include "optimizer/planner.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 
@@ -80,7 +89,30 @@ PlannerTrace lf_trace;
 int			intersect_max_streams = 4;
 int			intersect_min_streams = 2;
 
+/* leapfrog.require_node */
+typedef enum RequireNode
+{
+	REQUIRE_NODE_ALLOW,
+	REQUIRE_NODE_REQUIRE,
+	REQUIRE_NODE_FORBID,
+} RequireNode;
+
+static const struct config_enum_entry require_node_options[] = {
+	{"allow", REQUIRE_NODE_ALLOW, false},
+	{"require", REQUIRE_NODE_REQUIRE, false},
+	{"forbid", REQUIRE_NODE_FORBID, false},
+	{NULL, 0, false}
+};
+
+static int	intersect_require_node = REQUIRE_NODE_ALLOW;
+
+static planner_hook_type prev_planner_hook = NULL;
+
 static bool intersect_hook_installed = false;
+
+static PlannedStmt *intersect_planner(LF_PLANNER_ARGS);
+static bool plan_has_node(Plan *plan);
+static bool plan_list_has_node(List *plans);
 
 void		_PG_init(void);
 
@@ -174,12 +206,132 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomEnumVariable("leapfrog.require_node",
+							 "Raises an error when a plan lacks, or has, an Index Merge Intersect node.",
+							 "Developer setting for the tests: \"require\" fails a query whose "
+							 "plan has no Index Merge Intersect node, \"forbid\" one whose plan "
+							 "has it, \"allow\" checks nothing.",
+							 &intersect_require_node,
+							 REQUIRE_NODE_ALLOW,
+							 require_node_options,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	MarkGUCPrefixReserved("leapfrog");
 
 	RegisterCustomScanMethods(&lf_scan_methods);
 
 	lf_planner_init();
+
+	prev_planner_hook = planner_hook;
+	planner_hook = intersect_planner;
+
 	intersect_hook_installed = true;
+}
+
+/*
+ * intersect_planner
+ *		planner_hook: plan the query as usual, then enforce
+ *		leapfrog.require_node on the final plan.  EXPLAIN plans through here
+ *		as well, so it fails the same way the query would.
+ */
+static PlannedStmt *
+intersect_planner(LF_PLANNER_ARGS)
+{
+	PlannedStmt *stmt;
+	bool		has_node;
+
+	if (prev_planner_hook)
+		stmt = LF_PLANNER_CALL(prev_planner_hook);
+	else
+		stmt = LF_PLANNER_CALL(standard_planner);
+
+	if (intersect_require_node == REQUIRE_NODE_ALLOW)
+		return stmt;
+
+	has_node = plan_has_node(stmt->planTree) ||
+		plan_list_has_node(stmt->subplans);
+
+	if (intersect_require_node == REQUIRE_NODE_REQUIRE && !has_node)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("plan has no Index Merge Intersect node, but leapfrog.require_node is \"require\"")));
+	if (intersect_require_node == REQUIRE_NODE_FORBID && has_node)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("plan has an Index Merge Intersect node, but leapfrog.require_node is \"forbid\"")));
+
+	return stmt;
+}
+
+/*
+ * plan_has_node
+ *		Does the plan tree contain an Index Merge Intersect node?  The plans
+ *		of SubPlans and CTEs are in PlannedStmt.subplans, not in the tree;
+ *		the caller checks them.
+ */
+static bool
+plan_has_node(Plan *plan)
+{
+	if (plan == NULL)
+		return false;
+
+	check_stack_depth();
+
+	switch (nodeTag(plan))
+	{
+		case T_CustomScan:
+			if (((CustomScan *) plan)->methods == &lf_scan_methods)
+				return true;
+			if (plan_list_has_node(((CustomScan *) plan)->custom_plans))
+				return true;
+			break;
+		case T_Append:
+			if (plan_list_has_node(((Append *) plan)->appendplans))
+				return true;
+			break;
+		case T_MergeAppend:
+			if (plan_list_has_node(((MergeAppend *) plan)->mergeplans))
+				return true;
+			break;
+		case T_BitmapAnd:
+			if (plan_list_has_node(((BitmapAnd *) plan)->bitmapplans))
+				return true;
+			break;
+		case T_BitmapOr:
+			if (plan_list_has_node(((BitmapOr *) plan)->bitmapplans))
+				return true;
+			break;
+		case T_SubqueryScan:
+			if (plan_has_node(((SubqueryScan *) plan)->subplan))
+				return true;
+			break;
+		default:
+			break;
+	}
+
+	return plan_has_node(plan->lefttree) || plan_has_node(plan->righttree);
+}
+
+/*
+ * plan_list_has_node
+ *		plan_has_node over a list of plans; an entry may be NULL (a subplan
+ *		removed as unused).
+ */
+static bool
+plan_list_has_node(List *plans)
+{
+	ListCell   *lc;
+
+	foreach(lc, plans)
+	{
+		if (plan_has_node((Plan *) lfirst(lc)))
+			return true;
+	}
+	return false;
 }
 
 /*

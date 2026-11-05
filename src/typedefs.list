@@ -11,6 +11,7 @@ IntersectSearch
 IntersectStreamInfo
 McvOrderArg
 PlannerTrace
+RequireNode
 SkipAhead
 SortBound
 SortColumn

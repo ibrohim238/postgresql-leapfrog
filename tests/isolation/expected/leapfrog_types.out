@@ -40,9 +40,11 @@ step s1_begin: BEGIN;
 step s1_move_status: UPDATE lf_iso_types SET status = 'sent' WHERE id = 4997;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -76,9 +78,11 @@ step s1_begin: BEGIN;
 step s1_move_owner: UPDATE lf_iso_types SET owner_id = '00000000-0000-0000-0000-000000000008' WHERE id = 4987;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -112,9 +116,11 @@ step s1_begin: BEGIN;
 step s1_payload: UPDATE lf_iso_types SET payload = 'changed' WHERE id = 4997;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_types WHERE owner_id = '00000000-0000-0000-0000-000000000007' AND status = 'error'
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>

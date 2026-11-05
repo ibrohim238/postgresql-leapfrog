@@ -44,9 +44,11 @@ step s1_begin: BEGIN;
 step s1_move_product: UPDATE lf_iso_oe SET product_id = 3 WHERE id IN (1, 2, 5);
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT count(*), sum(id) FROM (
 		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -75,9 +77,11 @@ step s1_begin: BEGIN;
 step s1_join_product: UPDATE lf_iso_oe SET product_id = 2 WHERE id IN (4, 8);
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT count(*), sum(id) FROM (
 		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|      sum
 -----+---------

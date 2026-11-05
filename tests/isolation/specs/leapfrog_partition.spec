@@ -33,8 +33,8 @@ step w_commit { COMMIT; }
 
 session reader
 setup { LOAD 'leapfrog'; }
-step r_node { SET leapfrog.enabled = on; SET leapfrog.force = on; }
-step r_stock { SET leapfrog.enabled = off; SET leapfrog.force = off; }
+step r_node { SET leapfrog.enabled = on; SET leapfrog.force = on; SET leapfrog.require_node = require; }
+step r_stock { SET leapfrog.enabled = off; SET leapfrog.force = off; SET leapfrog.require_node = forbid; }
 step r_plan { EXPLAIN (COSTS OFF) SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; }
 step r_lock { SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; }
 

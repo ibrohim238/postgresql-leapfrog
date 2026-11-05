@@ -43,11 +43,13 @@ count|min|max
 
 step s2_both_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|min|max
 -----+---+---
@@ -80,11 +82,13 @@ count|min|max
 
 step s2_both_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|min|max
 -----+---+---
@@ -140,11 +144,13 @@ count|min|max
 
 step s2_both_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|min|max
 -----+---+---
@@ -177,11 +183,13 @@ count|min|max
 
 step s2_both_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|min|max
 -----+---+---
@@ -246,11 +254,13 @@ count|min|max
 
 step s2_both_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|min|max
 -----+---+---
@@ -299,11 +309,13 @@ count|min|max
 
 step s2_both_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT count(*), min(id), max(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|min|max
 -----+---+---

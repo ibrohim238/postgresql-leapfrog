@@ -1,0 +1,205 @@
+--
+-- leapfrog_require
+--
+-- leapfrog.require_node: a query errors at plan time when its plan has no
+-- Index Merge Intersect node under "require", or has one under "forbid".
+-- The tests use it so that a query meant for the node cannot pass through a
+-- stock plan unnoticed.
+--
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE lf_req (
+    id          bigint NOT NULL,
+    customer_id bigint NOT NULL,
+    deleted_at  timestamptz,
+    payload     text
+);
+INSERT INTO lf_req
+SELECT g, g % 10, CASE WHEN g % 3 = 0 THEN '2026-01-01'::timestamptz END, 'x'
+FROM generate_series(1, 2000) g;
+CREATE INDEX lf_req_customer_id ON lf_req (customer_id, id);
+CREATE INDEX lf_req_live_id ON lf_req (id) WHERE deleted_at IS NULL;
+VACUUM ANALYZE lf_req;
+-- The default checks nothing.
+SHOW leapfrog.require_node;
+ leapfrog.require_node 
+-----------------------
+ allow
+(1 row)
+
+SET leapfrog.force = on;
+-- allow: the plans are what they are without the setting.
+SET leapfrog.require_node = allow;
+EXPLAIN (COSTS OFF)
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_req
+         ->  Outer Stream on lf_req_customer_id
+               Index Cond: (customer_id = 2)
+         ->  Inner Stream on lf_req_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
+
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+ id 
+----
+  2
+ 22
+ 32
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Limit
+   ->  Index Only Scan using lf_req_customer_id on lf_req
+         Index Cond: (customer_id = 2)
+(3 rows)
+
+-- require: a query the node serves runs, under EXPLAIN as well.
+SET leapfrog.require_node = require;
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+ id 
+----
+  2
+ 22
+ 32
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Limit
+   ->  Custom Scan (Index Merge Intersect) on lf_req
+         ->  Outer Stream on lf_req_customer_id
+               Index Cond: (customer_id = 2)
+         ->  Inner Stream on lf_req_live_id
+               Index Pred: (deleted_at IS NULL)
+(6 rows)
+
+-- the node inside a subquery and an InitPlan counts
+SELECT count(*) FROM (SELECT id FROM lf_req
+    WHERE customer_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 3) s;
+ count 
+-------
+     3
+(1 row)
+
+SELECT (SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+    ORDER BY id LIMIT 1) AS first_id;
+ first_id 
+----------
+        2
+(1 row)
+
+-- require: no usable set of indexes, even under force.
+SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
+ERROR:  plan has no Index Merge Intersect node, but leapfrog.require_node is "require"
+EXPLAIN (COSTS OFF)
+SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
+ERROR:  plan has no Index Merge Intersect node, but leapfrog.require_node is "require"
+SELECT 1 AS one;
+ERROR:  plan has no Index Merge Intersect node, but leapfrog.require_node is "require"
+-- the node switched off
+SET leapfrog.enabled = off;
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+ERROR:  plan has no Index Merge Intersect node, but leapfrog.require_node is "require"
+RESET leapfrog.enabled;
+-- forbid: a query the node would take under force errors.
+SET leapfrog.require_node = forbid;
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+ERROR:  plan has an Index Merge Intersect node, but leapfrog.require_node is "forbid"
+EXPLAIN (COSTS OFF)
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+ERROR:  plan has an Index Merge Intersect node, but leapfrog.require_node is "forbid"
+-- and runs with the node switched off, or without a usable set
+SET leapfrog.enabled = off;
+SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+ id 
+----
+  2
+ 22
+ 32
+(3 rows)
+
+RESET leapfrog.enabled;
+SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
+ id 
+----
+  2
+ 12
+ 22
+(3 rows)
+
+-- A prepared statement is checked whenever it is planned: here every
+-- execution, with custom plans.
+SET plan_cache_mode = force_custom_plan;
+SET leapfrog.require_node = require;
+PREPARE lf_req_q(bigint) AS
+SELECT id FROM lf_req WHERE customer_id = $1 AND deleted_at IS NULL
+ORDER BY id LIMIT 3;
+EXECUTE lf_req_q(2);
+ id 
+----
+  2
+ 22
+ 32
+(3 rows)
+
+SET leapfrog.require_node = forbid;
+EXECUTE lf_req_q(2);
+ERROR:  plan has an Index Merge Intersect node, but leapfrog.require_node is "forbid"
+DEALLOCATE lf_req_q;
+RESET plan_cache_mode;
+-- The queries of a plpgsql function or a DO block are checked when they are
+-- planned.  The outer SELECT has no node of its own, so it passes "forbid".
+CREATE FUNCTION lf_req_first(c bigint) RETURNS bigint
+LANGUAGE plpgsql AS $$
+BEGIN
+	RETURN (SELECT id FROM lf_req WHERE customer_id = c AND deleted_at IS NULL
+		ORDER BY id LIMIT 1);
+END
+$$;
+SET leapfrog.require_node = forbid;
+SELECT lf_req_first(2);
+ERROR:  plan has an Index Merge Intersect node, but leapfrog.require_node is "forbid"
+CONTEXT:  PL/pgSQL expression "(SELECT id FROM lf_req WHERE customer_id = c AND deleted_at IS NULL
+		ORDER BY id LIMIT 1)"
+PL/pgSQL function lf_req_first(bigint) line 3 at RETURN
+SET leapfrog.require_node = require;
+DO $$
+BEGIN
+	PERFORM id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
+	ORDER BY id LIMIT 3;
+END
+$$;
+DO $$
+BEGIN
+	PERFORM id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
+END
+$$;
+ERROR:  plan has no Index Merge Intersect node, but leapfrog.require_node is "require"
+CONTEXT:  SQL statement "SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3"
+PL/pgSQL function inline_code_block line 3 at PERFORM
+RESET leapfrog.require_node;
+RESET leapfrog.force;
+SELECT lf_req_first(2);
+ lf_req_first 
+--------------
+            2
+(1 row)
+
+DROP FUNCTION lf_req_first(bigint);
+DROP TABLE lf_req;

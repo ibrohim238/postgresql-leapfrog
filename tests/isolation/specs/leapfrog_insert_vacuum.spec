@@ -37,7 +37,7 @@ step s1_delete_tail	{ DELETE FROM lf_iso_iv WHERE owner_id = 2 AND id > 1000; }
 step s1_vacuum		{ VACUUM lf_iso_iv; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_begin	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
 step s2_count	{
 	SELECT count(*), max(id), sum(id) FROM (
@@ -45,17 +45,21 @@ step s2_count	{
 }
 step s2_count_std	{
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), max(id), sum(id) FROM (
 		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_lock	{
 	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_declare	{
 	DECLARE c CURSOR FOR

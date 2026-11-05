@@ -34,7 +34,7 @@ step s1_commit		{ COMMIT; }
 step s1_vacuum		{ VACUUM lf_iso; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_begin_rr	{ BEGIN ISOLATION LEVEL REPEATABLE READ; }
 step s2_count	{
 	SELECT count(*), count(DISTINCT id), sum(id) FROM (
@@ -49,10 +49,12 @@ step s2_first	{
 }
 step s2_std	{
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), count(DISTINCT id), sum(id) FROM (
 		SELECT id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 	SELECT id, owner_id FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 4;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_commit	{ COMMIT; }
 

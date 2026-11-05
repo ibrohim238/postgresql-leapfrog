@@ -38,7 +38,7 @@ step s1_hot		{ UPDATE lf_iso SET payload = 'changed' WHERE id = 2; }
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_begin_rr	{ BEGIN ISOLATION LEVEL REPEATABLE READ; }
 step s2_begin_ser	{ BEGIN ISOLATION LEVEL SERIALIZABLE; }
 step s2_rows	{
@@ -59,9 +59,11 @@ step s2_lock	{
 }
 step s2_std	{
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT id, owner_id, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 8;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_commit	{ COMMIT; }
 

@@ -97,7 +97,9 @@ $$;
 -- in both directions.  With ordered = true the output position of every row
 -- is compared as well, so the sort order must be deterministic (a unique
 -- sort key).  Reports whether the forced plan actually used the custom scan,
--- so a test cannot pass by accident through a standard plan.
+-- so a test cannot pass by accident through a standard plan.  A canary, after
+-- TimescaleDB's skip_scan tests: the settings each run saw are captured and
+-- must differ, or the comparison would be of a plan with itself.
 --
 CREATE FUNCTION lf_check(query text, ordered boolean DEFAULT true)
 RETURNS text
@@ -110,6 +112,8 @@ DECLARE
 	actual_rows bigint;
 	missing bigint;
 	extra bigint;
+	stock_settings text;
+	forced_settings text;
 BEGIN
 	IF ordered THEN
 		wrapped := 'SELECT row_number() OVER () AS lf_position, q.* FROM (' ||
@@ -121,10 +125,18 @@ BEGIN
 	PERFORM set_config('leapfrog.enabled', 'off', true);
 	PERFORM set_config('leapfrog.force', 'off', true);
 	EXECUTE 'CREATE TEMP TABLE lf_expected AS ' || wrapped;
+	stock_settings := current_setting('leapfrog.enabled') || '/' ||
+		current_setting('leapfrog.force');
 
 	PERFORM set_config('leapfrog.enabled', 'on', true);
 	PERFORM set_config('leapfrog.force', 'on', true);
 	EXECUTE 'CREATE TEMP TABLE lf_actual AS ' || wrapped;
+	forced_settings := current_setting('leapfrog.enabled') || '/' ||
+		current_setting('leapfrog.force');
+	IF stock_settings = forced_settings THEN
+		RAISE EXCEPTION 'lf_check: the stock and forced runs both ran with leapfrog.enabled/force = %',
+			stock_settings;
+	END IF;
 	FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query LOOP
 		plan := plan || line || E'\n';
 	END LOOP;

@@ -37,7 +37,7 @@ step s1_hot_stats	{
 }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_begin_rr	{ BEGIN ISOLATION LEVEL REPEATABLE READ; }
 step s2_versions	{
 	SELECT payload, count(*) FROM (
@@ -55,10 +55,12 @@ step s2_unique	{
 }
 step s2_std	{
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT payload, count(*) FROM (
 		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
 	GROUP BY payload ORDER BY payload;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_commit	{ COMMIT; }
 

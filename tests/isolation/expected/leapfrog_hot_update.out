@@ -48,10 +48,12 @@ rows|distinct_ids
 
 step s2_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT payload, count(*) FROM (
 		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
 	GROUP BY payload ORDER BY payload;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 payload|count
 -------+-----
@@ -90,10 +92,12 @@ rows|distinct_ids
 
 step s2_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT payload, count(*) FROM (
 		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
 	GROUP BY payload ORDER BY payload;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 payload|count
 -------+-----
@@ -161,10 +165,12 @@ rows|distinct_ids
 
 step s2_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT payload, count(*) FROM (
 		SELECT payload FROM lf_iso WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s
 	GROUP BY payload ORDER BY payload;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 payload|count
 -------+-----

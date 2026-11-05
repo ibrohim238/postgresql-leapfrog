@@ -33,7 +33,7 @@ step s1_join_product	{ UPDATE lf_iso_oe SET product_id = 2 WHERE id IN (4, 8); }
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET work_mem = '64kB'; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET work_mem = '64kB'; SET leapfrog.require_node = require; }
 step s2_explain	{
 	EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 	SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE;
@@ -44,9 +44,11 @@ step s2_lock	{
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT count(*), sum(id) FROM (
 		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
 # the plan: the node, overflowing its group

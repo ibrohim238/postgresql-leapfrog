@@ -657,6 +657,7 @@ replaces the file instead of rewriting it.
 | `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search; with extended statistics on the conditions, the first stream is also priced in a pair with each other index. |
 | `leapfrog.min_indexes` | `2` | `USERSET` | Developer setting: smaller sets are not offered and the set that reaches the size is offered whatever its cost, so that a larger set can be run against the stock plans (the tests use it). Not in `postgresql.conf.sample`. |
 | `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page; where the node's `Filter` drops more rows than it passes, matches are gathered ahead and their heap pages asked for, up to the table's tablespace `effective_io_concurrency` and at most 32; not on a table access method other than the heap. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
+| `leapfrog.require_node` | `allow` | `USERSET` | Developer setting for the tests, after TimescaleDB's `timescaledb.debug_require_vector_agg`: under `require` a query whose final plan (including subplans) has no Index Merge Intersect node fails at plan time, under `forbid` one whose plan has it; `allow` checks nothing. `EXPLAIN` fails the same way. A plan is checked when it is made, so a cached generic plan of a prepared statement is not checked again. Not in `postgresql.conf.sample`. |
 | `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by the tests; not in `postgresql.conf.sample`. |
 | `leapfrog.trace_planner` | `off` | `USERSET` | Developer setting: a `NOTICE` with what planning did (candidates, sets costed, range scans, statistics reads, fallbacks, correlations, candidates pruned); the tests check the planner by these counts. |
 
@@ -778,14 +779,22 @@ Regression tests (`sql/`):
 | `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
 | `leapfrog_planner` | by the counts of `leapfrog.trace_planner`: statistics, ranges and correlations read once, a stream that cannot pay for itself pruned; the estimate from the statistics read once, also inside one histogram bin |
 | `leapfrog_heap_prefetch` | matches gathered ahead where the `Filter` drops most rows: results and order against the stock plans, `LIMIT`, non-unique sort column, rescans, a cursor, `FOR UPDATE`, dead rows and HOT chains; none without a `Filter` or where it passes most rows, or with the setting off; a group overflowing `work_mem` after a queue, with two and three streams |
+| `leapfrog_require` | `leapfrog.require_node`: `require` and `forbid` with and without `leapfrog.force`, under `EXPLAIN`, the node in a subquery and an InitPlan, a prepared statement, a plpgsql function and a `DO` block; `allow` changes nothing |
 | `leapfrog_first_group` | startup cost against the group read first: a common value at the end of the range, behind a row or a dead entry (the Index Scan then chosen), in a generic plan, without a histogram, within reach of a `LIMIT`; a value or NULLs one stream does not hold; a group overflowing `work_mem`, first or further on; sorting a later group; a stream with a narrow range; the group of the NULLs, also with ranges that do not meet, and partial indexes without NULLs; a value out of the most common ones; a unique sort column; a set quicker to start offered next to the cheapest |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
 (and row positions when the sort key is unique) and reports whether the plan
 contained the `Custom Scan`, so a test cannot pass by accident through a plain
-Index Scan. Every fix and feature has a test that fails without it; the
-reverted variants were built and run.
+Index Scan. A canary in it, after TimescaleDB's `skip_scan` tests, captures the
+settings each of the two runs saw and fails when they are the same. Every fix
+and feature has a test that fails without it; the reverted variants were
+built and run.
+
+Where an isolation session is meant to run the node, it sets
+`leapfrog.require_node = require`, and its steps with the stock plan switch to
+`forbid`, so a silent fallback to either side fails the spec instead of
+comparing a plan with itself.
 
 Isolation tests (`tests/isolation/specs/`):
 

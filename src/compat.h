@@ -18,6 +18,7 @@
 #include "access/tableam.h"
 #include "executor/instrument.h"
 #include "nodes/execnodes.h"
+#include "optimizer/planner.h"
 #include "utils/sortsupport.h"
 
 #define PG_VERSION_18 180000
@@ -88,6 +89,27 @@ lf_node_nloops(PlanState *ps)
 #define LF_DATUM_IS_64BIT 1
 #else
 #define LF_DATUM_IS_64BIT 0
+#endif
+
+/*
+ * The planner hook's arguments and how to pass them on.
+ *
+ * PostgreSQL 19 (commit c83ac02ec730, "Add ExplainState argument to
+ * pg_plan_query() and planner()") adds the ExplainState of an EXPLAIN, NULL
+ * otherwise, to planner_hook and standard_planner.
+ */
+#if PG_VERSION_NUM >= PG_VERSION_19
+#define LF_PLANNER_ARGS \
+	Query *parse, const char *query_string, int cursorOptions, \
+	ParamListInfo boundParams, ExplainState *es
+#define LF_PLANNER_CALL(fn) \
+	fn(parse, query_string, cursorOptions, boundParams, es)
+#else
+#define LF_PLANNER_ARGS \
+	Query *parse, const char *query_string, int cursorOptions, \
+	ParamListInfo boundParams
+#define LF_PLANNER_CALL(fn) \
+	fn(parse, query_string, cursorOptions, boundParams)
 #endif
 
 #endif							/* LEAPFROG_COMPAT_H */

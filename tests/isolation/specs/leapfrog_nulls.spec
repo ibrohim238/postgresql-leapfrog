@@ -26,19 +26,23 @@ step s1_b { UPDATE lf_iso_null SET b = 0 WHERE id = 10; }
 step s1_commit { COMMIT; }
 
 session s2
-setup { LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup { LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_plan { EXPLAIN (COSTS OFF) SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val NULLS LAST LIMIT 2 FOR UPDATE; }
 step s2_lock { SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val NULLS LAST LIMIT 2 FOR UPDATE; }
 step s2_lock_std {
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val NULLS LAST LIMIT 2 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_tail { SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val DESC NULLS FIRST, id LIMIT 3 FOR UPDATE; }
 step s2_tail_std {
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val DESC NULLS FIRST, id LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
 permutation s2_plan
