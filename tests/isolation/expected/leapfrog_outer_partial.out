@@ -45,9 +45,11 @@ step s1_begin: BEGIN;
 step s1_soft_delete: UPDATE lf_iso_op SET deleted_at = now() WHERE id = 22;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
 	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -83,9 +85,11 @@ step s1_begin: BEGIN;
 step s1_kind: UPDATE lf_iso_op SET kind = 7 WHERE id = 22;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
 	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>

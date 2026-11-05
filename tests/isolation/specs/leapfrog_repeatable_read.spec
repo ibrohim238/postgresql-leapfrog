@@ -1,7 +1,4 @@
-# REPEATABLE READ and SERIALIZABLE: repeated queries inside one transaction
-# return the same rows regardless of concurrent commits, and a FOR UPDATE on
-# a row that another transaction changed after the snapshot fails with a
-# serialization error, as it does for a standard index scan.
+# REPEATABLE READ and SERIALIZABLE: stable repeated reads; FOR UPDATE on a row changed after the snapshot fails to serialize.
 
 setup
 {
@@ -38,7 +35,7 @@ step s1_hot		{ UPDATE lf_iso SET payload = 'changed' WHERE id = 2; }
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_begin_rr	{ BEGIN ISOLATION LEVEL REPEATABLE READ; }
 step s2_begin_ser	{ BEGIN ISOLATION LEVEL SERIALIZABLE; }
 step s2_rows	{
@@ -59,23 +56,22 @@ step s2_lock	{
 }
 step s2_std	{
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT id, owner_id, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 8;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_commit	{ COMMIT; }
 
-# Repeated reads inside REPEATABLE READ are stable across a committed
-# change of every kind; the next transaction sees the change.
+# Repeated reads are stable across a committed change of every kind.
 permutation s2_begin_rr s2_rows s2_count s1_begin s1_change s1_commit s2_rows s2_rows_desc s2_count s2_std s2_commit s2_rows s2_rows_desc s2_count s2_std
 
 # The same under SERIALIZABLE (read-only, no conflict).
 permutation s2_begin_ser s2_rows s2_count s1_begin s1_change s1_commit s2_rows s2_count s2_std s2_commit s2_rows
 
-# FOR UPDATE in REPEATABLE READ on a row changed after the snapshot: the
-# lock waits for the other transaction and then fails to serialize.
+# FOR UPDATE on a row changed after the snapshot: waits, then fails to serialize.
 permutation s2_begin_rr s2_rows s1_begin s1_hot s2_lock s1_commit s2_commit s2_rows
 
-# The same when the change is committed before the lock is attempted but
-# after the snapshot was taken.
+# The same with the change committed before the lock, after the snapshot.
 permutation s2_begin_rr s2_rows s1_begin s1_hot s1_commit s2_lock s2_commit s2_rows

@@ -32,8 +32,10 @@ step s1_begin: BEGIN;
 step s1_null: UPDATE lf_iso_null SET val = NULL WHERE id = 22;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val NULLS LAST LIMIT 2 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -63,8 +65,10 @@ step s1_begin: BEGIN;
 step s1_b: UPDATE lf_iso_null SET b = 0 WHERE id = 10;
 step s2_tail_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, val FROM lf_iso_null WHERE a = 2 AND b = 1 ORDER BY val DESC NULLS FIRST, id LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_tail_std: <... completed>

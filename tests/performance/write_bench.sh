@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
-# What index composition saves on writes, and costs or gains on reads, on a table
-# with NFILTERS filter columns and soft deletes:
-#   S    specialised: (fK, id) WHERE deleted_at IS [NOT] NULL per column, plus
-#        composite indexes for frequent filter combinations
-#   M    moderate: the composite indexes of S, plus (fK, id) for M_SINGLES, the
-#        columns no composite starts with (f3 left out, its pairs cover it)
-#   G    general: (fK, id) per column, (id) WHERE deleted_at IS [NOT] NULL
-#   G+L  the same indexes as G with leapfrog; it shares G's writes
-#
-# Measured per strategy: index size; rows per second and WAL of insert (BATCH_ROWS),
-# soft delete, filter update and delete (BATCH_ROWS/4 each); a read mix of 1-4 filters.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); NFILTERS (12),
-# BASE_ROWS (500000), BATCH_ROWS (100000), REPEATS (5), STRATEGIES ("S G"; also M), M_SINGLES, BENCH_OUT
-# (must not exist).  Output in results/write-<timestamp>/: write.csv, read.csv, size.csv.
+# Storage, writes and reads of index strategies for a table with many filters.
+# Usage: [VAR=value ...] write_bench.sh
+# Environment: PGHOST/PGPORT/PGUSER, BENCH_DB, NFILTERS, BASE_ROWS, BATCH_ROWS,
+# REPEATS, STRATEGIES, M_SINGLES, BENCH_OUT.  See docs/benchmarks.md.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -41,14 +30,12 @@ PSQL="psql -X -q -v ON_ERROR_STOP=1"
 $PSQL -tAc "SELECT version()" > "$out/server.txt"
 $PSQL -tAc "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('shared_buffers','work_mem','max_wal_size','checkpoint_timeout','wal_level','full_page_writes','synchronous_commit')" >> "$out/server.txt"
 
-# value of filter column k for row g: 100 distinct values per column from a
-# deterministic hash, independent of the other columns and of deleted_at
 filter_expr() {
 	local k=$1 g=$2
 	echo "(abs(hashint8(($g)::bigint * 64 + $k)) % 100)"
 }
 
-columns="" ; values=""
+columns=""
 for k in $(seq 1 "$NFILTERS"); do
 	columns+=", f$k bigint NOT NULL"
 done
@@ -188,8 +175,7 @@ for strategy in $STRATEGIES; do
 	load "$strategy"
 	echo "$strategy,$(index_count),$(index_size)" >> "$out/size.csv"
 
-	# reads first, on the freshly loaded table, with the default page costs
-	# and with random_page_cost = 1.1 (SSD or data in memory)
+	# reads first, on the freshly loaded table
 	for rpc in 4 1.1; do
 		if [ "$strategy" = S ]; then
 			read_mix "S rpc=$rpc" "SET leapfrog.enabled = off; SET random_page_cost = $rpc;"

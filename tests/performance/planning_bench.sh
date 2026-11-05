@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
-# Planning time against the number of indexes.
-#
-# For each N in INDEX_COUNTS a table with 50 bigint filter columns gets N
-# indexes (fK, id) plus (id) WHERE deleted_at IS NULL.  Queries with 1, 2
-# and 6 equalities ORDER BY id LIMIT 10 are planned REPEATS times with the
-# extension on and off; the median planning time (EXPLAIN SUMMARY) is
-# printed, and whether the plan under leapfrog.force has the node.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (leapfrog_bench, see
-# bench_db.sh); INDEX_COUNTS ("10 20 50"), REPEATS (200).  The library must
-# be preloaded or loadable by LOAD.
+# Planning time against the number of indexes on the table.
+# Usage: [VAR=value ...] planning_bench.sh
+# Environment: PGHOST/PGPORT/PGUSER, BENCH_DB, INDEX_COUNTS, REPEATS.
+# See docs/benchmarks.md.
 set -euo pipefail
 
 . "$(dirname "$0")/bench_db.sh"

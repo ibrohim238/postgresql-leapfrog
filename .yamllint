@@ -1,0 +1,11 @@
+extends: default
+
+rules:
+  document-start: disable
+  # long shell commands and SQL in "run:" blocks
+  line-length:
+    max: 120
+    level: warning
+  # GitHub Actions' "on:" key is not a boolean
+  truthy:
+    check-keys: false

@@ -7,34 +7,172 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Tests: `make test-one TEST=name [REPEATS=N] [KIND=isolation]`
+  (`tests/scripts/run-one.sh`, after Citus's `run_test.py -r`) runs one regression test or
+  isolation spec N times in a scratch database, after `leapfrog_setup`, and stops at the
+  first failure with its diff; `make installcheck-rerun` (after TimescaleDB's
+  `ci_rerun.sh`) reruns the tests the last `installcheck` failed. CONTRIBUTING.md has a
+  "Flaky tests" section on reproducing and fixing them.
+- Docker: sanitizers in the assert image. `docker/cassert.Dockerfile` takes
+  `SANITIZE=address,undefined` (empty by default): PostgreSQL and the extension are built
+  with clang, `-fsanitize=$SANITIZE -fno-omit-frame-pointer -fno-sanitize-recover=all`, and
+  `run-cassert.sh` fails on any ASAN or UBSAN report, which it prints; the server runs
+  with `max_stack_depth = 8MB`. PostgreSQL is built in a stage of its own, `pg`, that
+  depends on `PG_BRANCH` and `SANITIZE` only.
+
+- Planner: a nullable sort column counts as `NOT NULL` when a strict condition of the
+  relation rejects NULL in it (`val > 0`, `val > $1`, `val IS NOT NULL`, `val = ANY (…)`;
+  `find_nonnullable_vars`, after TimescaleDB SkipScan's `check_notnull_skipkey`): no row
+  with a NULL there is in the result, so an index serves the order with its NULLs at
+  either end, and the streams start past their NULLs and stop at them instead of reading
+  them (`IS NOT NULL` scan key). Join clauses do not count. Tests in `leapfrog_nulls`.
+- `leapfrog.require_node` (`allow` | `require` | `forbid`, default `allow`), a developer
+  setting after TimescaleDB's `timescaledb.debug_require_vector_agg`: a `planner_hook`
+  fails a query at plan time when its final plan has no Index Merge Intersect node under
+  `require`, or has one under `forbid`, so that a test meant for the node cannot pass
+  through a stock plan unnoticed. Test `leapfrog_require`. The isolation sessions that
+  run the node set it to `require`, their steps with the stock plan to `forbid`; and
+  `lf_check` has a canary after TimescaleDB's `skip_scan` tests: the settings its two
+  runs saw must differ.
+
 - Planner: with an MCV list or dependencies covering two columns of the conditions, the
-  first stream is priced in a pair with every other index, not only the next by size. The pass by size adds a large index
-  to the smaller ones only, so `(customer_id, id)` with `(id) WHERE deleted_at IS NULL`
-  was never priced where a `(product_id, id)` was smaller. No change without such
-  statistics, where the correlation is unknown, so no more range probes either; test in
-  `leapfrog_planner`.
+  first stream is priced in a pair with every other index, not only the next by size. The
+  pass by size adds a large index to the smaller ones only, so `(customer_id, id)` with
+  `(id) WHERE deleted_at IS NULL` was never priced where a `(product_id, id)` was smaller.
+  No change without such statistics, where the correlation is unknown, so no more range
+  probes either; test in `leapfrog_planner`.
 
 - Heap prefetch: where the node's `Filter` drops more rows than it passes, matches are
-  gathered ahead, doubling up to the tablespace's `effective_io_concurrency` and at most 32,
-  their heap pages asked for and the rows fetched in the same order; heap tables only.
+  gathered ahead, doubling up to the tablespace's `effective_io_concurrency` and at most
+  32, their heap pages asked for and the rows fetched in the same order; heap tables only.
   Found rows wait for no long stretch: the queue is fetched after 4,096 entries without a
-  match. A node without a `Filter`, or whose `Filter`
-  passes most rows, still fetches one match at a time, so that a `LIMIT` reads no further
-  in the indexes. MVCC snapshots only; under `leapfrog.prefetch`. `EXPLAIN ANALYZE` counts
-  the pages as `Heap Prefetches`; test in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query
-  fetching 20,012 rows for 11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm,
-  no change (BENCHMARKS.md, "Heap prefetch").
+  match. A node without a `Filter`, or whose `Filter` passes most rows, still fetches one
+  match at a time, so that a `LIMIT` reads no further in the indexes. MVCC snapshots only;
+  under `leapfrog.prefetch`. `EXPLAIN ANALYZE` counts the pages as `Heap Prefetches`; test
+  in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query fetching 20,012 rows for
+  11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm, no change
+  (BENCHMARKS.md, "Heap prefetch").
+
+- `make lint` (`tests/scripts/lint.sh`), after the CI checks of Citus and TimescaleDB:
+  banned C functions, `TODO`/`FIXME`/`XXX` notes, trailing whitespace and final newlines
+  (`.editorconfig`), the `#include` order, GUCs defined in alphabetical order (the
+  definitions in `leapfrog.c` are reordered, no change in behaviour), `CHANGELOG.md`
+  lines of at most 100 characters, and every `tests/scripts/*.sh` run from somewhere;
+  `make lint-fix` fixes the whitespace and the long lines. See CONTRIBUTING.md, "Lint".
+- `make lint` runs `shellcheck`, `actionlint`, `yamllint` (`.yamllint`) and `codespell`
+  (`.codespellrc`) when they are installed, as TimescaleDB's workflows do; `LINT_STRICT=1`
+  fails on a missing one. `bench_db.sh` gets a shell directive and loses an unused
+  argument and loop variables, `write_bench.sh` an unused variable (shellcheck warnings).
+- `make lint` runs `clang-tidy` on `src/*.c` when it is installed (`.clang-tidy`:
+  `bugprone-*` and the static analyzer, less the checks that only flag PostgreSQL idioms,
+  each named with the reason). Its one finding, uninitialised `clock->start` in
+  `lf_instr_stop`, is a false positive (the same `instr->timer` guards both ends) and
+  carries a `NOLINTNEXTLINE`.
+- `make pgindent` checks `src/typedefs.list` against the built objects with PostgreSQL's
+  `src/tools/find_typedef`, as pg_stat_monitor's `dump-typedefs.sh` makes its list: a
+  typedef of `src/` that the objects use and the list lacks fails the check, an entry
+  that `src/` no longer defines is a warning.
+
+- `make installcheck-upgrade`: creates every earlier release still on an update path
+  (its install script taken from the release tag) and runs `ALTER EXTENSION leapfrog
+  UPDATE`; the result must be the current version, with the objects of a fresh
+  `CREATE EXTENSION`, and pass `leapfrog_setup`. Run in CI on PostgreSQL 18; see
+  CONTRIBUTING.md.
+- `make check-tests` (`tests/scripts/check-tests.sh`, after Citus's
+  `check_all_tests_are_run.sh` and TimescaleDB's `check_orphaned_test_output_files.sh`):
+  fails when a `.sql` or `.spec` is not in `REGRESS`/`ISOLATION`, a listed name has no
+  file, an expected file belongs to no test, or an alternative output `<name>_N.out` is
+  identical to `<name>.out` or not explained by a line `-- alternative output
+  <name>_N.out: <why>; remove when <condition>` in the test's header comment (Citus's
+  rule). The five alternatives have that line now; in `.sql` tests it is echoed into
+  their expected files. No server needed.
+- `make check-version` (`tests/scripts/check-version.sh`, after TimescaleDB's
+  `release_sanity.yml` and Citus's `check_migration_files.sh`, with the control file as the
+  source of truth as in pgaudit): `EXTVERSION` equals `default_version`, the install
+  script and the update script from the newest release tag exist and are in `DATA`,
+  `leapfrog_setup.out` shows the version, and `CHANGELOG.md` has `Unreleased`, the
+  version's section once it is newer than the newest tag, and a link per release.
+  `RELEASE=1` checks a release: `Unreleased` empty, `## [X] — date`, and the annotated tag
+  `vX` on `HEAD` with the message `leapfrog X`. It found the links of 0.0.5 missing at the
+  bottom of this file, now added.
 
 ### Fixed
 
+- Planner: under `enable_partitionwise_join` the node on a partition as the inner side of
+  a nested loop over the partitions of another partitioned table kept that table's `Var`
+  in its equality values instead of the partition's (the path is parameterized by the
+  parent and moved to the partition when the plan is made, which went through
+  `custom_private` and no callback): `Index Cond: (t_1.owner_id = o.owner_id)` and a
+  crashed backend. The path keeps the keys and predicates of its streams in
+  `custom_private`, and `ReparameterizeCustomPathByChild` translates them, as the core does
+  for an `IndexPath`. Test in `leapfrog_partition`.
 - Cost model: the rows fetched from the heap and the entries of a partial index ignored
   extended statistics, as predicates reached `clauselist_selectivity` without a
   `RestrictInfo` and entries took the predicate as independent of the equalities. Tests in
   `leapfrog_planner`. A statistics object must cover plain columns:
   `(deleted_at IS NULL)` as an expression does not match a clause on `deleted_at`.
+- Planner: the sets of streams competed on cost across parameterizations, so a set
+  parameterized by one join could lose to a cheaper set parameterized by another and never
+  be offered, although `add_path` keeps paths of different parameterizations side by side;
+  a join order that needed the lost set then got no Index Merge Intersect node. The search
+  keeps the cheapest and the quickest set of every parameterization, and prunes against
+  the same parameterization's cheapest. `leapfrog.trace_planner` reports the paths
+  offered. Test in `leapfrog_planner`: 2 paths before, 5 after.
+- `run-one.sh`: the scratch database's name was cut to `NAMEDATALEN` after the pid was
+  appended, so a long test name lost the pid and two runs of the test shared a database.
+  The name is cut before the pid.
+- Docker: the runtime image appended `tests/scripts/temp.conf` to
+  `postgresql.conf.sample`, so a server built on the image ran without JIT and parallel
+  query, and a `pgdata` volume from an earlier image lacked the settings while the
+  healthcheck, which required `lc_messages = C`, stayed unhealthy with nothing said. The
+  image has stock settings; the `postgres` service of `compose.yaml` passes `temp.conf` on
+  the command line; the healthcheck checks readiness and the extension; `run-tests.sh`
+  stops naming the setting when `jit`, `max_parallel_workers_per_gather` or
+  `extra_float_digits` differ from `temp.conf` (the rest pg_regress sets per session).
+- `make installcheck-rerun` read `tests/isolation/regression.out` from an earlier run when
+  the last `installcheck` had stopped at a failing regression suite, and reran those old
+  failures as fresh ones. `installcheck` and `check` remove both suites' `regression.out`
+  and `regression.diffs` first (`REGRESS_PREP`).
+- CI: `make lint`, `make check-tests` and `make check-version` ran in no job, although
+  the documentation said they did; a test missing from `REGRESS` or an orphan expected
+  file passed CI. A `checks` job runs them with every tool installed (`LINT_STRICT=1`),
+  and the PGDG jobs start their cluster with `tests/scripts/start-cluster.sh`, so the
+  settings come from `temp.conf` instead of a copy in the workflow.
 
 ### Changed
 
+- Test scripts: code that several of them carried a copy of is in helpers they source:
+  `tests/scripts/makevars.sh` (`make_var`, for `check-tests.sh` and
+  `check-version.sh`) and `tests/scripts/scratch_db.sh` (a scratch database created with
+  a marking comment, dropped only when it carries the mark, refused when it exists
+  without it; for `run-one.sh`, `upgrade-check.sh`, `bench-smoke.sh` and `bench_db.sh`).
+  `installcheck-upgrade` now drops its databases `WITH (FORCE)`, as `test-one` did; a
+  failing psql (no server, a wrong port) is reported as psql's error, not as a database
+  that is not the script's; the admin database of both is `SCRATCH_ADMIN_DB` (default
+  `BENCH_ADMIN_DB`, then `postgres`).
+- Docker: the test image no longer copies the sources; Compose and `tests/run-in-docker.sh`
+  mount the repository at `/src/leapfrog`, and the entrypoint runs `make clean`, builds with
+  `WERROR=1` and installs before the suites, as a user with the host's UID/GID (build
+  arguments `UID`, `GID`, also in the cassert image), so files written into the tree are no
+  longer owned by root. `PG_MAJOR` is a Compose variable (`image: leapfrog:${PG_MAJOR:-18}`)
+  and `make docker-build PG_MAJOR=18` / `make docker-test` wrap Compose.
+- Test servers: `tests/scripts/temp.conf` is the one source of their settings. The
+  Compose server passes them on its command line; `tests/scripts/start-cluster.sh`
+  creates and starts a cluster with it and runs the smoke check, now
+  `tests/scripts/smoke.sql`, for the cassert image and for the test image run without
+  `PGHOST`, which then tests against a server of its own.
+- The regression tests live in `tests/regress/` (`sql/`, `expected/`, and `results/` when
+  run), next to the isolation and performance tests, instead of the repository root.
+- Planner: the plan's `custom_private` is written and read in one place each,
+  `form_plan_info` and `lf_deform_plan_info`, from and into a typed
+  `IntersectPlanInfo`; the path keeps the struct (`IntersectPath`) instead of
+  the lists, and the positional `PRIVATE_*` / `STREAM_*` offsets are gone. No
+  change in plans or results.
+
+- Test servers: `tests/scripts/temp.conf` (`make check`, the cassert image), the Compose
+  server and the CI cluster also set `extra_float_digits = 0`, `timezone = 'UTC'`,
+  `datestyle = 'ISO, MDY'` and `lc_messages = 'C'`, so that output does not depend on the
+  machine's locale or time zone. No expected output changed.
 - README shows two measurements only: the list query with rare, scattered matches
   at 100M rows, with the plans, and the write comparison; the rest is in
   BENCHMARKS.md.
@@ -45,6 +183,10 @@ versions: [SemVer](https://semver.org/).
   `make bench` run it at 20M rows (below that `LIMIT 100` cannot stop early, which a
   warning says), the manual CI job at 1M to check the harness, and `bench-smoke` checks
   it too.
+- Source: every PostgreSQL version conditional is in `src/compat.h` (after PG-Strom's
+  `pg_compat.h` and Citus's `pg_version_constants.h`): `lf_index_beginscan`, the
+  node instrumentation accessors and `LF_DATUM_IS_64BIT`; a build against a server
+  older than PostgreSQL 18 stops with an error. No change in behaviour.
 
 ### Removed
 
@@ -87,8 +229,8 @@ versions: [SemVer](https://semver.org/).
   for the other columns, 15); the read runs are labelled with their strategy.
 - `list_bench.sh`: the list query with rare, scattered matches, rows in random or `id`
   order, six plan modes and text plans; checked by `bench-smoke`.
-- `bitmap_bench.sh`: an `exact` mode, with indexes made for the queries, and index sizes in
-  `sizes.csv`. `write_bench.sh`: `STRATEGIES` picks the index sets to run.
+- `bitmap_bench.sh`: an `exact` mode, with indexes made for the queries, and index sizes
+  in `sizes.csv`. `write_bench.sh`: `STRATEGIES` picks the index sets to run.
 - Shorter script headers and fewer source comments; no change to the code.
 
 ### Fixed
@@ -595,7 +737,8 @@ output may still change.
   end of the `ExecScan` call. Replaced with `ExecQualAndReset`.
 - A shadowed variable declaration (`-Wshadow=compatible-local`).
 
-[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.1...v0.0.2

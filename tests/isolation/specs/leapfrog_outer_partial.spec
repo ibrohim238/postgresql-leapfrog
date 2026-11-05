@@ -1,9 +1,5 @@
-# EvalPlanQual with a partial index on the outer side.  The node does not
-# keep the outer predicate itself; the condition it implies
-# (deleted_at IS NULL) must stay in the node's Filter, which ExecScan
-# applies to the new row version under EvalPlanQual.  A row soft-deleted
-# while SELECT ... FOR UPDATE waits for it must be dropped, as by the stock
-# plan under the same interleaving.
+# EvalPlanQual with a partial outer index: its condition stays in the Filter, so a row soft-deleted under FOR UPDATE is dropped.
+# alternative output leapfrog_outer_partial_1.out: PostgreSQL 19 costs the two streams the other way round and makes lf_iso_op_product_id_kind the outer one; remove when PostgreSQL 19 is the oldest supported version or s2_plan no longer prints the stream order
 
 setup
 {
@@ -36,7 +32,7 @@ step s1_kind		{ UPDATE lf_iso_op SET kind = 7 WHERE id = 22; }
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_plan	{
 	EXPLAIN (COSTS OFF)
 	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
@@ -48,9 +44,11 @@ step s2_lock	{
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, customer_id, product_id, kind, deleted_at IS NULL AS live FROM lf_iso_op
 	WHERE customer_id = 2 AND product_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 4 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
 permutation s2_plan
@@ -59,7 +57,6 @@ permutation s2_plan
 permutation s1_begin s1_soft_delete s2_lock s1_commit
 permutation s1_begin s1_soft_delete s2_lock_std s1_commit
 
-# A column of the inner index after the sort column changes (non-HOT): the
-# row still matches and is returned with the new value.
+# A non-HOT change of an inner index column after the sort column: the row is still returned.
 permutation s1_begin s1_kind s2_lock s1_commit
 permutation s1_begin s1_kind s2_lock_std s1_commit

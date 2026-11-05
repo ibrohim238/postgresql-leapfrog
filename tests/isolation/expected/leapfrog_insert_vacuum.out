@@ -24,9 +24,11 @@ count| max|   sum
 
 step s2_count_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), max(id), sum(id) FROM (
 		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count| max|   sum
 -----+----+------
@@ -45,9 +47,11 @@ count| max|   sum
 
 step s2_count_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), max(id), sum(id) FROM (
 		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count| max|   sum
 -----+----+------
@@ -96,8 +100,10 @@ step s1_lock_and_insert:
 step s2_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_lock_std: <... completed>
@@ -110,8 +116,10 @@ step s2_lock_std: <... completed>
 
 step s2_lock_std: 
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
     id|payload
 ------+-------
@@ -152,9 +160,11 @@ count|max|  sum
 
 step s2_count_std: 
 	SET LOCAL leapfrog.enabled = off;
+	SET LOCAL leapfrog.require_node = forbid;
 	SELECT count(*), max(id), sum(id) FROM (
 		SELECT id FROM lf_iso_iv WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id DESC) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 
 count|max|  sum
 -----+---+-----

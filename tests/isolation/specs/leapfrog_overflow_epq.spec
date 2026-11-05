@@ -1,8 +1,5 @@
-# EvalPlanQual through the overflow fallback.  The TID group of the only
-# grp value exceeds work_mem (64kB), so every outer row of the value is
-# fetched and the inner equality (product_id) is checked on the row; under
-# EvalPlanQual it is checked again on the new version.  Row order inside one
-# grp value is not defined, so the results are compared as count and sum.
+# EvalPlanQual through the overflow fallback: the inner equality is rechecked on the new version.
+# Order inside one grp value is undefined: results compared as count and sum.
 
 setup
 {
@@ -33,7 +30,7 @@ step s1_join_product	{ UPDATE lf_iso_oe SET product_id = 2 WHERE id IN (4, 8); }
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET work_mem = '64kB'; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET work_mem = '64kB'; SET leapfrog.require_node = require; }
 step s2_explain	{
 	EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 	SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE;
@@ -44,16 +41,16 @@ step s2_lock	{
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT count(*), sum(id) FROM (
 		SELECT id FROM lf_iso_oe WHERE customer_id = 1 AND product_id = 2 ORDER BY grp FOR UPDATE) s;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
-# the plan: the node, overflowing its group
 permutation s2_explain
 
-# Rows leave the inner side while the locking query waits for them: the
-# fallback's recheck drops them, as the stock plan does.
+# Rows leave the inner side while the lock waits: the fallback's recheck drops them.
 permutation s1_begin s1_move_product s2_lock s1_commit
 permutation s1_begin s1_move_product s2_lock_std s1_commit
 

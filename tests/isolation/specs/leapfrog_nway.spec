@@ -1,7 +1,4 @@
-# EvalPlanQual with three streams: a concurrent update changes the column of
-# the second or the third stream while SELECT FOR UPDATE waits for the row.
-# The recheck evaluates every stream's conditions on the new version.  Every
-# permutation is followed by the stock plan under the same interleaving.
+# EvalPlanQual with three streams: the recheck evaluates every stream's conditions on the new version.
 
 setup
 {
@@ -36,7 +33,7 @@ step s1_payload		{ UPDATE lf_iso_nway SET payload = 'changed' WHERE id = 4997; }
 step s1_commit		{ COMMIT; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.min_indexes = 3; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.min_indexes = 3; SET leapfrog.require_node = require; }
 step s2_plan	{
 	EXPLAIN (COSTS OFF)
 	SELECT id, payload FROM lf_iso_nway WHERE customer_id = 7 AND product_id = 2 AND deleted_at IS NULL
@@ -48,9 +45,11 @@ step s2_lock	{
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, payload FROM lf_iso_nway WHERE customer_id = 7 AND product_id = 2 AND deleted_at IS NULL
 	ORDER BY id DESC LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
 permutation s2_plan

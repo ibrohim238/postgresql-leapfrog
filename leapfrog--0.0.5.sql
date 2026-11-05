@@ -3,12 +3,7 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION leapfrog" to load this file. \quit
 
---
--- The extension works through a planner hook that is installed when the
--- shared library is loaded (shared_preload_libraries, session_preload_libraries
--- or LOAD).  CREATE EXTENSION registers the SQL-visible helpers below; creating
--- a C function also loads the library into the current session.
---
+-- The planner hook is installed when the library is loaded; creating a C function loads it.
 
 CREATE FUNCTION leapfrog_version()
 RETURNS text

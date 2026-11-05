@@ -1,0 +1,140 @@
+-- leapfrog_memory: per-tuple memory of the predicate fallback and of the equality values.
+-- Measures the backend's peak RSS (VmHWM), so it runs in its own file; Linux, superuser.
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+CREATE FUNCTION lf_peak_rss_kb() RETURNS bigint
+LANGUAGE sql AS $$
+	SELECT (regexp_match(pg_read_file('/proc/self/status'),
+						 'VmHWM:\s+(\d+) kB'))[1]::bigint
+$$;
+CREATE TABLE lf_memory (
+	id bigint PRIMARY KEY,
+	owner_id bigint NOT NULL,
+	group_id bigint NOT NULL,
+	deleted_at timestamptz,
+	tag text NOT NULL
+);
+-- 50,000 rows failing the predicate first, then 11,000 live: more than 10,922 TIDs fit into 64kB.
+INSERT INTO lf_memory
+SELECT g, 1, 1, '2026-01-01', 't' FROM generate_series(1, 50000) g;
+INSERT INTO lf_memory
+SELECT g, 1, 1, NULL, 't' FROM generate_series(50001, 61000) g;
+CREATE INDEX lf_memory_owner_group ON lf_memory (owner_id, group_id);
+CREATE INDEX lf_memory_live_group ON lf_memory (group_id)
+	WHERE length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL;
+VACUUM ANALYZE lf_memory;
+SET work_mem = '64kB';
+SET leapfrog.force = on;
+-- Must be the first run in the backend: a leak raises the peak only once.
+SELECT lf_peak_rss_kb() AS before_kb \gset
+SELECT count(*) FROM (
+	SELECT id FROM lf_memory
+	WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+	ORDER BY group_id) s;
+ count 
+-------
+ 11000
+(1 row)
+
+SELECT lf_peak_rss_kb() - :before_kb < 32 * 1024 AS peak_growth_below_32mb;
+ peak_growth_below_32mb 
+------------------------
+ t
+(1 row)
+
+-- The plan under test, and the fallback really ran.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM (
+	SELECT id FROM lf_memory
+	WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+	ORDER BY group_id) s;
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Result
+         ->  Custom Scan (Index Merge Intersect) on lf_memory
+               ->  Outer Stream on lf_memory_owner_group
+                     Index Cond: (lf_memory.owner_id = 1)
+               ->  Inner Stream on lf_memory_live_group
+                     Index Pred: ((length(repeat(lf_memory.tag, 4000)) > 0) AND (lf_memory.deleted_at IS NULL))
+(7 rows)
+
+SELECT * FROM lf_counters($$
+SELECT id FROM lf_memory
+WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+ORDER BY group_id $$)
+WHERE counter IN ('Group Overflows', 'Rows Checked by Predicate', 'Actual Rows');
+          counter          |  value   
+---------------------------+----------
+ Rows Checked by Predicate | 61000
+ Group Overflows           | 1
+ Actual Rows               | 11000.00
+(3 rows)
+
+SELECT lf_check($$
+SELECT id FROM lf_memory
+WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
+ORDER BY group_id, id $$);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 11000/11000, missing: 0, extra: 0
+(1 row)
+
+RESET leapfrog.force;
+RESET work_mem;
+DROP TABLE lf_memory;
+-- Equality values are kept until the next rescan; "C" keeps comparing the long values cheap.
+CREATE TABLE lf_memory_values (
+	id bigint PRIMARY KEY,
+	path text COLLATE "C" NOT NULL,
+	tag text COLLATE "C" NOT NULL
+);
+INSERT INTO lf_memory_values
+SELECT g, 'p' || g % 2, 't' || g % 3 FROM generate_series(1, 3000) g;
+CREATE INDEX lf_memory_values_path ON lf_memory_values (path, id);
+CREATE INDEX lf_memory_values_tag ON lf_memory_values (tag, id);
+ANALYZE lf_memory_values;
+SET leapfrog.force = on;
+SET enable_material = off;
+SET enable_memoize = off;
+SELECT lf_peak_rss_kb() AS before_kb \gset
+SELECT count(*) FROM generate_series(1, 40000) d(g)
+CROSS JOIN LATERAL (SELECT id FROM lf_memory_values v
+	WHERE v.path = 'p' || d.g % 2 || repeat('x', 3000 + d.g % 7)
+		AND v.tag = 't' || d.g % 3 || repeat('x', 3000 + d.g % 5)
+	ORDER BY id LIMIT 1) v;
+ count 
+-------
+     0
+(1 row)
+
+SELECT lf_peak_rss_kb() - :before_kb < 32 * 1024 AS peak_growth_below_32mb;
+ peak_growth_below_32mb 
+------------------------
+ t
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM generate_series(1, 40000) d(g)
+CROSS JOIN LATERAL (SELECT id FROM lf_memory_values v
+	WHERE v.path = 'p' || d.g % 2 || repeat('x', 3000 + d.g % 7)
+		AND v.tag = 't' || d.g % 3 || repeat('x', 3000 + d.g % 5)
+	ORDER BY id LIMIT 1) v;
+                                                          QUERY PLAN                                                          
+------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         ->  Function Scan on generate_series d
+         ->  Limit
+               ->  Custom Scan (Index Merge Intersect) on lf_memory_values v
+                     ->  Outer Stream on lf_memory_values_path
+                           Index Cond: (v.path = (('p'::text || ((d.g % 2))::text) || repeat('x'::text, (3000 + (d.g % 7)))))
+                     ->  Inner Stream on lf_memory_values_tag
+                           Index Cond: (v.tag = (('t'::text || ((d.g % 3))::text) || repeat('x'::text, (3000 + (d.g % 5)))))
+(9 rows)
+
+RESET enable_memoize;
+RESET enable_material;
+RESET leapfrog.force;
+DROP TABLE lf_memory_values;
+DROP FUNCTION lf_peak_rss_kb();

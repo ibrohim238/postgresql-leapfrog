@@ -1,7 +1,4 @@
-# EvalPlanQual with a text sort column: the node rechecks its equalities on
-# the new version of the row, whatever the type it merges on.  Every
-# permutation runs with the node and with the stock plan under the same
-# interleaving.
+# EvalPlanQual with a text sort column; every permutation runs with the node and with the stock plan.
 
 setup
 {
@@ -26,13 +23,15 @@ step s1_note { UPDATE lf_iso_st SET note = 'changed' WHERE id = 22; }
 step s1_commit { COMMIT; }
 
 session s2
-setup { LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup { LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_plan { EXPLAIN (COSTS OFF) SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE; }
 step s2_lock { SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE; }
 step s2_lock_std {
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, note FROM lf_iso_st WHERE a = 2 AND b = 1 ORDER BY val LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
 permutation s2_plan

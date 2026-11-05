@@ -1,0 +1,38 @@
+-- leapfrog_sort_icu: a sort column in an ICU collation; stops without a UTF8 database and ICU
+-- alternative output leapfrog_sort_icu_1.out: a database that is not UTF8 or a server without ICU, where the test stops; remove when the extension requires ICU
+SELECT getdatabaseencoding() <> 'UTF8' OR NOT EXISTS (
+	SELECT FROM pg_collation WHERE collname = 'und-x-icu'
+) AS skip_test \gset
+\if :skip_test
+\quit
+\endif
+
+CREATE TABLE lf_si (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val text COLLATE "und-x-icu" NOT NULL);
+-- 'a...' sorts before 'B...' under ICU and after it under "C"
+INSERT INTO lf_si
+SELECT g, abs(hashint8(g * 3)) % 10, abs(hashint8(g * 5)) % 10,
+	CASE WHEN g % 2 = 0 THEN 'a' ELSE 'B' END || lpad((abs(hashint8(g * 7)) % 2000)::text, 8, '0')
+FROM generate_series(1, 20000) g;
+CREATE INDEX lf_si_a ON lf_si (a, val);
+CREATE INDEX lf_si_b ON lf_si (b, val);
+ANALYZE lf_si;
+SELECT ord, lf_check(format('SELECT id FROM lf_si WHERE a = 3 AND b = 2 ORDER BY %s, id', ord))
+FROM unnest(ARRAY['val', 'val DESC', 'val COLLATE "C"', 'val COLLATE "C" DESC']) ord ORDER BY 1;
+-- the order is the collation's, not the bytes'
+SELECT left(val, 1) AS first_letter FROM lf_si WHERE a = 3 AND b = 2 ORDER BY val LIMIT 1;
+CREATE INDEX lf_si_a_c ON lf_si (a, val COLLATE "C");
+CREATE INDEX lf_si_b_c ON lf_si (b, val COLLATE "C");
+SELECT ord, lf_check(format('SELECT id FROM lf_si WHERE a = 3 AND b = 2 ORDER BY %s, id', ord))
+FROM unnest(ARRAY['val', 'val COLLATE "C"']) ord ORDER BY 1;
+DROP TABLE lf_si;
+
+-- A nondeterministic collation: values equal under it are one group.
+CREATE COLLATION lf_si_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+CREATE TABLE lf_si_nd (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val text COLLATE lf_si_ci NOT NULL);
+INSERT INTO lf_si_nd SELECT g, g % 3, g % 2, CASE WHEN g % 2 = 0 THEN 'V' ELSE 'v' END || (g % 40) FROM generate_series(1, 6000) g;
+CREATE INDEX lf_si_nd_a ON lf_si_nd (a, val);
+CREATE INDEX lf_si_nd_b ON lf_si_nd (b, val);
+ANALYZE lf_si_nd;
+SELECT lf_check($$ SELECT id FROM lf_si_nd WHERE a = 1 AND b = 1 ORDER BY val, id $$);
+DROP TABLE lf_si_nd;
+DROP COLLATION lf_si_ci;

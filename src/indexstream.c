@@ -2,8 +2,7 @@
  *
  * indexstream.c
  *	  Reading one btree index as a sorted stream of (sortcol value, heap
- *	  TID) entries without visiting the heap.  Used by the executor's merge
- *	  and by the planner's range probe.
+ *	  TID) entries without visiting the heap.
  *
  * IDENTIFICATION
  *	  src/indexstream.c
@@ -28,10 +27,8 @@
 
 /*
  * lf_scan_leaf_position
- *		The leaf page the scan is positioned on and its neighbour in scan
- *		direction; false when it is positioned nowhere.  For the skip-ahead's
- *		landing check; with scan_will_step and prefetch_next_leaf below, the
- *		reads of nbtree's private scan state.
+ *		The leaf page the scan is on and its neighbour in scan direction;
+ *		false when it is positioned nowhere.  Reads nbtree's private state.
  */
 bool
 lf_scan_leaf_position(IndexScanDesc scan, bool backward, BlockNumber *page,
@@ -48,8 +45,7 @@ lf_scan_leaf_position(IndexScanDesc scan, bool backward, BlockNumber *page,
 /*
  * lf_rescan_with_keys
  *		Position an index scan on the stream's equality values and on what is
- *		asked of sortcol.  Opened with room for nequal + 1 keys; numberOfKeys
- *		follows the keys used, as no value lets every entry through.
+ *		asked of sortcol.  The scan is opened with room for nequal + 1 keys.
  */
 void
 lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, SortBound kind,
@@ -97,9 +93,7 @@ lf_rescan_with_keys(IndexScanDesc scan, EqualityKeys *keys, SortBound kind,
 
 /*
  * lf_init_key_procs
- *		Look up each equality operator's function and right input type, and
- *		for the bound the opfamily's ">=" or "<=" of the sort type, by the
- *		direction of the pathkey.
+ *		Look up the functions of the equality and the sortcol bound operators.
  */
 void
 lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
@@ -127,25 +121,7 @@ lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
 	keys->bound_proc = get_opcode(bound_op);
 }
 
-/*
- * lf_read_index_entry
- *		Fetch the next (sortcol value, heap TID) entry.  *entries_read counts
- *		every entry taken, skipped ones too.  A by-reference value points into
- *		the scan's index tuple: it stays valid until the scan moves on.
- *
- * skip_nulls means the planner found sortcol NOT NULL, but that describes the
- * live rows: an index can hold dead NULL entries until VACUUM, for instance
- * when a NULL was updated away before SET NOT NULL.  They cannot belong to a
- * row the merge returns, since NULL never satisfies the equality the merge is
- * built on, and treated as values they would derail it: a backward scan reads
- * them first.  Otherwise a NULL is a value of the merge like any other.
- */
-/*
- * scan_will_step
- *		Whether the next entry comes from another leaf page: the scan has
- *		no position, or stands on the last item of its page.  Reads
- *		nbtree's scan position, like lf_scan_leaf_position.
- */
+/* Whether the next entry comes from another leaf page. */
 static inline bool
 scan_will_step(IndexScanDesc scan, ScanDirection dir)
 {
@@ -158,12 +134,7 @@ scan_will_step(IndexScanDesc scan, ScanDirection dir)
 	return so->currPos.itemIndex <= so->currPos.firstItem;
 }
 
-/*
- * prefetch_next_leaf
- *		Ask for the leaf page after the one just reached, so that its read
- *		overlaps the entries of this one; not when nbtree already knows the
- *		scan ends on this page.  Returns whether a page was asked for.
- */
+/* Prefetch the next leaf page, unless nbtree knows the scan ends here. */
 static inline bool
 prefetch_next_leaf(IndexScanDesc scan, ScanDirection dir)
 {
@@ -183,8 +154,11 @@ prefetch_next_leaf(IndexScanDesc scan, ScanDirection dir)
 }
 
 /*
- * instr is the stream's instrumentation, clocked on page steps, which also
- * prefetch the next leaf page; NULL from a planner probe: neither.
+ * lf_read_index_entry
+ *		Fetch the next (sortcol value, heap TID) entry.  A by-reference value
+ *		points into the scan's index tuple: valid until the scan moves on.
+ *		skip_nulls drops NULL entries, which may be dead even under NOT NULL
+ *		(docs/design.md).  instr is NULL for a planner probe.
  */
 bool
 lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
@@ -213,7 +187,6 @@ lf_read_index_entry(IndexScanDesc scan, ScanDirection dir, int attno,
 			return false;
 		(*entries_read)++;
 
-		/* xs_want_itup is set and btree always returns the index tuple */
 		Assert(scan->xs_itup != NULL);
 
 		datum = index_getattr(scan->xs_itup, attno, scan->xs_itupdesc,

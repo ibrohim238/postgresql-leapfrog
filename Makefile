@@ -1,12 +1,6 @@
-# postgresql-leapfrog — Index Merge Intersect custom scan for PostgreSQL 18
-#
-# Build with PGXS:
-#   make            build the shared library
-#   make install    install library, control file and SQL script
-#   make installcheck   run regression and isolation tests against a
-#                       running server (PGHOST/PGPORT/PGUSER are honoured)
-#   make check      run the same tests against a temporary installation
-#                   (requires a source-tree build of PostgreSQL)
+# postgresql-leapfrog, built with PGXS: make, make install, make installcheck
+# (against PGHOST/PGPORT/PGUSER).  The other targets: docs/testing.md,
+# docs/tooling.md, docs/docker.md, docs/benchmarks.md.
 
 MODULE_big = leapfrog
 OBJS = \
@@ -52,7 +46,8 @@ REGRESS = \
 	leapfrog_merge_order \
 	leapfrog_planner \
 	leapfrog_first_group \
-	leapfrog_heap_prefetch
+	leapfrog_heap_prefetch \
+	leapfrog_require
 
 ISOLATION = \
 	leapfrog_concurrent_update \
@@ -71,18 +66,14 @@ ISOLATION = \
 	leapfrog_nulls
 
 ISOLATION_OPTS = --load-extension=leapfrog
-REGRESS_OPTS = --load-extension=leapfrog
+REGRESS_OPTS = --load-extension=leapfrog --inputdir=tests/regress --outputdir=tests/regress
 
-# Isolation specs live in tests/isolation/specs with their expected output in
-# tests/isolation/expected, following the layout of src/test/isolation.
 ISOLATION_OPTS += --inputdir=tests/isolation --outputdir=tests/isolation
 
-# The planner hook is installed when the library is loaded.  "make check"
-# starts a temporary server; preload the library there.
+# make check's temporary server preloads the library
 EXTRA_REGRESS_OPTS += --temp-config=$(CURDIR)/tests/scripts/temp.conf
 
-# Warnings on top of the ones pg_config's CFLAGS already carry (the core
-# set: -Wall -Wmissing-prototypes -Wdeclaration-after-statement ...).
+# on top of pg_config's CFLAGS (-Wall -Wmissing-prototypes ...)
 PG_CFLAGS += -Wextra -Wno-unused-parameter -Wno-sign-compare \
 	-Wpointer-arith -Wformat-security
 
@@ -91,19 +82,24 @@ PG_CFLAGS += -Werror
 endif
 
 PG_CONFIG ?= pg_config
+# a failing regress suite stops installcheck before isolation: no stale results
+REGRESS_PREP = clean-results
+
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-# pg_config's CFLAGS and headers were chosen for the compiler PostgreSQL was
-# built with (gcc in the PGDG packages); clang must not fail on options and
-# attributes it does not know.
+# clang on pg_config's CFLAGS and headers, which are gcc's (PGDG packages)
 ifneq (,$(findstring clang,$(CC)))
 override CFLAGS += -Wno-unknown-warning-option -Wno-ignored-attributes
 endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation bench bench-smoke docker-test pgindent pgindent-fix
+.PHONY: clean-results test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version lint lint-fix docker-build
+
+clean-results:
+	rm -f tests/regress/regression.out tests/regress/regression.diffs \
+		tests/isolation/regression.out tests/isolation/regression.diffs
 
 test: installcheck
 
@@ -113,17 +109,53 @@ test-regress:
 test-isolation:
 	$(pg_isolation_regress_installcheck) $(ISOLATION_OPTS) $(ISOLATION)
 
+RUN_ONE_ENV = PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' \
+	PG_ISOLATION_REGRESS='$(top_builddir)/src/test/isolation/pg_isolation_regress' \
+	PG_BINDIR='$(bindir)'
+
+test-one:
+	@test -n '$(TEST)' || { echo 'usage: make test-one TEST=name [REPEATS=N] [KIND=isolation]' >&2; exit 2; }
+	$(RUN_ONE_ENV) bash tests/scripts/run-one.sh '$(TEST)' -r '$(or $(REPEATS),1)' \
+		$(if $(filter isolation,$(KIND)),--isolation)
+
+installcheck-rerun:
+	$(RUN_ONE_ENV) bash tests/scripts/rerun-failed.sh -r '$(or $(REPEATS),1)'
+check-tests:
+	bash tests/scripts/check-tests.sh
+
+check-version:
+	bash tests/scripts/check-version.sh $(if $(RELEASE),--release)
+
+installcheck-upgrade:
+	EXTVERSION='$(EXTVERSION)' UPGRADE_FROM='$(UPGRADE_FROM)' \
+		PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' \
+		PG_BINDIR='$(bindir)' \
+		bash tests/scripts/upgrade-check.sh
+
 bench:
-	bash tests/performance/list_bench.sh
+	SIZE=$${SIZE:-20000000} bash tests/performance/list_bench.sh
 
 bench-smoke:
 	bash tests/scripts/bench-smoke.sh
 
+# the test image writes into the mounted tree as the caller
+PG_MAJOR ?= 18
+DOCKER_ENV = PG_MAJOR='$(PG_MAJOR)' LEAPFROG_UID="$$(id -u)" LEAPFROG_GID="$$(id -g)"
+
+docker-build:
+	$(DOCKER_ENV) docker compose --profile test build
+
 docker-test:
-	bash tests/run-in-docker.sh
+	$(DOCKER_ENV) bash tests/run-in-docker.sh
 
 pgindent:
 	bash tests/scripts/pgindent.sh
 
 pgindent-fix:
 	bash tests/scripts/pgindent.sh --fix
+
+lint:
+	bash tests/scripts/lint.sh
+
+lint-fix:
+	bash tests/scripts/lint.sh --fix

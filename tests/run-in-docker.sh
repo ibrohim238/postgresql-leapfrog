@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
-# Build the images, start PostgreSQL 18 with leapfrog preloaded and run the
-# regression and isolation suites inside the test container.
-#
-# Everything runs in a Compose project of its own, leapfrog-test-<pid>-<random>
-# (or COMPOSE_TEST_PROJECT), not in the default project leapfrog: the
-# containers and the pgdata volume removed afterwards are this run's own, so
-# a server started with "docker compose up", or kept by an earlier run with
-# --keep, keeps running with its data.  A COMPOSE_TEST_PROJECT that already
-# has containers or volumes is refused, since the run removes them at the
-# end.  Needs Docker Compose 2.24.4 or later (!override in the overlay).
-#
-#   bash tests/run-in-docker.sh            run the tests
-#   bash tests/run-in-docker.sh --keep     leave the server running afterwards
+# Build the images and run the suites in a Compose project of its own.
+# Usage: run-in-docker.sh [--keep]   (--keep: leave the server running)
+# Environment: PG_MAJOR, COMPOSE_TEST_PROJECT.  See docs/docker.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -52,7 +42,10 @@ if [ "$keep" -eq 0 ]; then
 	trap 'compose down -v' EXIT
 fi
 
-mkdir -p results tests/isolation/results
+# the test container writes into the mounted tree as this user
+LEAPFROG_UID=$(id -u)
+LEAPFROG_GID=$(id -g)
+export LEAPFROG_UID LEAPFROG_GID
 
 compose up -d --build --wait postgres
 status=0

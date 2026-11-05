@@ -1,8 +1,5 @@
-# EvalPlanQual through partitions: the node under a Merge Append rechecks the
-# equalities enforced by its inner index on the new row version.  Every
-# permutation runs with the node and with the stock plan under the same
-# interleaving and must give the same rows; a row moved to another partition
-# fails the same way in both.
+# EvalPlanQual through partitions: the node under a Merge Append rechecks its inner equalities.
+# Every permutation runs with the node and with the stock plan.
 
 setup
 {
@@ -33,8 +30,8 @@ step w_commit { COMMIT; }
 
 session reader
 setup { LOAD 'leapfrog'; }
-step r_node { SET leapfrog.enabled = on; SET leapfrog.force = on; }
-step r_stock { SET leapfrog.enabled = off; SET leapfrog.force = off; }
+step r_node { SET leapfrog.enabled = on; SET leapfrog.force = on; SET leapfrog.require_node = require; }
+step r_stock { SET leapfrog.enabled = off; SET leapfrog.force = off; SET leapfrog.require_node = forbid; }
 step r_plan { EXPLAIN (COSTS OFF) SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; }
 step r_lock { SELECT id, val FROM lf_iso_part WHERE kind = 1 AND flag = 2 ORDER BY id LIMIT 2 FOR UPDATE; }
 

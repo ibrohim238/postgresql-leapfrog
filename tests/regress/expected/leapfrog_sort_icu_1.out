@@ -1,0 +1,7 @@
+-- leapfrog_sort_icu: a sort column in an ICU collation; stops without a UTF8 database and ICU
+-- alternative output leapfrog_sort_icu_1.out: a database that is not UTF8 or a server without ICU, where the test stops; remove when the extension requires ICU
+SELECT getdatabaseencoding() <> 'UTF8' OR NOT EXISTS (
+	SELECT FROM pg_collation WHERE collname = 'und-x-icu'
+) AS skip_test \gset
+\if :skip_test
+\quit

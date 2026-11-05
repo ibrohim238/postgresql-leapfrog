@@ -1,0 +1,3 @@
+[codespell]
+# expected output repeats what the server prints
+skip = .git,.claude,*/expected,*.out,*/results,*.o,*.so,*.bc

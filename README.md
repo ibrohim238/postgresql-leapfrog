@@ -81,7 +81,7 @@ live. Indexes `(customer_id, id)`, `(product_id, id)`,
 [`list_bench.sh`](tests/performance/list_bench.sh), which runs each scenario separately. Each table: median of 3 runs,
 the slowest in brackets. Each plan: one run, so not the median; `read=` means pages
 from disk. Exact index: built for the query. Stock: the planner's choice without
-the extension. leapfrog: the planner's choice with it. Other runs:
+the extension. Index Merge Intersect: the planner's choice with it. Other runs:
 [BENCHMARKS.md](BENCHMARKS.md#100m-rows-the-list-query-needles-and-the-middle-fed2cfb).
 
 ### Case 1: a large customer with few live rows
@@ -94,7 +94,7 @@ SELECT * FROM orders WHERE customer_id = $1 AND deleted_at IS NULL
 ORDER BY id DESC LIMIT 100;
 ```
 
-| Exact index | leapfrog | Stock | `BitmapAnd` |
+| Exact index | Index Merge Intersect | Stock | `BitmapAnd` |
 |---:|---:|---:|---:|
 | **0.20 ms** | **105 ms** (268 ms) | Index Scan 95.4 s (95.7 s) | 2.7 s (2.8 s) |
 
@@ -102,7 +102,7 @@ Stock walks the live rows expecting one in 20 to be this customer's, and fetches
 934,625 of them for 100 results. The node reads the two indexes, 1.9M entries and
 6,476 pages, and fetches the 100 rows it returns.
 
-leapfrog, pages from disk:
+Index Merge Intersect, pages from disk:
 
 ```text
  Limit (actual time=4.534..877.096 rows=100.00 loops=1)
@@ -152,14 +152,14 @@ SELECT * FROM orders WHERE customer_id = $1 AND deleted_at IS NULL
 ORDER BY id DESC LIMIT 100;
 ```
 
-| Exact index | leapfrog | Stock | `BitmapAnd` |
+| Exact index | Index Merge Intersect | Stock | `BitmapAnd` |
 |---:|---:|---:|---:|
 | **0.19 ms** | **56 ms** (79 ms) | Index Scan 776 ms (1.1 s) | 772 ms (919 ms) |
 
 Stock walks the customer's rows and fetches 198,190 of them. The node reads 1.1M
 index entries and 3,409 pages, and fetches 100 rows.
 
-leapfrog, pages from disk:
+Index Merge Intersect, pages from disk:
 
 ```text
  Limit (actual time=0.112..83.825 rows=100.00 loops=1)
@@ -213,7 +213,7 @@ SELECT * FROM orders WHERE customer_id = $1 AND product_id = $2 AND deleted_at I
 ORDER BY id DESC LIMIT 100;
 ```
 
-| Exact index | leapfrog | Stock | `BitmapAnd` |
+| Exact index | Index Merge Intersect | Stock | `BitmapAnd` |
 |---:|---:|---:|---:|
 | **0.03 ms** | **252 ms** (1.3 s) | `BitmapAnd` 746 ms (1.5 s) | 1.1 s (1.5 s) |
 
@@ -225,7 +225,7 @@ the 11 live ones. The brackets are from disk, cache evicted before each run. Sin
 pages (`Heap Prefetches`): 1.3 s against 2.4 s without it. This is the edge of what the
 node is for: a frequent query of this shape wants its exact index.
 
-Both plans from disk. leapfrog:
+Both plans from disk. Index Merge Intersect:
 
 ```text
  Limit (actual time=33.289..1287.042 rows=11.00 loops=1)
@@ -584,7 +584,10 @@ bash tests/run-in-docker.sh --keep   # keep the server running
 
 `run-in-docker.sh` needs Docker Compose 2.24.4 or later, for `!override` in
 `tests/compose.test.yaml`. `COMPOSE_TEST_PROJECT` sets the project name; a
-project that already has containers or volumes is refused.
+project that already has containers or volumes is refused. The test container
+mounts the repository, builds the extension from it and runs as a user with
+your UID and GID, so its output (`tests/regress/results`, the objects) is
+yours.
 
 Benchmarks (`bench` profile: `list_bench.sh`, 20M rows by default; below that the customers have too few live rows for `LIMIT 100` to stop early):
 
@@ -618,7 +621,15 @@ password is well known; `0.0.0.0` publishes it on every interface, for a
 client on another machine or a remote `DOCKER_HOST`; connect to `127.0.0.1`
 rather than `localhost`, which may resolve to `::1` first),
 `POSTGRES_PASSWORD` (`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB),
-`SIZE`, `REPEATS`.
+`SIZE`, `REPEATS`, `PG_MAJOR` (18), `LEAPFROG_TAG` (the image tag, `PG_MAJOR`),
+`LEAPFROG_UID`/`LEAPFROG_GID` (the ids of the test and bench containers' user,
+1000; `run-in-docker.sh` and `make docker-build` set yours).
+
+The `postgres` service starts the server with the settings of the test
+servers, `tests/scripts/temp.conf` (no parallel gather, `jit = off`,
+`timezone = 'UTC'`, …), on its command line; the image itself has stock
+settings. A test run against a server without them stops with a message
+naming the setting.
 
 ## Loading the library
 
@@ -657,8 +668,9 @@ replaces the file instead of rewriting it.
 | `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search; with extended statistics on the conditions, the first stream is also priced in a pair with each other index. |
 | `leapfrog.min_indexes` | `2` | `USERSET` | Developer setting: smaller sets are not offered and the set that reaches the size is offered whatever its cost, so that a larger set can be run against the stock plans (the tests use it). Not in `postgresql.conf.sample`. |
 | `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page; where the node's `Filter` drops more rows than it passes, matches are gathered ahead and their heap pages asked for, up to the table's tablespace `effective_io_concurrency` and at most 32; not on a table access method other than the heap. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
+| `leapfrog.require_node` | `allow` | `USERSET` | Developer setting for the tests, after TimescaleDB's `timescaledb.debug_require_vector_agg`: under `require` a query whose final plan (including subplans) has no Index Merge Intersect node fails at plan time, under `forbid` one whose plan has it; `allow` checks nothing. `EXPLAIN` fails the same way. A plan is checked when it is made, so a cached generic plan of a prepared statement is not checked again. Not in `postgresql.conf.sample`. |
 | `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by the tests; not in `postgresql.conf.sample`. |
-| `leapfrog.trace_planner` | `off` | `USERSET` | Developer setting: a `NOTICE` with what planning did (candidates, sets costed, range scans, statistics reads, fallbacks, correlations, candidates pruned); the tests check the planner by these counts. |
+| `leapfrog.trace_planner` | `off` | `USERSET` | Developer setting: a `NOTICE` with what planning did (candidates, sets costed, range scans, statistics reads, fallbacks, correlations, candidates pruned, paths offered); the tests check the planner by these counts. |
 
 The node is costed with PostgreSQL's own page and CPU costs, so the usual
 tuning applies. In particular, with the default `random_page_cost = 4` (spinning
@@ -728,9 +740,12 @@ Standard PostgreSQL infrastructure: `pg_regress` for SQL tests and
 
 ```bash
 make installcheck          # everything
-make test-regress          # sql/*.sql against expected/*.out only
+make test-regress          # tests/regress/sql/*.sql against tests/regress/expected/*.out only
 make test-isolation        # tests/isolation/specs/*.spec only
 make pgindent              # core code style
+make check-tests           # test lists, expected files, alternative outputs (no server)
+make check-version         # EXTVERSION, control file, scripts, CHANGELOG.md agree
+make lint                  # static checks of the tree (CONTRIBUTING.md, "Lint")
 make bench-smoke           # tiny run of the benchmark harness
 ```
 
@@ -743,6 +758,10 @@ docker build -f docker/cassert.Dockerfile -t leapfrog-cassert .
 docker run --rm leapfrog-cassert
 ```
 
+`--build-arg SANITIZE=address,undefined` builds the server and the extension
+with clang and AddressSanitizer and UndefinedBehaviorSanitizer; any report
+fails the run (see CONTRIBUTING.md).
+
 The regression tests need a superuser (as `pg_regress` normally runs):
 `leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` creates an
 in-place tablespace (`allow_in_place_tablespaces`) named after the database,
@@ -750,7 +769,7 @@ in-place tablespace (`allow_in_place_tablespaces`) named after the database,
 never changes `pg_default`; an existing tablespace of that name that is not
 the test's own (owner and comment) stops the test before anything is changed.
 
-Regression tests (`sql/`):
+Regression tests (`tests/regress/sql/`):
 
 | File | What it checks |
 |---|---|
@@ -770,22 +789,30 @@ Regression tests (`sql/`):
 | `leapfrog_types` | `uuid`, `text`, `varchar` (with a `text` constant), `smallint` (with a `bigint` constant) and `timestamptz` equality columns, three streams of three types; generic plans with `text` and `uuid` parameters and `NULL`; `LATERAL` rescans with changing `text` and `uuid` values; an inner `text` group overflowing `work_mem`; `smallint` and `integer` sort columns in both directions; values computed from parameters, from a join's other side and from `LATERAL` columns, a volatile value left to the stock plan; long `text` values compressed in the index, HOT updates of matched rows; sort columns of domains over `bigint` and `integer`; an index in another collation than the condition's |
 | `leapfrog_security` | row-level security: leakproof equalities become streams, others stay in `Filter`; the same query without the policy uses them |
 | `leapfrog_cost` | the node is charged for the clauses in its `Filter` and only those; a predicate implied by an equality does not lower the row estimate |
-| `leapfrog_partition` | hash and range partitions, a partition with other attribute numbers, `Merge Append` and ordered `Append`, run-time pruning, `LATERAL`, `FOR UPDATE`, row-level security, `TABLESAMPLE`, a partition without the indexes, inheritance |
+| `leapfrog_partition` | hash and range partitions, a partition with other attribute numbers, `Merge Append` and ordered `Append`, run-time pruning, `LATERAL`, a partitionwise join with the node inside its nested loops, `FOR UPDATE`, row-level security, `TABLESAMPLE`, a partition without the indexes, inheritance |
 | `leapfrog_sort_types` | `timestamptz`, `date`, `numeric`, `text` in two collations, `varchar`, `char`, `uuid`, arrays, enums, domains and `real` as sort columns, in both directions; skip-ahead with long text, overflow, generic plans, `LATERAL`; other collations, operator families and input types are no streams |
 | `leapfrog_sort_icu` | a sort column in an ICU collation, deterministic or not; skipped where the database's encoding has none |
-| `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions |
+| `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions; a strict condition on the column leaving the NULLs out (indexes with NULLs at either end, a `LATERAL` parameter, the NULLs not read), non-strict ones falling back |
 | `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 | `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
 | `leapfrog_planner` | by the counts of `leapfrog.trace_planner`: statistics, ranges and correlations read once, a stream that cannot pay for itself pruned; the estimate from the statistics read once, also inside one histogram bin |
 | `leapfrog_heap_prefetch` | matches gathered ahead where the `Filter` drops most rows: results and order against the stock plans, `LIMIT`, non-unique sort column, rescans, a cursor, `FOR UPDATE`, dead rows and HOT chains; none without a `Filter` or where it passes most rows, or with the setting off; a group overflowing `work_mem` after a queue, with two and three streams |
+| `leapfrog_require` | `leapfrog.require_node`: `require` and `forbid` with and without `leapfrog.force`, under `EXPLAIN`, the node in a subquery and an InitPlan, a prepared statement, a plpgsql function and a `DO` block; `allow` changes nothing |
 | `leapfrog_first_group` | startup cost against the group read first: a common value at the end of the range, behind a row or a dead entry (the Index Scan then chosen), in a generic plan, without a histogram, within reach of a `LIMIT`; a value or NULLs one stream does not hold; a group overflowing `work_mem`, first or further on; sorting a later group; a stream with a narrow range; the group of the NULLs, also with ranges that do not meet, and partial indexes without NULLs; a value out of the most common ones; a unique sort column; a set quicker to start offered next to the cheapest |
 
 Every `lf_check(query)` runs the query with the stock plan and with
 `leapfrog.force`, compares the multisets with `EXCEPT ALL` in both directions
 (and row positions when the sort key is unique) and reports whether the plan
 contained the `Custom Scan`, so a test cannot pass by accident through a plain
-Index Scan. Every fix and feature has a test that fails without it; the
-reverted variants were built and run.
+Index Scan. A canary in it, after TimescaleDB's `skip_scan` tests, captures the
+settings each of the two runs saw and fails when they are the same. Every fix
+and feature has a test that fails without it; the reverted variants were
+built and run.
+
+Where an isolation session is meant to run the node, it sets
+`leapfrog.require_node = require`, and its steps with the stock plan switch to
+`forbid`, so a silent fallback to either side fails the spec instead of
+comparing a plan with itself.
 
 Isolation tests (`tests/isolation/specs/`):
 
@@ -950,9 +977,14 @@ Verified against `src/` and the tests.
   are not supported.
 - A nullable sort column: NULL is a value of the merge, in the query's
   `NULLS FIRST`/`LAST` order, and every stream must have its NULLs at that end
-  in its scan direction. For a column `NOT NULL` according to the planner
-  (`RelOptInfo.notnullattnums`) the position of NULLs does not matter, and dead
-  index entries with NULL are skipped.
+  in its scan direction. The node leaves the NULLs out, and their position does
+  not matter, for a column `NOT NULL` according to the planner
+  (`RelOptInfo.notnullattnums`; dead index entries with NULL are skipped) and
+  for a column that a strict condition of the query rejects NULL in
+  (`val > 0`, `val > $1`, `val IS NOT NULL`, `val = ANY (…)`, as
+  `find_nonnullable_vars` proves it; not `COALESCE(val, 0) > 0` or
+  `val > 0 OR val IS NULL`): the streams start past their NULLs and stop at
+  them. Only a condition on the relation itself counts, not a join clause.
 - Index columns: nbtree v4, `ASC` or `DESC`, `NULLS FIRST` or `LAST`. Every
   stream scans in the direction that gives the query's order in its own
   index, so one node may run them in opposite directions.

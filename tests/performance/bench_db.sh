@@ -1,30 +1,13 @@
-# Sourced by the benchmark scripts: the database they run in.
-#
-# The benchmarks drop and recreate tables with common names (orders), so they
-# never run in PGDATABASE.  They run in BENCH_DB (default leapfrog_bench), a
-# database of their own: created when missing, with a comment that marks it
-# as a benchmark database, and refused when it exists without that mark, so
-# that BENCH_DB naming a database with real data stops the run before
-# anything is dropped.  The server is reached through PGHOST/PGPORT/PGUSER;
-# CREATE DATABASE runs from BENCH_ADMIN_DB (default postgres).
-#
-# The database is kept after a run; drop it with bench_db_drop or dropdb.
-#
-# One benchmark at a time per database: two would drop each other's tables,
-# and their timings would disturb each other anyway.  A run holds an
-# advisory lock in BENCH_DB, taken by a psql session in the background that
-# reads its commands from a pipe this shell keeps open; when the script ends,
-# however it ends, the pipe closes, that psql exits and the lock goes with
-# it.  A second run in the same database is refused; set BENCH_DB to run one
-# elsewhere.
+# shellcheck shell=bash
+# Sourced: the benchmarks' marked database BENCH_DB and its advisory lock.
+# Environment: BENCH_DB, BENCH_ADMIN_DB, PGHOST/PGPORT/PGUSER.
+# See docs/testing.md.
 
 BENCH_DB_MARK='leapfrog benchmark scratch database'
 BENCH_DB_LOCK_KEY='1818650210, 1'
 
-bench_admin_psql() {
-	psql -X -q -tA -v ON_ERROR_STOP=1 -d "${BENCH_ADMIN_DB:-postgres}" \
-		-v db="$BENCH_DB" -v mark="$BENCH_DB_MARK" "$@"
-}
+# shellcheck source=tests/scripts/scratch_db.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/scratch_db.sh"
 
 # bench_db_use: bench_db_prepare and bench_db_lock, released at exit.
 bench_db_use() {
@@ -37,11 +20,7 @@ bench_db_use() {
 bench_db_prepare() {
 	BENCH_DB=${BENCH_DB:-leapfrog_bench}
 	local state
-	state=$(bench_admin_psql <<-'SQL'
-		SELECT shobj_description(oid, 'pg_database') IS NOT DISTINCT FROM :'mark'
-		FROM pg_database WHERE datname = :'db'
-	SQL
-	)
+	state=$(scratch_db_state "$BENCH_DB" "$BENCH_DB_MARK")
 	case $state in
 		t) ;;
 		f)
@@ -49,12 +28,7 @@ bench_db_prepare() {
 				"a benchmark database (no comment '$BENCH_DB_MARK');" \
 				"set BENCH_DB to another name" >&2
 			exit 1 ;;
-		*)
-			bench_admin_psql <<-'SQL'
-				CREATE DATABASE :"db";
-				COMMENT ON DATABASE :"db" IS :'mark';
-			SQL
-			;;
+		*) scratch_db_create "$BENCH_DB" "$BENCH_DB_MARK" ;;
 	esac
 	export PGDATABASE=$BENCH_DB
 	psql -X -q -v ON_ERROR_STOP=1 -c "SET client_min_messages = warning" \
@@ -63,10 +37,9 @@ bench_db_prepare() {
 
 # bench_db_lock: take the benchmark lock in PGDATABASE, or exit.
 bench_db_lock() {
-	# the session is recognised by its application name: a random token,
-	# since $$ repeats across containers (a script run as their entrypoint
-	# is PID 1 in each), first because PostgreSQL cuts the name at 63 bytes
-	local token app state i
+	# a random token, since $$ repeats across containers; first, as the name
+	# is cut at 63 bytes
+	local token app state
 	token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 	app="lf_bench $token $(basename "$0")"
 	app=${app:0:63}
@@ -81,7 +54,7 @@ bench_db_lock() {
 		\quit
 		\endif
 	SQL
-	for i in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		state=$(bench_lock_holders "a.application_name = '$app'")
 		[ -n "$state" ] && return 0
 		kill -0 "$BENCH_DB_LOCK_PID" 2>/dev/null || break
@@ -96,23 +69,21 @@ bench_db_lock() {
 	exit 1
 }
 
-# bench_db_unlock: release the lock and wait until it is gone, so that a
-# run started right after this one does not find it still held.
+# bench_db_unlock: release the lock and wait until it is gone.
 bench_db_unlock() {
-	local i state
+	local state
 	[ -n "${BENCH_DB_LOCK_FD:-}" ] || return 0
 	exec {BENCH_DB_LOCK_FD}>&-
 	BENCH_DB_LOCK_FD=
 	wait "$BENCH_DB_LOCK_PID" 2>/dev/null || true
-	for i in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		state=$(bench_lock_holders "a.application_name = '$BENCH_DB_LOCK_APP'")
 		[ -z "$state" ] && return 0
 		sleep 0.1
 	done
 }
 
-# bench_lock_holders <condition>: the sessions holding the benchmark lock
-# in PGDATABASE that satisfy the condition, by application name.
+# bench_lock_holders <condition>: application names of the lock holders.
 bench_lock_holders() {
 	psql -X -q -tA -c "SELECT string_agg(a.application_name, ', ')
 		FROM pg_locks l JOIN pg_stat_activity a USING (pid)
@@ -125,13 +96,6 @@ bench_lock_holders() {
 
 # bench_db_drop: drop BENCH_DB if it carries the mark.
 bench_db_drop() {
-	local state
-	state=$(bench_admin_psql <<-'SQL'
-		SELECT shobj_description(oid, 'pg_database') IS NOT DISTINCT FROM :'mark'
-		FROM pg_database WHERE datname = :'db'
-	SQL
-	)
-	if [ "$state" = t ]; then
-		bench_admin_psql <<< 'DROP DATABASE :"db"'
-	fi
+	scratch_db_drop "$BENCH_DB" "$BENCH_DB_MARK" --no-force ||
+		[ $? -eq "$SCRATCH_DB_FOREIGN" ]
 }

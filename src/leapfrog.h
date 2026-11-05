@@ -2,13 +2,7 @@
  *
  * leapfrog.h
  *	  Declarations shared by the parts of the Index Merge Intersect custom
- *	  scan:
- *
- *	  leapfrog.c	module entry point, settings, SQL-callable functions
- *	  planner.c		planner hook: index streams, paths, plans
- *	  costsize.c	cost model
- *	  indexstream.c	reading one index as a sorted stream of (sortcol, TID)
- *	  executor.c	the merge, TID groups, skip-ahead, EvalPlanQual, EXPLAIN
+ *	  scan.
  *
  * IDENTIFICATION
  *	  src/leapfrog.h
@@ -26,57 +20,49 @@
 #include "nodes/pathnodes.h"
 #include "utils/sortsupport.h"
 
+#include "compat.h"
+
 #define INTERSECT_NAME "Index Merge Intersect"
 
-/* PostgreSQL 19 passes table AM scan options to index_beginscan. */
-#if PG_VERSION_NUM >= 190000
-#define lf_index_beginscan(heap, index, snapshot, nkeys) \
-	index_beginscan(heap, index, snapshot, NULL, nkeys, 0, SO_NONE)
-#else
-#define lf_index_beginscan(heap, index, snapshot, nkeys) \
-	index_beginscan(heap, index, snapshot, NULL, nkeys, 0)
-#endif
-
-/* The most indexes one node may combine (leapfrog.max_indexes). */
 #define INTERSECT_MAX_STREAMS 16
 
 /*
- * Layout of CustomPath.custom_private: the PRIVATE_* items, the
- * STREAM_PRIVATE_* items per stream, then the STREAM_EXPRS_* lists per stream
- * (the value expressions of its equalities and, for a partial index, its
- * predicate).  The plan keeps the expression lists in custom_exprs instead.
- * Stream 0 is the outer index, whose entries are fetched from the heap.
+ * What the plan carries; only form_plan_info and lf_deform_plan_info know
+ * its list layout.  Stream 0 is the outer index.
  */
-#define PRIVATE_DESCENDING		0
-#define PRIVATE_NSTREAMS		1
-#define PRIVATE_SORT_TYPE		2	/* input type of the index opclass */
-#define PRIVATE_SORT_OPFAMILY	3
-#define PRIVATE_SORT_COLLATION	4
-#define PRIVATE_SORT_NULLS_FIRST 5
-#define PRIVATE_SORT_NOTNULL	6
-#define PRIVATE_COUNT			7
-#define STREAM_PRIVATE_INDEX	0	/* index OID */
-#define STREAM_PRIVATE_SORTPOS	1	/* position of sortcol among the key
-									 * columns */
-#define STREAM_PRIVATE_ESTIMATE 2	/* entries the cost model expects to read;
-									 * EXPLAIN VERBOSE */
-#define STREAM_PRIVATE_OPERATORS 3	/* OID list: equality operator per key */
-#define STREAM_PRIVATE_COLLATIONS 4 /* OID list: its collation per key */
-#define STREAM_PRIVATE_BACKWARD 5	/* the index reads the query's order
-									 * backward */
-#define STREAM_PRIVATE_RANK		6	/* its turn in the merge, sparsest first */
-#define STREAM_PRIVATE_COUNT	7
-#define STREAM_EXPRS_KEYS		0
-#define STREAM_EXPRS_PRED		1
-#define STREAM_EXPRS_COUNT		2
+typedef struct IntersectStreamInfo
+{
+	Oid			indexoid;
+	int			sortpos;		/* position of sortcol among the key columns */
+	double		reads;			/* entries the cost model expects to read;
+								 * EXPLAIN VERBOSE */
+	List	   *operators;		/* OIDs: equality operator per key */
+	List	   *collations;		/* OIDs: its collation per key */
+	bool		backward;		/* the index reads the query's order backward */
+	int			rank;			/* its turn in the merge, sparsest first */
+	List	   *keys;			/* value expressions of the equalities */
+	List	   *pred;			/* predicate of a partial inner index */
+} IntersectStreamInfo;
+
+typedef struct IntersectPlanInfo
+{
+	bool		descending;
+	Oid			sort_type;		/* input type of the index opclass */
+	Oid			sort_opfamily;
+	Oid			sort_collation;
+	bool		nulls_first;
+	bool		notnull;
+	int			nstreams;
+	IntersectStreamInfo streams[FLEXIBLE_ARRAY_MEMBER];
+} IntersectPlanInfo;
+
+#define IntersectPlanInfoSize(nstreams) \
+	(offsetof(IntersectPlanInfo, streams) + \
+	 (nstreams) * sizeof(IntersectStreamInfo))
 
 /*
- * The equality conditions on the leading columns of one index.  attnos are
- * the heap columns, for the EvalPlanQual recheck and the overflow fallback;
- * operators are of the column's btree family, with the column on the left.
- * The values may be of any type.  The bound on the sort column compares in
- * the type and collation the query sorts in, with the operator of the
- * pathkey's direction: nbtree applies it to a DESC index column itself.
+ * The equalities on the leading columns of one index.  The sortcol bound is
+ * in the pathkey's direction: nbtree applies it to a DESC column itself.
  */
 typedef struct EqualityKeys
 {
@@ -105,11 +91,7 @@ typedef enum SortBound
 	SORT_BOUND_NULL,			/* NULLs only */
 } SortBound;
 
-/*
- * Instrumentation of one index stream under EXPLAIN ANALYZE: the time and
- * buffers of its descents and of the reads that step to another leaf page,
- * where the page reads happen.  Clocked only there, not on every entry.
- */
+/* EXPLAIN ANALYZE of one stream, clocked on descents and leaf page steps. */
 typedef struct StreamInstr
 {
 	bool		timer;
@@ -142,17 +124,16 @@ lf_instr_stop(StreamInstr *instr, const StreamClock *clock)
 		instr_time	now;
 
 		INSTR_TIME_SET_CURRENT(now);
+
+		/* clock->start is set: instr->timer does not change during a scan */
+		/* NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult) */
 		INSTR_TIME_ACCUM_DIFF(instr->time, now, clock->start);
 	}
 	if (instr->bufusage)
 		BufferUsageAccumDiff(&instr->buffers, &pgBufferUsage, &clock->buffers);
 }
 
-/*
- * The statistics of the sort column, read once per relation and planning:
- * each scalarineqsel would read and detoast them anew.  usable is false when
- * they cannot answer in the query's order; the selectivity functions do then.
- */
+/* The sort column's statistics, read and detoasted once per planning. */
 typedef struct SortStats
 {
 	bool		usable;
@@ -168,12 +149,7 @@ typedef struct SortStats
 	double		hist_frac;		/* share of the rows the histogram stands for */
 } SortStats;
 
-/*
- * The column the query sorts by, as the planner found it.  type is the input
- * type of the operator class (text for a varchar column, anyarray for an
- * array).  range_ssup compares in ascending order for the cost model's range
- * probes, prepared on first use.
- */
+/* The column the query sorts by; type is the opclass input type. */
 typedef struct SortColumn
 {
 	AttrNumber	attno;
@@ -182,7 +158,8 @@ typedef struct SortColumn
 	Oid			collation;
 	bool		descending;
 	bool		nulls_first;
-	bool		notnull;		/* no NULLs in the live rows */
+	bool		notnull;		/* NULLs left out: none live, or a strict
+								 * restriction drops them */
 	double		null_frac;		/* share of NULLs, -1 until looked up */
 	bool		range_ssup_ready;
 	SortSupportData range_ssup;
@@ -190,12 +167,8 @@ typedef struct SortColumn
 } SortColumn;
 
 /*
- * Index candidate for a stream of the intersection, built once per index and
- * shared by every stream set it takes part in: equality clauses of the columns
- * before sortcol, the value expressions compared against, the outer rels they
- * refer to, and sortcol's position among the key columns.  heapkeyspace is
- * looked up on first use (-1 until then) because it opens the index; so is
- * the range of sortcol values (probe_range).
+ * Index candidate for a stream, shared by every set.  What opens the index
+ * is looked up on first use.
  */
 typedef struct IndexCandidate
 {
@@ -234,6 +207,7 @@ typedef struct PlannerTrace
 	int			correlations;	/* correlations looked up */
 	int			pruned;			/* candidates that could not pay for
 								 * themselves */
+	int			paths;			/* paths offered to add_path */
 } PlannerTrace;
 
 /* leapfrog.c: settings */
@@ -251,6 +225,7 @@ extern void lf_planner_init(void);
 extern List *lf_node_quals(PlannerInfo *root, RelOptInfo *rel,
 						   IndexOptInfo **indexes, List **exprs, int nstreams,
 						   List *clauses);
+extern IntersectPlanInfo *lf_deform_plan_info(CustomScan *cscan);
 
 /* costsize.c */
 extern double lf_index_entries(PlannerInfo *root, Index rti,

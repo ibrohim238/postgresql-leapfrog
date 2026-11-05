@@ -4,10 +4,15 @@ GroupProbe
 IndexCandidate
 IndexEquality
 IndexStream
+IntersectPath
+IntersectPlanInfo
 IntersectScanState
 IntersectSearch
+IntersectStreamInfo
 McvOrderArg
 PlannerTrace
+RequireNode
+SetChoice
 SkipAhead
 SortBound
 SortColumn

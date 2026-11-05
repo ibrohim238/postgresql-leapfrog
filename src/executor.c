@@ -1,9 +1,8 @@
 /*-------------------------------------------------------------------------
  *
  * executor.c
- *	  Executor side of the Index Merge Intersect custom scan: the merge of
- *	  the index streams, TID groups, skip-ahead, the overflow fallback, the
- *	  EvalPlanQual recheck and EXPLAIN.
+ *	  Executor side of the Index Merge Intersect custom scan; see
+ *	  docs/design.md.
  *
  * IDENTIFICATION
  *	  src/executor.c
@@ -35,21 +34,13 @@
 
 #include "leapfrog.h"
 
-/* The most matches gathered ahead of their heap fetches. */
+/* Heap prefetch queue (docs/design.md, "Heap prefetch queue"). */
 #define HEAP_QUEUE_MAX 32
-/* Entries passed without a match before fetching what is queued. */
 #define HEAP_QUEUE_MAX_WALK 4096
-/* What a skip counts for: its descent reads a few pages. */
 #define HEAP_QUEUE_SKIP_WALK 256
-/* Fetches to see before changing the target. */
 #define HEAP_QUEUE_WINDOW 16
 
-/*
- * Skip-ahead state of one stream.  A skip that lands on the leaf page it
- * left or on the next one in scan direction saved less than the descent
- * cost, and the stream's threshold doubles; a skip that lands further
- * halves it, down to leapfrog.skip_after.
- */
+/* Adaptive skip-ahead state of one stream (docs/design.md). */
 typedef struct SkipAhead
 {
 	int64		behind;			/* entries read in a row without catching up */
@@ -60,12 +51,7 @@ typedef struct SkipAhead
 	BlockNumber from_next;		/* its neighbour in scan direction */
 } SkipAhead;
 
-/*
- * One index of the intersection.  Stream 0 is the outer index: its matched
- * entries are fetched from the heap.  Of an inner stream, the entries of the
- * current value are collected into a sorted TID group the outer entries are
- * looked up in.
- */
+/* One index of the intersection; stream 0 is the outer one. */
 typedef struct IndexStream
 {
 	Relation	index;
@@ -84,7 +70,7 @@ typedef struct IndexStream
 	MemoryContext bound_cxt;	/* the bound of the last skip, which nbtree
 								 * evaluates until the next rescan */
 
-	/* TID group of the value being matched, sorted (inner streams) */
+	/* sorted TID group of the current value (inner streams) */
 	bool		group_overflow; /* group exceeded its share of work_mem */
 	ItemPointerData *group_tids;
 	int			group_count;
@@ -103,7 +89,6 @@ typedef struct IndexStream
 	double		estimate;		/* entries the cost model expected */
 } IndexStream;
 
-/* How two values compare: inline for the comparators that are plain integers. */
 typedef enum SortCompareKind
 {
 	SORT_COMPARE_GENERIC,
@@ -114,6 +99,7 @@ typedef enum SortCompareKind
 typedef struct IntersectScanState
 {
 	CustomScanState css;
+	IntersectPlanInfo *info;	/* what the planner left in the plan */
 	int			nstreams;
 	IndexStream *streams;
 	IndexStream **merge_order;	/* the streams, sparsest first */
@@ -126,10 +112,7 @@ typedef struct IntersectScanState
 	bool		fetching_match; /* heap fetch of a matched entry in progress */
 	bool		match_by_pred;	/* some inner group overflowed: check the row */
 
-	/*
-	 * Matches found ahead, whose heap pages were asked for; see
-	 * heap_queue_add.  They are fetched in the order found.
-	 */
+	/* matches found ahead and prefetched, fetched in the order found */
 	ItemPointerData heap_queue[HEAP_QUEUE_MAX];
 	int			heap_queue_len;
 	int			heap_queue_next;
@@ -151,7 +134,7 @@ typedef struct IntersectScanState
 	SortCompareKind compare_kind;	/* what compare_values does with them */
 	int16		sort_typlen;
 	bool		sort_typbyval;
-	bool		sort_notnull;	/* NULL entries are dead: skip them */
+	bool		sort_notnull;	/* skip NULL entries: dead or filtered out */
 	bool		nulls_ahead;	/* NULLs come after every value in the merge */
 
 	/* instrumentation, summed over all rescans */
@@ -161,36 +144,6 @@ typedef struct IntersectScanState
 	int			peak_capacity;	/* largest total of the group arrays */
 } IntersectScanState;
 
-
-/*
- * The node's instrumentation under EXPLAIN ANALYZE: PostgreSQL 19 wraps
- * Instrumentation in a NodeInstrumentation with the loop count.
- */
-static inline bool
-node_need_timer(PlanState *ps)
-{
-#if PG_VERSION_NUM >= 190000
-	return ps->instrument != NULL && ps->instrument->instr.need_timer;
-#else
-	return ps->instrument != NULL && ps->instrument->need_timer;
-#endif
-}
-
-static inline bool
-node_need_bufusage(PlanState *ps)
-{
-#if PG_VERSION_NUM >= 190000
-	return ps->instrument != NULL && ps->instrument->instr.need_bufusage;
-#else
-	return ps->instrument != NULL && ps->instrument->need_bufusage;
-#endif
-}
-
-static inline double
-node_nloops(PlanState *ps)
-{
-	return ps->instrument != NULL ? ps->instrument->nloops : 0;
-}
 
 static Node *intersect_create_scan_state(CustomScan *cscan);
 static void intersect_begin(CustomScanState *node, EState *estate,
@@ -223,17 +176,13 @@ intersect_create_scan_state(CustomScan *cscan)
 	state = (IntersectScanState *) newNode(sizeof(IntersectScanState),
 										   T_CustomScanState);
 	state->css.methods = &intersect_exec_methods;
+	state->info = lf_deform_plan_info(cscan);
 	/* index_fetch_heap stores a buffer-pinned heap tuple */
 	state->css.slotOps = &TTSOpsBufferHeapTuple;
 
 	return (Node *) state;
 }
 
-/*
- * init_equality_keys
- *		Prepare the equality value expressions of one stream; the i-th
- *		expression is compared with the i-th key column of the index.
- */
 static void
 init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
 				   List *collations, Relation index, Oid sort_type,
@@ -260,76 +209,37 @@ init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
 					  descending);
 }
 
-static Datum
-private_datum(List *private, int pos)
-{
-	return list_nth_node(Const, private, pos)->constvalue;
-}
-
-static Datum
-stream_datum(List *private, int stream, int pos)
-{
-	return private_datum(private,
-						 PRIVATE_COUNT + stream * STREAM_PRIVATE_COUNT + pos);
-}
-
-static List *
-stream_oids(List *private, int stream, int pos)
-{
-	List	   *oids = list_nth(private,
-								PRIVATE_COUNT + stream * STREAM_PRIVATE_COUNT + pos);
-
-	Assert(oids == NIL || IsA(oids, OidList));
-	return oids;
-}
-
 static void
 intersect_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	IntersectScanState *state = (IntersectScanState *) node;
-	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	heap = node->ss.ss_currentRelation;
-	List	   *private = cscan->custom_private;
-	Oid			sort_type = DatumGetObjectId(private_datum(private,
-														   PRIVATE_SORT_TYPE));
-	Oid			sort_opfamily = DatumGetObjectId(private_datum(private,
-															   PRIVATE_SORT_OPFAMILY));
-	Oid			sort_collation = DatumGetObjectId(private_datum(private,
-																PRIVATE_SORT_COLLATION));
+	IntersectPlanInfo *info = state->info;
+	Oid			sort_type = info->sort_type;
+	Oid			sort_opfamily = info->sort_opfamily;
+	Oid			sort_collation = info->sort_collation;
 
-	state->descending =
-		DatumGetBool(private_datum(private, PRIVATE_DESCENDING));
-	state->nstreams = DatumGetInt32(private_datum(private, PRIVATE_NSTREAMS));
+	state->descending = info->descending;
+	state->nstreams = info->nstreams;
 	state->streams = palloc0(state->nstreams * sizeof(IndexStream));
 	state->merge_order = palloc(state->nstreams * sizeof(IndexStream *));
 
 	for (int i = 0; i < state->nstreams; i++)
 	{
 		IndexStream *stream = &state->streams[i];
-		List	   *keys = list_nth_node(List, cscan->custom_exprs,
-										 i * STREAM_EXPRS_COUNT + STREAM_EXPRS_KEYS);
-		List	   *pred = list_nth_node(List, cscan->custom_exprs,
-										 i * STREAM_EXPRS_COUNT + STREAM_EXPRS_PRED);
+		IntersectStreamInfo *sinfo = &info->streams[i];
 
-		stream->index =
-			index_open(DatumGetObjectId(stream_datum(private, i,
-													 STREAM_PRIVATE_INDEX)),
-					   AccessShareLock);
-		stream->sort_attno =
-			DatumGetInt32(stream_datum(private, i, STREAM_PRIVATE_SORTPOS)) + 1;
-		state->merge_order[DatumGetInt32(stream_datum(private, i,
-													  STREAM_PRIVATE_RANK))] = stream;
-		stream->dir =
-			DatumGetBool(stream_datum(private, i, STREAM_PRIVATE_BACKWARD)) ?
+		stream->index = index_open(sinfo->indexoid, AccessShareLock);
+		stream->sort_attno = sinfo->sortpos + 1;
+		state->merge_order[sinfo->rank] = stream;
+		stream->dir = sinfo->backward ?
 			BackwardScanDirection : ForwardScanDirection;
-		stream->estimate =
-			DatumGetFloat8(stream_datum(private, i, STREAM_PRIVATE_ESTIMATE));
-		init_equality_keys(&stream->keys, keys,
-						   stream_oids(private, i, STREAM_PRIVATE_OPERATORS),
-						   stream_oids(private, i, STREAM_PRIVATE_COLLATIONS),
-						   stream->index, sort_type, sort_opfamily,
-						   sort_collation, state->descending, &node->ss.ps);
-		stream->pred = ExecInitQual(pred, &node->ss.ps);
+		stream->estimate = sinfo->reads;
+		init_equality_keys(&stream->keys, sinfo->keys, sinfo->operators,
+						   sinfo->collations, stream->index, sort_type,
+						   sort_opfamily, sort_collation, state->descending,
+						   &node->ss.ps);
+		stream->pred = ExecInitQual(sinfo->pred, &node->ss.ps);
 	}
 	state->values_cxt = AllocSetContextCreate(CurrentMemoryContext,
 											  "leapfrog equality values",
@@ -340,10 +250,8 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 
 	state->ssup.ssup_cxt = CurrentMemoryContext;
 	state->ssup.ssup_collation = sort_collation;
-	state->ssup.ssup_nulls_first = DatumGetBool(private_datum(private,
-															  PRIVATE_SORT_NULLS_FIRST));
-	state->sort_notnull = DatumGetBool(private_datum(private,
-													 PRIVATE_SORT_NOTNULL));
+	state->ssup.ssup_nulls_first = info->nulls_first;
+	state->sort_notnull = info->notnull;
 	state->nulls_ahead = !state->sort_notnull && !state->ssup.ssup_nulls_first;
 	PrepareSortSupportFromOrderingOp(get_opfamily_member(sort_opfamily, sort_type,
 														 sort_type,
@@ -352,7 +260,7 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 														 BTLessStrategyNumber),
 									 &state->ssup);
 	state->compare_kind = SORT_COMPARE_GENERIC;
-#if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
+#if LF_DATUM_IS_64BIT
 	if (state->ssup.comparator == ssup_datum_signed_cmp)
 		state->compare_kind = SORT_COMPARE_INT64;
 #endif
@@ -370,7 +278,6 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 											 "leapfrog group value",
 											 ALLOCSET_SMALL_SIZES);
 
-	/* the group arrays together never grow past the work_mem budget */
 	state->group_limit = (int) Min((double) INT_MAX / 2,
 								   work_mem * 1024.0 / sizeof(ItemPointerData) /
 								   (state->nstreams - 1));
@@ -380,7 +287,6 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 	{
 		IndexStream *stream = &state->streams[i];
 
-		/* the equality keys plus the bound on sortcol used for skipping ahead */
 		stream->scan = lf_index_beginscan(heap, stream->index,
 										  estate->es_snapshot,
 										  stream->keys.nequal + 1);
@@ -397,10 +303,7 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 		}
 	}
 
-	/*
-	 * Asking for a TID's block as a page of the main fork takes a table whose
-	 * TIDs are that: the heap, not any table access method.
-	 */
+	/* prefetching a TID's block as a main-fork page assumes the heap AM */
 	state->heap_queue_limit = 1;
 	if (intersect_prefetch && node->ss.ps.qual != NULL &&
 		IsMVCCSnapshot(estate->es_snapshot) &&
@@ -412,11 +315,7 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 	intersect_rescan(node);
 }
 
-/*
- * evaluate_keys
- *		Evaluate the equality values of one stream.  Returns false when a
- *		value is NULL.
- */
+/* Evaluate one stream's equality values; false when one is NULL. */
 static bool
 evaluate_keys(EqualityKeys *keys, ExprContext *econtext, MemoryContext cxt)
 {
@@ -432,10 +331,7 @@ evaluate_keys(EqualityKeys *keys, ExprContext *econtext, MemoryContext cxt)
 		if (isnull)
 			return false;
 
-		/*
-		 * The value lives in the per-tuple memory the next row resets; a text
-		 * or uuid key must outlast the scan positioned on it.
-		 */
+		/* per-tuple memory is reset by the next row; the scan key outlives it */
 		get_typlenbyval(keys->types[i], &typlen, &typbyval);
 		oldcxt = MemoryContextSwitchTo(cxt);
 		keys->values[i] = datumCopy(value, typbyval, typlen);
@@ -447,9 +343,8 @@ evaluate_keys(EqualityKeys *keys, ExprContext *econtext, MemoryContext cxt)
 
 /*
  * evaluate_equal_values
- *		Evaluate the equality values of every stream once per (re)scan; false
- *		when a value is NULL.  Also used by the EvalPlanQual recheck, which
- *		runs on a planstate copy whose scan was never started.
+ *		Evaluate every stream's equality values once per (re)scan.  The
+ *		EvalPlanQual recheck calls it on a copy whose scan never started.
  */
 static bool
 evaluate_equal_values(IntersectScanState *state)
@@ -474,9 +369,8 @@ evaluate_equal_values(IntersectScanState *state)
 
 /*
  * compare_values
- *		Compare two values of the merge in query order: above zero when a is
- *		further along than b.  bigint, timestamptz and the like compare as
- *		plain integers, inline, to spare the indirect call (BENCHMARKS.md).
+ *		Compare two values in query order: above zero when a is further
+ *		along.  Integer comparators are inlined.
  */
 static inline int
 compare_values(IntersectScanState *state, Datum a, bool a_isnull, Datum b,
@@ -512,10 +406,6 @@ compare_values(IntersectScanState *state, Datum a, bool a_isnull, Datum b,
 	return compare;
 }
 
-/*
- * init_skip
- *		Start a stream's skip-ahead at leapfrog.skip_after; 0 never skips.
- */
 static void
 init_skip(SkipAhead *skip)
 {
@@ -527,10 +417,8 @@ init_skip(SkipAhead *skip)
 
 /*
  * skip_ahead
- *		Re-position a lagging stream on the frontmost value, remembering the
- *		leaf page it leaves so that check_landing can tell how far it went.
- *		A bound on a value excludes NULLs, which read_stream_entry goes back
- *		for when they come later in the merge; a NULL bound is the last group.
+ *		Re-position a lagging stream on the frontmost value.  A value bound
+ *		excludes NULLs, which read_stream_entry goes back for if they follow.
  */
 static void
 skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
@@ -567,11 +455,7 @@ skip_ahead(IntersectScanState *state, IndexStream *stream, Datum bound,
 	stream->skips++;
 }
 
-/*
- * check_landing
- *		After the first entry read since a skip, adapt the stream's threshold
- *		(see SkipAhead), within 64 times leapfrog.skip_after.
- */
+/* After the first entry read since a skip, adapt the threshold. */
 static void
 check_landing(IntersectScanState *state, IndexStream *stream)
 {
@@ -598,8 +482,8 @@ check_landing(IntersectScanState *state, IndexStream *stream)
 
 /*
  * intersect_start
- *		Evaluate the equality values and position every index scan.
- *		Returns false when a value is NULL: nothing can match then.
+ *		Evaluate the equality values and position every index scan; false
+ *		when a value is NULL.
  */
 static bool
 intersect_start(IntersectScanState *state)
@@ -613,13 +497,15 @@ intersect_start(IntersectScanState *state)
 		StreamClock clock;
 
 		/* allocated after BeginCustomScan: read here, before the first use */
-		stream->instr.timer = node_need_timer(&state->css.ss.ps);
-		stream->instr.bufusage = node_need_bufusage(&state->css.ss.ps);
+		stream->instr.timer = lf_node_need_timer(&state->css.ss.ps);
+		stream->instr.bufusage = lf_node_need_bufusage(&state->css.ss.ps);
 		stream->loop_base = stream->instr.time;
 		stream->started = false;
+
 		lf_instr_start(&stream->instr, &clock);
-		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
-							(Datum) 0);
+		lf_rescan_with_keys(stream->scan, &stream->keys,
+							state->sort_notnull ? SORT_BOUND_NOT_NULL :
+							SORT_BOUND_NONE, (Datum) 0);
 		lf_instr_stop(&stream->instr, &clock);
 		stream->bounded = false;
 		init_skip(&stream->skip);
@@ -628,10 +514,6 @@ intersect_start(IntersectScanState *state)
 	return true;
 }
 
-/*
- * row_matches_keys
- *		Do the heap row's columns equal the current values of one stream?
- */
 static bool
 row_matches_keys(TupleTableSlot *slot, EqualityKeys *keys)
 {
@@ -651,11 +533,7 @@ row_matches_keys(TupleTableSlot *slot, EqualityKeys *keys)
 	return true;
 }
 
-/*
- * row_matches_stream
- *		Would the stream's index hold an entry for this row version?  For
- *		where the row was not matched against the index by TID.
- */
+/* Would the stream's index hold an entry for this row version? */
 static bool
 row_matches_stream(IntersectScanState *state, IndexStream *stream,
 				   TupleTableSlot *slot)
@@ -678,9 +556,8 @@ tid_compare(const void *a, const void *b)
 
 /*
  * read_stream_entry
- *		Advance a stream by one entry; remembers when it is exhausted.  A
- *		stream that ran out under a skip's bound has not seen the NULLs after
- *		the values yet.
+ *		Advance a stream by one entry.  A stream that ran out under a skip's
+ *		bound has not seen the NULLs after the values yet.
  */
 static void
 read_stream_entry(IntersectScanState *state, IndexStream *stream)
@@ -717,12 +594,9 @@ read_stream_entry(IntersectScanState *state, IndexStream *stream)
 
 /*
  * collect_group
- *		Gather the TIDs of all entries of an inner stream whose value equals
- *		the current one, leaving the first entry of the next value pending.
- *
- * A group larger than its share of work_mem is not kept: the remaining
- * entries of the value are skipped, and every outer entry of the value is
- * treated as a match for the stream's conditions to be checked on the row.
+ *		Gather the sorted TIDs of an inner stream's entries of the current
+ *		value.  A group over its share of work_mem overflows: its outer
+ *		entries are checked on the row instead.
  */
 static void
 collect_group(IntersectScanState *state, IndexStream *stream)
@@ -784,22 +658,10 @@ group_contains(IndexStream *stream, ItemPointer tid)
 
 /*
  * find_common_value
- *		Advance the streams until all of them stand on one value, and keep a
- *		copy of it as the group value.  Returns false when a stream runs out,
- *		or to fetch what is queued (heap_queue_drain) before going on from
- *		where every stream stands.
- *
- * One stream holds the candidate and the others catch up with it in turn.  A
- * stream that reaches it confirms it; one that passes it holds the new
- * candidate.  The candidate's stream does not move meanwhile, so its value
- * stays valid.  The turns start again from the sparsest stream after each new
- * candidate: a dense stream then has to reach only the values all the sparser
- * ones agree on, and skips the rest in one descent, where taking turns in a
- * circle makes it read nearly all of its entries.
- *
- * A stream that has read its threshold of entries without catching up descends
- * its B-tree straight to the candidate: the entries in between cannot match,
- * since the candidate's stream has consumed every value before its current one.
+ *		Advance the streams until all stand on one value (docs/design.md),
+ *		and copy it as the group value.  False when a stream runs out, or
+ *		to drain the heap queue first.  The candidate's stream does not move
+ *		meanwhile, so its value stays valid.
  */
 static bool
 find_common_value(IntersectScanState *state)
@@ -843,16 +705,12 @@ find_common_value(IntersectScanState *state)
 			if (cmp >= 0)
 				break;
 
-			/* long stretches without a match must stay interruptible */
 			if ((++iterations & 1023) == 0)
 				CHECK_FOR_INTERRUPTS();
 
 			stream->have = false;
 
-			/*
-			 * Rows found already wait for the next match: fetch them before a
-			 * long stretch, which a LIMIT may never need.
-			 */
+			/* fetch the queued rows before a long stretch a LIMIT may skip */
 			if (state->heap_queue_len > 0 &&
 				++state->heap_queue_walked >= HEAP_QUEUE_MAX_WALK)
 			{
@@ -890,13 +748,8 @@ find_common_value(IntersectScanState *state)
 
 /*
  * heap_queue_adjust
- *		How many matches to gather before fetching them.  Finding a match
- *		ahead reads the indexes further than a LIMIT may need, which a row
- *		returned would not repay; a row the Filter drops is one more heap page
- *		read for nothing, and so is a row version the snapshot does not see,
- *		where asking for the pages ahead pays.  So the target grows only while
- *		fewer fetches return a row than do not, and a node without a Filter
- *		stays at 1, one match at a time.
+ *		How many matches to gather before fetching them: grows only while
+ *		most fetches return no row.
  */
 static void
 heap_queue_adjust(IntersectScanState *state)
@@ -917,10 +770,8 @@ heap_queue_adjust(IntersectScanState *state)
 
 /*
  * heap_queue_add
- *		Keep a match for later and ask for its heap page now.  A TID stays
- *		valid while the scan goes on for an MVCC snapshot alone (as in a
- *		bitmap scan): a line pointer reused meanwhile holds a row the snapshot
- *		does not see.  heap_queue_limit is 1 for any other snapshot.
+ *		Keep a match for later and prefetch its heap page.  A queued TID is
+ *		safe under an MVCC snapshot only.
  */
 static void
 heap_queue_add(IntersectScanState *state, ItemPointer tid)
@@ -939,11 +790,7 @@ heap_queue_add(IntersectScanState *state, ItemPointer tid)
 		state->heap_queue_drain = true;
 }
 
-/*
- * heap_queue_end_merge
- *		The merge has no more matches.  Returns false when the queue still
- *		holds some, to be fetched before the merge ends.
- */
+/* The merge has no more matches; false while the queue holds some. */
 static bool
 heap_queue_end_merge(IntersectScanState *state)
 {
@@ -954,11 +801,7 @@ heap_queue_end_merge(IntersectScanState *state)
 	return false;
 }
 
-/*
- * intersect_next
- *		Merge the sorted index streams: advance the lagging streams until
- *		every value meets, then match the entries of that value by TID.
- */
+/* Find the next value all streams hold, then match its entries by TID. */
 static TupleTableSlot *
 intersect_next(ScanState *ss)
 {
@@ -976,22 +819,16 @@ intersect_next(ScanState *ss)
 
 	while (!state->done)
 	{
-		/* long stretches without a match must stay interruptible */
 		if ((++iterations & 1023) == 0)
 			CHECK_FOR_INTERRUPTS();
 
 		/*
-		 * Finish the heap fetch of the last matched entry first, the way
-		 * index_getnext_slot does: a HOT chain may hold more than one visible
-		 * member under a non-MVCC snapshot.
+		 * Finish the last match's HOT chain first, as index_getnext_slot
+		 * does: a non-MVCC snapshot may see several members.
 		 */
 		if (state->fetching_match)
 		{
-			/*
-			 * What a fetch finds marks the entry the scan stands on as dead.
-			 * The scan has moved on from a queued entry, unless it is the
-			 * last one read and not passed yet; the fetch may change the TID.
-			 */
+			/* kill_prior_tuple would hit the scan's entry, not a queued one */
 			bool		moved_on = state->heap_queue_next > 0 &&
 				(outer->have ||
 				 !ItemPointerEquals(&outer->tid, &outer->scan->xs_heaptid));
@@ -1005,10 +842,6 @@ intersect_next(ScanState *ss)
 			if (!found)
 				continue;
 
-			/*
-			 * An entry of an overflowed group was not matched against that
-			 * inner index: check the index's conditions on the row itself.
-			 */
 			if (state->match_by_pred)
 			{
 				bool		matches = true;
@@ -1057,7 +890,6 @@ intersect_next(ScanState *ss)
 			}
 		}
 
-		/* the outer entries of the collected value are looked up by TID */
 		if (state->in_group)
 		{
 			bool		found = true;
@@ -1116,11 +948,7 @@ intersect_next(ScanState *ss)
 		{
 			collect_group(state, &state->streams[i]);
 
-			/*
-			 * An overflowed group's stream is read on the row with the state
-			 * of this group, which a queue would outlive: fetch what is
-			 * queued first, then these entries one by one.
-			 */
+			/* an overflowed group's row check needs this group's state */
 			if (state->heap_queue_len > 0)
 			{
 				state->heap_queue_walked += state->streams[i].group_count;
@@ -1132,12 +960,8 @@ intersect_next(ScanState *ss)
 	}
 
 	/*
-	 * The merge ends when one stream runs out, with the others still on a
-	 * leaf page.  The scans keep it pinned, as an Index Only Scan does, since
-	 * the sort value is read from the index tuple (xs_want_itup); VACUUM of
-	 * the index would wait for that pin as long as an exhausted cursor stays
-	 * open.  Resetting the scans releases the pins; a rescan positions them
-	 * again.
+	 * The other streams still pin a leaf page (xs_want_itup), which VACUUM
+	 * would wait on while an exhausted cursor stays open: release the pins.
 	 */
 	if (!state->done)
 	{
@@ -1157,12 +981,7 @@ intersect_next(ScanState *ss)
 	return ExecClearTuple(slot);
 }
 
-/*
- * intersect_recheck
- *		EvalPlanQual recheck: the row version may have changed since the index
- *		entries were matched, so what the scan guaranteed by construction is
- *		evaluated again.  ExecScan applies the node's qual afterwards.
- */
+/* EvalPlanQual recheck of what the streams guaranteed by construction. */
 static bool
 intersect_recheck(ScanState *ss, TupleTableSlot *slot)
 {
@@ -1216,7 +1035,6 @@ intersect_rescan(CustomScanState *node)
 {
 	IntersectScanState *state = (IntersectScanState *) node;
 
-	/* clear the scan slot and EPQ substitution state, as every scan node */
 	ExecScanReScan(&node->ss);
 
 	state->started = false;
@@ -1246,19 +1064,14 @@ intersect_rescan(CustomScanState *node)
 	}
 }
 
-/*
- * stream_conditions
- *		The equalities of a stream as text, each index column against its
- *		value expression, deparsed like an Index Cond.  NULL without any.
- */
+/* The equalities of a stream, deparsed like an Index Cond. */
 static char *
 stream_conditions(IntersectScanState *state, int i, List *context,
 				  bool useprefix)
 {
 	CustomScan *cscan = (CustomScan *) state->css.ss.ps.plan;
 	IndexStream *stream = &state->streams[i];
-	List	   *exprs = list_nth_node(List, cscan->custom_exprs,
-									  i * STREAM_EXPRS_COUNT + STREAM_EXPRS_KEYS);
+	List	   *exprs = state->info->streams[i].keys;
 	TupleDesc	indexdesc = RelationGetDescr(stream->index);
 	List	   *clauses = NIL;
 	int			k = 0;
@@ -1286,9 +1099,8 @@ stream_conditions(IntersectScanState *state, int i, List *context,
 
 /*
  * stream_predicate
- *		The predicate of a partial index as text, from the index itself, so
- *		that the outer stream shows it too (the node checks it on the row,
- *		as Filter, not in the stream).  NULL for a full index.
+ *		The predicate of a partial index, from the index itself so that the
+ *		outer stream shows it too.
  */
 static char *
 stream_predicate(IntersectScanState *state, int i, List *context,
@@ -1305,7 +1117,6 @@ stream_predicate(IntersectScanState *state, int i, List *context,
 							  useprefix, false);
 }
 
-/* One kind of buffers in the text form: " shared hit=N read=M", nonzero parts. */
 static void
 buffers_text(StringInfo str, const char *kind, int64 hit, int64 read,
 			 int64 dirtied, int64 written)
@@ -1321,7 +1132,6 @@ buffers_text(StringInfo str, const char *kind, int64 hit, int64 read,
 		appendStringInfo(str, " written=%lld", (long long) written);
 }
 
-/* The buffers of a stream's index calls, in the manner of a node's. */
 static void
 stream_buffers(IndexStream *stream, ExplainState *es)
 {
@@ -1372,9 +1182,7 @@ stream_buffers(IndexStream *stream, ExplainState *es)
 /*
  * intersect_explain
  *		The node's counters, then one block per stream in the manner of a
- *		child node: its index, conditions, time, entries read and buffers.
- *		Counters are summed over all rescans like the executor's own; the
- *		text form shows entries and times per loop, as a node's rows.
+ *		child node; the text form shows entries and times per loop.
  */
 static void
 intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
@@ -1383,7 +1191,7 @@ intersect_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	List	   *context = set_deparse_context_plan(es->deparse_cxt,
 												   node->ss.ps.plan, ancestors);
 	bool		useprefix = es->verbose || es->rtable_size > 1;
-	double		nloops = node_nloops(&node->ss.ps);
+	double		nloops = lf_node_nloops(&node->ss.ps);
 	int64		skips = 0;
 	int64		short_skips = 0;
 	int64		group_overflows = 0;

@@ -101,21 +101,21 @@ numbers above are the reliable part.
 | `random_page_cost = 4` | | | | |
 | one filter, live | 0.05 | 0.12 | 0.10 (Index Scan) | 0.51 |
 | one filter, deleted | 0.06 | 1.77 | 2.50 (Index Scan) | 0.53 |
-| 2 filters, composite in S | 0.06 | 1.72 | **0.90 (node, 2)** | 0.56 |
-| 2 filters, none in S | 2.97 | 1.73 | **0.93 (node, 2)** | 0.58 |
+| 2 filters, composite in S | 0.06 | 1.72 | **0.90 (Index Merge Intersect, 2)** | 0.56 |
+| 2 filters, none in S | 2.97 | 1.73 | **0.93 (Index Merge Intersect, 2)** | 0.58 |
 | 3 filters, composite in S | 0.02 | 2.14 | 2.31 (Bitmap) | 0.58 |
-| 3 filters, none in S | 4.07 | 2.11 | **0.96 (node, 3)** | 0.57 |
-| 4 filters, composite in S | 0.02 | 2.06 | **0.98 (node, 3)** | 0.59 |
-| 4 filters, none in S | 4.78 | 1.98 | **0.96 (node, 3)** | 0.57 |
+| 3 filters, none in S | 4.07 | 2.11 | **0.96 (Index Merge Intersect, 3)** | 0.57 |
+| 4 filters, composite in S | 0.02 | 2.06 | **0.98 (Index Merge Intersect, 3)** | 0.59 |
+| 4 filters, none in S | 4.78 | 1.98 | **0.96 (Index Merge Intersect, 3)** | 0.57 |
 | `random_page_cost = 1.1` | | | | |
 | one filter, live | 0.06 | 0.06 | 0.07 (Index Scan) | 0.51 |
-| one filter, deleted | 0.13 | 1.35 | **0.57 (node, 2)** | 0.53 |
-| 2 filters, composite in S | 0.07 | 1.48 | **0.68 (node, 2)** | 0.56 |
-| 2 filters, none in S | 5.56 | 1.48 | **0.65 (node, 2)** | 0.58 |
-| 3 filters, composite in S | 0.02 | 1.49 | **0.62 (node, 2)** | 0.58 |
-| 3 filters, none in S | 5.98 | 1.48 | **0.62 (node, 2)** | 0.57 |
-| 4 filters, composite in S | 0.04 | 1.43 | **0.80 (node, 3)** | 0.59 |
-| 4 filters, none in S | 6.76 | 1.59 | **0.63 (node, 2)** | 0.57 |
+| one filter, deleted | 0.13 | 1.35 | **0.57 (Index Merge Intersect, 2)** | 0.53 |
+| 2 filters, composite in S | 0.07 | 1.48 | **0.68 (Index Merge Intersect, 2)** | 0.56 |
+| 2 filters, none in S | 5.56 | 1.48 | **0.65 (Index Merge Intersect, 2)** | 0.58 |
+| 3 filters, composite in S | 0.02 | 1.49 | **0.62 (Index Merge Intersect, 2)** | 0.58 |
+| 3 filters, none in S | 5.98 | 1.48 | **0.62 (Index Merge Intersect, 2)** | 0.57 |
+| 4 filters, composite in S | 0.04 | 1.43 | **0.80 (Index Merge Intersect, 3)** | 0.59 |
+| 4 filters, none in S | 6.76 | 1.59 | **0.63 (Index Merge Intersect, 2)** | 0.57 |
 
 Milliseconds. The forced node is the cheapest set by its own estimate
 (here always a pair); its work does not depend on the page costs. The 3- and
@@ -158,8 +158,8 @@ strategy, 5 repetitions after a warm-up.
 
 ### Planner choices
 
-Counted by `tests/performance/choices.sql` from the `results.csv` of a run
-with `BENCH_FORCE=1`. A miss is a query where the node (B\*) is more than 15 %
+Counted by `tests/performance/choices.sql` (removed since, see the note at the top)
+from the `results.csv` of a run with `BENCH_FORCE=1`. A miss is a query where the node (B\*) is more than 15 %
 faster than both B's choice and A: A's index is one of B's, so A's plan is
 open to B's planner as well.
 
@@ -733,7 +733,7 @@ and it runs as a separate block after the others on the same table, not interlea
 
 Two filters, `LIMIT 1`:
 
-| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+| Rows | Deleted | Exact index | Index Merge Intersect | Auto | Stock | `BitmapAnd` | Buffers: exact, Index Merge Intersect, stock |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 10M | `hashed` | 0.03 | 0.07 | node 0.07 | Index Scan 0.07 | 99.0 | 5, 8, 35 |
 | 20M | `hashed` | 0.04 | 0.04 | node 0.05 | Index Scan 0.04 | 153 | 5, 9, 9 |
@@ -746,7 +746,7 @@ Two filters, `LIMIT 1`:
 
 Two filters, `LIMIT 100`:
 
-| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+| Rows | Deleted | Exact index | Index Merge Intersect | Auto | Stock | `BitmapAnd` | Buffers: exact, Index Merge Intersect, stock |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 10M | `hashed` | 0.13 | 1.75 | node 1.71 | Index Scan 3.65 | 94.0 | 101, 156, 3,382 |
 | 20M | `hashed` | 0.09 | 1.84 | node 1.77 | Index Scan 3.91 | 172 | 104, 164, 3,506 |
@@ -759,7 +759,7 @@ Two filters, `LIMIT 100`:
 
 Two filters, `LIMIT 1000`:
 
-| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+| Rows | Deleted | Exact index | Index Merge Intersect | Auto | Stock | `BitmapAnd` | Buffers: exact, Index Merge Intersect, stock |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 10M | `hashed` | 1.01 | 18.6 | node 18.5 | `BitmapAnd` 94.2 | 97.0 | 1,000, 1,571, 3,077 |
 | 20M | `hashed` | 1.05 | 8.93 | node 9.00 | `BitmapAnd` 83.4 | 82.1 | 1,003, 1,582, 6,244 |
@@ -772,7 +772,7 @@ Two filters, `LIMIT 1000`:
 
 Two filters, no `LIMIT`, all rows found (1,936, 3,962, 9,965, 19,973):
 
-| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+| Rows | Deleted | Exact index | Index Merge Intersect | Auto | Stock | `BitmapAnd` | Buffers: exact, Index Merge Intersect, stock |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 10M | `hashed` | 4.32 | 16.9 | node 16.9 | `BitmapAnd` 49.8 | 49.4 | 1,934, 3,077, 3,077 |
 | 20M | `hashed` | 8.18 | 33.9 | node 34.3 | `BitmapAnd` 78.3 | 75.4 | 3,959, 6,244, 6,244 |
@@ -785,7 +785,7 @@ Two filters, no `LIMIT`, all rows found (1,936, 3,962, 9,965, 19,973):
 
 One filter and deleted rows, `LIMIT 100`:
 
-| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+| Rows | Deleted | Exact index | Index Merge Intersect | Auto | Stock | `BitmapAnd` | Buffers: exact, Index Merge Intersect, stock |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 10M | `hashed` | 0.12 | 1.29 | Index Scan 3.35 | Index Scan 3.56 | 165 | 96, 133, 1,447 |
 | 20M | `hashed` | 0.09 | 0.83 | Index Scan 1.86 | Index Scan 2.65 | 161 | 100, 139, 1,522 |
@@ -798,7 +798,7 @@ One filter and deleted rows, `LIMIT 100`:
 
 Two filters and deleted rows, `LIMIT 100`:
 
-| Rows | Deleted | Exact index | Node | Auto | Stock | `BitmapAnd` | Buffers: exact, node, stock |
+| Rows | Deleted | Exact index | Index Merge Intersect | Auto | Stock | `BitmapAnd` | Buffers: exact, Index Merge Intersect, stock |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 10M | `hashed` | 0.09 | 12.0 | node 11.7 | `BitmapAnd` 55.0 | 56.4 | 102, 1,704, 3,077 |
 | 20M | `hashed` | 0.11 | 12.6 | node 15.6 | Index Scan 649 | 132 | 104, 1,814, 84,623 |
@@ -914,7 +914,7 @@ depends on how many pages are revisited between checkpoints.
 
 Reads at 20M rows, `LIMIT 100`, `random_page_cost` 1.1, ms:
 
-| Query | Rows found | S | G, stock | G, planner with the node |
+| Query | Rows found | S | G, stock | G, planner with Index Merge Intersect |
 |---|---:|---:|---:|---:|
 | one filter, live rows | 100 | 0.04 | 0.05 | 0.04 |
 | one filter, deleted rows | 100 | 0.04 | 1.73 | 0.38 |
@@ -1088,7 +1088,8 @@ The third query was measured twice. In the first run of this load the planner to
 three streams (7,702,855 entries, 11 heap fetches) and the node took 843 ms (cold
 2,021), against `BitmapAnd` at 1,267; but a PostgreSQL build was compiling on the same
 machine during those runs, so they are not kept. The row above is a second load of the
-same data with `QUERIES=small_product`, the machine idle: the planner took two streams
+same data with `QUERIES=small_product` (the `list_bench.sh` of `fed2cfb`; today the
+`small_customer` scenario), the machine idle: the planner took two streams
 there (3,000,491 entries, 20,012 heap fetches, 11 rows kept), as in the load without
 the prefetch; the estimate of the third stream sits close to the line and the sample
 statistics of each load decide. Either way the node is ahead of stock's `BitmapAnd`.
@@ -1249,7 +1250,7 @@ the newer half of both before the first match. The planner expects 1,746 matches
 |---|---:|---:|---:|
 | exact | 0.6 | 108 | 5 |
 | node | 65 | 2,396 | 1 |
-| auto (the node) | 66 (152) | 2,396 | 751 |
+| auto (Index Merge Intersect) | 66 (152) | 2,396 | 751 |
 | stock: `BitmapAnd` | 353 | 5,101 | 2,701 |
 | indexscan, on `(product_id, id)` | 1,521 (5,918) | 92,755 | 92,270 |
 | bitmap | 371 | 5,101 | 2,701 |
@@ -1322,7 +1323,7 @@ one the self join took 13.6 ms against the node's 24.7.
 Both conditions dense, data in memory, `LIMIT 100`: the planner can pick the node
 at 0.26 ms over an Index Scan at 0.07 ms.
 
-The 1M-row matrix (192 queries, `tests/performance/choices.sql`): the planner
+The 1M-row matrix (192 queries, `tests/performance/choices.sql`, removed since): the planner
 picks the node 2 times at `random_page_cost = 4` and 5 times at 1.1; clearly slower
 only in `LIMIT 1` queries (by 0.02–0.09 ms, 1 and 4 cases). It misses the node in
 27 and 21 queries where the node is more than 15 % faster than both the planner's

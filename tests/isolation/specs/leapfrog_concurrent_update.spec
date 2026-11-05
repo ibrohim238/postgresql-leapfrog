@@ -1,18 +1,6 @@
-# EvalPlanQual under READ COMMITTED: session 1 changes a row that the
-# intersection scan of session 2 is about to lock with FOR UPDATE.  The scan
-# matched the old version by its index entries; the new version is fetched by
-# EvalPlanQual and must be rechecked against the equality on owner_id and the
-# predicate of the inner index, exactly as a standard index scan does.
-#
-# Every scenario is run twice: with the forced custom scan (s2_lock) and
-# with leapfrog disabled (s2_lock_std), under the same interleaving, so the
-# EvalPlanQual behaviour of the node is compared with the standard plan's
-# directly.  Each run ends with the query after the commit, as a view of the
-# final state.
-#
-# PostgreSQL rechecks the search condition on the new row version but not
-# its ordering: a row whose merge column changed is returned at its old
-# position by every plan, as the s1_move_id permutations show.
+# EvalPlanQual under READ COMMITTED: a row changed under FOR UPDATE is rechecked as by a stock index scan.
+# s2_lock runs the node, s2_lock_std the stock plan, under the same interleaving; s2_std shows the end state.
+# The recheck does not cover the order: a row whose id changed keeps its old position in every plan.
 
 setup
 {
@@ -50,7 +38,7 @@ step s1_commit	{ COMMIT; }
 step s1_rollback	{ ROLLBACK; }
 
 session s2
-setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; }
+setup		{ LOAD 'leapfrog'; SET leapfrog.force = on; SET leapfrog.require_node = require; }
 step s2_plan	{
 	EXPLAIN (COSTS OFF)
 	SELECT id, owner_id, deleted_at, payload FROM lf_iso
@@ -66,28 +54,32 @@ step s2_lock_deleted	{
 }
 step s2_lock_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, owner_id, deleted_at, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_std	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, owner_id, deleted_at, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 step s2_std_deleted	{
 	SET leapfrog.enabled = off;
+	SET leapfrog.require_node = forbid;
 	SELECT id, owner_id, deleted_at IS NOT NULL AS deleted, payload FROM lf_iso
 	WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id LIMIT 3 FOR UPDATE;
 	RESET leapfrog.enabled;
+	SET leapfrog.require_node = require;
 }
 
-# The plan under test is the custom scan with LockRows above it.
 permutation s2_plan
 
-# The row moves to another owner: EPQ rechecks owner_id = 2 and drops it,
-# the LIMIT is filled from the next row.
+# The row moves to another owner: dropped, the LIMIT is filled from the next row.
 permutation s1_begin s1_move_owner s2_lock s1_commit s2_std
 permutation s1_begin s1_move_owner s2_lock_std s1_commit s2_std
 
@@ -95,23 +87,18 @@ permutation s1_begin s1_move_owner s2_lock_std s1_commit s2_std
 permutation s1_begin s1_soft_delete s2_lock s1_commit s2_std
 permutation s1_begin s1_soft_delete s2_lock_std s1_commit s2_std
 
-# A deleted row of owner 2 is restored while the scan runs: the new version
-# was never matched by the scan (invisible under its snapshot), it is not
-# returned until the next statement.
+# A row restored while the scan runs is invisible to its snapshot: not returned.
 permutation s1_begin s1_restore s2_lock s1_commit s2_std
 permutation s1_begin s1_restore s2_lock_std s1_commit s2_std
 
-# HOT update of a column outside both indexes: the row is returned once,
-# with the new payload.
+# HOT update of a column outside both indexes: returned once, with the new payload.
 permutation s1_begin s1_hot s2_lock s1_commit s2_std
 permutation s1_begin s1_hot s2_lock_std s1_commit s2_std
 
-# Delete: the row is gone.
 permutation s1_begin s1_delete s2_lock s1_commit s2_std
 permutation s1_begin s1_delete s2_lock_std s1_commit s2_std
 
-# The merge column itself changes: the new version still satisfies the
-# search condition and is returned at the old position, by both plans.
+# The merge column changes: returned at the old position by both plans.
 permutation s1_begin s1_move_id s2_lock s1_commit s2_std
 permutation s1_begin s1_move_id s2_lock_std s1_commit s2_std
 
@@ -121,6 +108,5 @@ permutation s1_begin s1_move_owner s2_lock_std s1_rollback s2_std
 permutation s1_begin s1_soft_delete s2_lock s1_rollback s2_std
 permutation s1_begin s1_soft_delete s2_lock_std s1_rollback s2_std
 
-# The mirror pair over the deleted rows: a row restored under the lock
-# fails the recheck of deleted_at IS NOT NULL.
+# The mirror pair: a row restored under the lock fails deleted_at IS NOT NULL.
 permutation s1_begin s1_restore s2_lock_deleted s1_commit s2_std_deleted

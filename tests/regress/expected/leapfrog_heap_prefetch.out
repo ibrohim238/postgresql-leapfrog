@@ -1,0 +1,588 @@
+-- leapfrog_heap_prefetch: heap pages asked for ahead when the Filter drops most rows.
+LOAD 'leapfrog';
+SET max_parallel_workers_per_gather = 0;
+SET effective_io_concurrency = 16;
+CREATE TABLE lf_hp (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	sort_key bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+);
+-- customer 1 and product 1 share every 6th row; one in 100 of those is live
+INSERT INTO lf_hp
+SELECT g, g % 2, g % 3, g / 4,
+	CASE WHEN g % 600 = 0 THEN NULL ELSE '2026-01-01'::timestamptz END,
+	repeat('x', 100)
+FROM generate_series(1, 60000) g;
+CREATE INDEX lf_hp_customer_id ON lf_hp (customer_id, id);
+CREATE INDEX lf_hp_product_id ON lf_hp (product_id, id);
+CREATE INDEX lf_hp_customer_sort ON lf_hp (customer_id, sort_key);
+CREATE INDEX lf_hp_product_sort ON lf_hp (product_id, sort_key);
+VACUUM ANALYZE lf_hp;
+-- the Filter drops most rows: pages are asked for ahead
+SELECT lf_check($$ SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 7 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 7/7, missing: 0, extra: 0
+(1 row)
+
+SELECT counter, (value)::bigint > 0 AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$)
+WHERE counter = 'Heap Prefetches';
+     counter     | asked 
+-----------------+-------
+ Heap Prefetches | t
+(1 row)
+
+SELECT counter, value FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$)
+WHERE counter IN ('Matched TIDs', 'Heap Fetches');
+   counter    | value 
+--------------+-------
+ Matched TIDs | 10000
+ Heap Fetches | 10000
+(2 rows)
+
+SET leapfrog.prefetch = off;
+SELECT count(*) AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$)
+WHERE counter = 'Heap Prefetches';
+ asked 
+-------
+     0
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+RESET leapfrog.prefetch;
+-- no Filter: one match at a time, and a LIMIT reads no further for it
+SELECT count(*) AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 ORDER BY id DESC LIMIT 5 $$)
+WHERE counter = 'Heap Prefetches';
+ asked 
+-------
+     0
+(1 row)
+
+SELECT counter, value FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 ORDER BY id DESC LIMIT 5 $$)
+WHERE counter IN ('Heap Fetches');
+   counter    | value 
+--------------+-------
+ Heap Fetches | 5
+(1 row)
+
+-- a Filter that passes most rows: the same
+SELECT count(*) AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND payload IS NOT NULL ORDER BY id DESC LIMIT 5 $$)
+WHERE counter = 'Heap Prefetches';
+ asked 
+-------
+     0
+(1 row)
+
+SELECT counter, value FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND payload IS NOT NULL ORDER BY id DESC LIMIT 5 $$)
+WHERE counter IN ('Heap Fetches');
+   counter    | value 
+--------------+-------
+ Heap Fetches | 5
+(1 row)
+
+SELECT lf_check($$ SELECT sort_key, id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id $$, false);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+-- rescans start with an empty queue and a target of 1
+SELECT lf_check($$
+	SELECT o.c, l.id FROM (VALUES (0), (1), (0)) o(c), LATERAL (
+		SELECT id FROM lf_hp WHERE customer_id = o.c AND product_id = 0 AND deleted_at IS NULL
+		ORDER BY id DESC LIMIT 3) l $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 6/6, missing: 0, extra: 0
+(1 row)
+
+-- a cursor stopped with matches in the queue
+SET leapfrog.enabled = off;
+SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 4;
+  id   
+-------
+ 60000
+ 59400
+ 58800
+ 58200
+(4 rows)
+
+RESET leapfrog.enabled;
+BEGIN;
+SET LOCAL leapfrog.force = on;
+EXPLAIN (COSTS OFF)
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (Index Merge Intersect) on lf_hp
+   Filter: (deleted_at IS NULL)
+   ->  Outer Stream on lf_hp_customer_id
+         Index Cond: (customer_id = 0)
+   ->  Inner Stream on lf_hp_product_id
+         Index Cond: (product_id = 0)
+(6 rows)
+
+DECLARE lf_hp_cursor CURSOR FOR
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC;
+FETCH 2 FROM lf_hp_cursor;
+  id   
+-------
+ 60000
+ 59400
+(2 rows)
+
+FETCH 2 FROM lf_hp_cursor;
+  id   
+-------
+ 58800
+ 58200
+(2 rows)
+
+CLOSE lf_hp_cursor;
+COMMIT;
+SELECT lf_check($$ SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 3/3, missing: 0, extra: 0
+(1 row)
+
+SELECT counter, (value)::bigint > 0 AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE $$)
+WHERE counter = 'Heap Prefetches';
+     counter     | asked 
+-----------------+-------
+ Heap Prefetches | t
+(1 row)
+
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SELECT lf_check($$ SELECT sort_key, id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id $$, false);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+ROLLBACK;
+-- dead rows and HOT chains in the queue: every live row stays reachable through its index
+UPDATE lf_hp SET payload = 'hot' WHERE customer_id = 0 AND product_id = 0 AND id % 1200 = 0;
+DELETE FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND id % 7 = 0;
+SELECT lf_check($$ SELECT id, payload FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 86/86, missing: 0, extra: 0
+(1 row)
+
+SELECT lf_check($$ SELECT id, payload FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 86/86, missing: 0, extra: 0
+(1 row)
+
+SET leapfrog.enabled = off;
+SET enable_bitmapscan = off;
+SET enable_seqscan = off;
+SELECT count(*) AS by_customer_index FROM lf_hp WHERE customer_id = 0;
+ by_customer_index 
+-------------------
+             28572
+(1 row)
+
+SELECT count(*) AS by_product_index FROM lf_hp WHERE product_id = 0;
+ by_product_index 
+------------------
+            18572
+(1 row)
+
+RESET enable_seqscan;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+SELECT count(*) AS on_the_heap FROM lf_hp WHERE customer_id = 0;
+ on_the_heap 
+-------------
+       28572
+(1 row)
+
+SELECT count(*) AS on_the_heap FROM lf_hp WHERE product_id = 0;
+ on_the_heap 
+-------------
+       18572
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+RESET enable_bitmapscan;
+RESET leapfrog.enabled;
+DROP TABLE lf_hp;
+-- a LIMIT does not wait for a 200,000-entry stretch without a common value
+CREATE TABLE lf_hp_gap (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_gap
+SELECT g, CASE WHEN g > 200000 OR g % 2 = 0 THEN 0 ELSE 1 END,
+	CASE WHEN g > 200000 OR g % 2 = 1 THEN 0 ELSE 1 END,
+	CASE WHEN g > 200003 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 201000) g;
+CREATE INDEX lf_hp_gap_customer ON lf_hp_gap (customer_id, id);
+CREATE INDEX lf_hp_gap_product ON lf_hp_gap (product_id, id);
+VACUUM ANALYZE lf_hp_gap;
+SELECT lf_check($$ SELECT id FROM lf_hp_gap WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 3/3, missing: 0, extra: 0
+(1 row)
+
+SELECT counter, (value)::bigint < 20000 AS bounded FROM lf_counters($$
+	SELECT id FROM lf_hp_gap WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 $$)
+WHERE counter IN ('Outer Entries Read', 'Inner Entries Read');
+      counter       | bounded 
+--------------------+---------
+ Outer Entries Read | t
+ Inner Entries Read | t
+(2 rows)
+
+DROP TABLE lf_hp_gap;
+-- A queued row found dead must not get the outer scan's current entry marked dead.
+CREATE TABLE lf_hp_kill (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_kill
+SELECT g,
+	CASE WHEN g = 1 OR g > 100000 OR g % 2 = 0 THEN 0 ELSE 1 END,
+	CASE WHEN g = 1 OR g > 100000 OR g % 2 = 1 THEN 0 ELSE 1 END,
+	CASE WHEN g > 100100 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 101000) g;
+CREATE INDEX lf_hp_kill_customer ON lf_hp_kill (customer_id, id);
+CREATE INDEX lf_hp_kill_product ON lf_hp_kill (product_id, id);
+VACUUM ANALYZE lf_hp_kill;
+DELETE FROM lf_hp_kill WHERE id > 100000 AND id <= 100100;
+-- the node first: a stock Index Scan would mark the dead entries itself
+SELECT counter, (value)::bigint > 0 AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp_kill WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$)
+WHERE counter = 'Heap Prefetches';
+     counter     | asked 
+-----------------+-------
+ Heap Prefetches | t
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_hp_kill WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 1/1, missing: 0, extra: 0
+(1 row)
+
+SET leapfrog.enabled = off;
+SET enable_bitmapscan = off;
+SET enable_seqscan = off;
+SET enable_indexonlyscan = off;
+SELECT count(*) AS by_customer_index FROM lf_hp_kill WHERE customer_id = 0;
+ by_customer_index 
+-------------------
+             50901
+(1 row)
+
+SELECT count(*) AS by_product_index FROM lf_hp_kill WHERE product_id = 0;
+ by_product_index 
+------------------
+            50900
+(1 row)
+
+RESET enable_seqscan;
+SET enable_indexscan = off;
+SELECT count(*) AS customer_on_the_heap FROM lf_hp_kill WHERE customer_id = 0;
+ customer_on_the_heap 
+----------------------
+                50901
+(1 row)
+
+SELECT count(*) AS product_on_the_heap FROM lf_hp_kill WHERE product_id = 0;
+ product_on_the_heap 
+---------------------
+               50900
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+RESET enable_bitmapscan;
+RESET leapfrog.enabled;
+DROP TABLE lf_hp_kill;
+-- a Filter that drops one row in ten does not grow the target
+CREATE TABLE lf_hp_few (id bigint PRIMARY KEY, customer_id bigint NOT NULL, product_id bigint NOT NULL);
+INSERT INTO lf_hp_few SELECT g, g % 2, g % 3 FROM generate_series(1, 30000) g;
+CREATE INDEX lf_hp_few_customer ON lf_hp_few (customer_id, id);
+CREATE INDEX lf_hp_few_product ON lf_hp_few (product_id, id);
+VACUUM ANALYZE lf_hp_few;
+SELECT count(*) AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp_few WHERE customer_id = 0 AND product_id = 0 AND id % 10 <> 0 ORDER BY id DESC LIMIT 50 $$)
+WHERE counter = 'Heap Prefetches';
+ asked 
+-------
+     0
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_hp_few WHERE customer_id = 0 AND product_id = 0 AND id % 10 <> 0 ORDER BY id DESC LIMIT 50 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 50/50, missing: 0, extra: 0
+(1 row)
+
+DROP TABLE lf_hp_few;
+-- the same wait within one value of a non-unique sort column
+CREATE TABLE lf_hp_group (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	sort_key bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_group
+SELECT g, CASE WHEN g <= 200000 AND g % 2 = 1 THEN 1 ELSE 0 END,
+	CASE WHEN g <= 200000 AND g % 2 = 0 THEN 1 ELSE 0 END,
+	CASE WHEN g <= 200000 THEN 1 ELSE g END,
+	CASE WHEN g > 200003 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 201000) g;
+CREATE INDEX lf_hp_group_customer ON lf_hp_group (customer_id, sort_key);
+CREATE INDEX lf_hp_group_product ON lf_hp_group (product_id, sort_key);
+VACUUM ANALYZE lf_hp_group;
+SELECT lf_check($$ SELECT id FROM lf_hp_group WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id LIMIT 3 $$, false);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 3/3, missing: 0, extra: 0
+(1 row)
+
+SELECT counter, (value)::bigint < 3000 AS bounded FROM lf_counters($$
+	SELECT id FROM lf_hp_group WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC LIMIT 3 $$)
+WHERE counter = 'Outer Entries Read';
+      counter       | bounded 
+--------------------+---------
+ Outer Entries Read | t
+(1 row)
+
+DROP TABLE lf_hp_group;
+-- a small inner group, so that the outer lookups by TID alone count
+CREATE TABLE lf_hp_lookup (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	sort_key bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_lookup
+SELECT g, CASE WHEN g <= 100000 THEN 1 ELSE 0 END,
+	CASE WHEN g > 100000 AND g <= 100100 THEN 1 ELSE 0 END,
+	CASE WHEN g <= 100100 THEN 1 ELSE g END,
+	CASE WHEN g > 100103 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 101100) g;
+CREATE INDEX lf_hp_lookup_customer ON lf_hp_lookup (customer_id, sort_key);
+CREATE INDEX lf_hp_lookup_product ON lf_hp_lookup (product_id, sort_key);
+VACUUM ANALYZE lf_hp_lookup;
+SELECT lf_check($$ SELECT id FROM lf_hp_lookup WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id LIMIT 3 $$, false);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 3/3, missing: 0, extra: 0
+(1 row)
+
+SELECT value AS outer_index FROM lf_counters($$
+	SELECT id FROM lf_hp_lookup WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC LIMIT 3 $$)
+WHERE counter = 'Outer Index';
+      outer_index       
+------------------------
+ "lf_hp_lookup_product"
+(1 row)
+
+SELECT counter, (value)::bigint < 20000 AS bounded FROM lf_counters($$
+	SELECT id FROM lf_hp_lookup WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC LIMIT 3 $$)
+WHERE counter = 'Outer Entries Read';
+      counter       | bounded 
+--------------------+---------
+ Outer Entries Read | t
+(1 row)
+
+DROP TABLE lf_hp_lookup;
+-- invisible row versions are heap reads for nothing as well
+CREATE TABLE lf_hp_dead (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_dead SELECT g, g % 2, g % 3, NULL FROM generate_series(1, 30000) g;
+CREATE INDEX lf_hp_dead_customer ON lf_hp_dead (customer_id, id);
+CREATE INDEX lf_hp_dead_product ON lf_hp_dead (product_id, id);
+VACUUM ANALYZE lf_hp_dead;
+-- an open snapshot keeps the entries from being marked dead between the runs
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM lf_hp_dead;
+ count 
+-------
+ 30000
+(1 row)
+
+DELETE FROM lf_hp_dead WHERE id % 100 <> 0;
+SELECT counter, (value)::bigint > 0 AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp_dead WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$)
+WHERE counter = 'Heap Prefetches';
+     counter     | asked 
+-----------------+-------
+ Heap Prefetches | t
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_hp_dead WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
+                      lf_check                       
+-----------------------------------------------------
+ custom scan: t, rows: 100/100, missing: 0, extra: 0
+(1 row)
+
+ROLLBACK;
+DROP TABLE lf_hp_dead;
+-- Queue fetched with the scan on an overflowing group's first entry: that entry stays live.
+CREATE TABLE lf_hp_over (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	sort_key bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_over
+SELECT g, 0, 0, CASE WHEN g <= 30000 THEN 0 ELSE g END,
+	CASE WHEN g > 30500 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 31500) g;
+CREATE INDEX lf_hp_over_customer ON lf_hp_over (customer_id, sort_key);
+CREATE INDEX lf_hp_over_product ON lf_hp_over (product_id, sort_key);
+VACUUM ANALYZE lf_hp_over;
+DELETE FROM lf_hp_over WHERE id > 30000 AND id <= 30500;
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SELECT lf_check($$ SELECT id FROM lf_hp_over WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id $$, false);
+                        lf_check                         
+---------------------------------------------------------
+ custom scan: t, rows: 30000/30000, missing: 0, extra: 0
+(1 row)
+
+SELECT counter, value FROM lf_counters($$
+	SELECT id FROM lf_hp_over WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id $$)
+WHERE counter IN ('Group Overflows', 'Inner Group Overflows');
+     counter     | value 
+-----------------+-------
+ Group Overflows | 1
+(1 row)
+
+COMMIT;
+SET leapfrog.enabled = off;
+SET enable_bitmapscan = off;
+SET enable_seqscan = off;
+SELECT count(*) AS by_customer_index FROM lf_hp_over WHERE customer_id = 0;
+ by_customer_index 
+-------------------
+             31000
+(1 row)
+
+SELECT count(*) AS by_product_index FROM lf_hp_over WHERE product_id = 0;
+ by_product_index 
+------------------
+            31000
+(1 row)
+
+RESET enable_seqscan;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+SELECT count(*) AS on_the_heap FROM lf_hp_over;
+ on_the_heap 
+-------------
+       31000
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+RESET enable_bitmapscan;
+RESET leapfrog.enabled;
+-- Three streams, one passed over without a fetch: every row stays reachable.
+ALTER TABLE lf_hp_over ADD COLUMN kind int NOT NULL DEFAULT 1;
+UPDATE lf_hp_over SET kind = 0 WHERE id > 30500 OR (id % 300 = 0 AND id <> 30000);
+DELETE FROM lf_hp_over WHERE id > 30500 AND id <= 30600;
+CREATE INDEX lf_hp_over_kind ON lf_hp_over (kind, sort_key);
+VACUUM ANALYZE lf_hp_over;
+INSERT INTO lf_hp_over SELECT g, 0, 0, g, '2026-01-01', 0 FROM generate_series(40001, 41000) g;
+INSERT INTO lf_hp_over SELECT g, 0, 0, g, NULL, 0 FROM generate_series(39901, 40000) g;
+DELETE FROM lf_hp_over WHERE id BETWEEN 39901 AND 40000;
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SET LOCAL leapfrog.min_indexes = 3;
+SET LOCAL leapfrog.max_indexes = 3;
+SELECT lf_check($$ SELECT id FROM lf_hp_over WHERE customer_id = 0 AND product_id = 0 AND kind = 0 AND deleted_at IS NOT NULL ORDER BY sort_key DESC, id $$, false);
+                       lf_check                        
+-------------------------------------------------------
+ custom scan: t, rows: 1900/1900, missing: 0, extra: 0
+(1 row)
+
+SELECT counter, value FROM lf_counters($$
+	SELECT id FROM lf_hp_over WHERE customer_id = 0 AND product_id = 0 AND kind = 0 AND deleted_at IS NOT NULL ORDER BY sort_key DESC, id $$)
+WHERE counter IN ('Outer Index', 'Group Overflows');
+     counter     |        value         
+-----------------+----------------------
+ Outer Index     | "lf_hp_over_product"
+ Group Overflows | 1
+(2 rows)
+
+COMMIT;
+SET leapfrog.enabled = off;
+SET enable_bitmapscan = off;
+SET enable_seqscan = off;
+SELECT count(*) AS by_customer_index FROM lf_hp_over WHERE customer_id = 0;
+ by_customer_index 
+-------------------
+             31900
+(1 row)
+
+SELECT count(*) AS by_product_index FROM lf_hp_over WHERE product_id = 0;
+ by_product_index 
+------------------
+            31900
+(1 row)
+
+RESET enable_seqscan;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+SELECT count(*) AS on_the_heap FROM lf_hp_over;
+ on_the_heap 
+-------------
+       31900
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+RESET enable_bitmapscan;
+RESET leapfrog.enabled;
+DROP TABLE lf_hp_over;

@@ -26,6 +26,9 @@ jobs:
       CC: ${{ matrix.cc }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # installcheck-upgrade reads the earlier install scripts from the tags
+          fetch-depth: 0
 
       - name: Install PostgreSQL ${{ matrix.pg }} from PGDG
         run: |
@@ -51,44 +54,20 @@ jobs:
       - name: Install
         run: sudo make with_llvm=no install
 
-      - name: Start a cluster with the library preloaded
+      - name: Start a cluster with tests/scripts/temp.conf and run the smoke check
         run: |
           sudo pg_dropcluster --stop ${PGVERSION} main || true
-          sudo pg_createcluster ${PGVERSION} test -p 5432 -- --auth-local=trust
-          sudo tee -a /etc/postgresql/${PGVERSION}/test/postgresql.conf <<'EOF'
-          shared_preload_libraries = 'leapfrog'
-          max_parallel_workers_per_gather = 0
-          jit = off
-          EOF
-          sudo pg_ctlcluster ${PGVERSION} test start
-          sudo -u postgres psql -c "CREATE ROLE runner SUPERUSER LOGIN" || true
+          echo "PGDATA=${RUNNER_TEMP}/pgdata" >> "$GITHUB_ENV"
+          echo "PGHOST=/tmp" >> "$GITHUB_ENV"
           echo "PGUSER=runner" >> "$GITHUB_ENV"
-          echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
-
-      - name: CREATE EXTENSION and the key query
-        run: |
-          psql -v ON_ERROR_STOP=1 -d postgres <<'EOF'
-          CREATE DATABASE smoke;
-          \c smoke
-          CREATE EXTENSION leapfrog;
-          SELECT leapfrog_version(), leapfrog_is_loaded();
-          CREATE TABLE orders (id bigint PRIMARY KEY, customer_id bigint NOT NULL, deleted_at timestamptz);
-          INSERT INTO orders SELECT g, g % 100, CASE WHEN g % 7 = 0 THEN now() END FROM generate_series(1, 50000) g;
-          CREATE INDEX idx_orders_customer_id ON orders (customer_id, id);
-          CREATE INDEX idx_orders_active_id ON orders (id) WHERE deleted_at IS NULL;
-          ANALYZE orders;
-          SET leapfrog.force = on;
-          EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 100 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100;
-          SELECT count(*) FROM (SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100) s;
-          SET leapfrog.enabled = off;
-          EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100;
-          EOF
-          # the forced plan must contain the custom scan, the disabled one must not
-          psql -tA -d smoke -c "SET leapfrog.force = on" -c "EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" | grep -q "Custom Scan (Index Merge Intersect)"
-          ! psql -tA -d smoke -c "SET leapfrog.enabled = off" -c "EXPLAIN (COSTS OFF) SELECT * FROM orders WHERE customer_id = 42 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100" | grep -q "Custom Scan"
+          PGDATA=${RUNNER_TEMP}/pgdata PGHOST=/tmp PGUSER=runner bash tests/scripts/start-cluster.sh
 
       - name: Regression and isolation tests (make installcheck)
         run: make installcheck
+
+      - name: Update from the earlier releases (make installcheck-upgrade)
+        if: matrix.cc == 'gcc'
+        run: make installcheck-upgrade
 
       - name: Benchmark harness smoke test
         if: matrix.cc == 'gcc'
@@ -97,9 +76,44 @@ jobs:
       - name: Show diffs on failure
         if: failure()
         run: |
-          cat regression.diffs 2>/dev/null || true
+          cat tests/regress/regression.diffs 2>/dev/null || true
           cat tests/isolation/regression.diffs 2>/dev/null || true
-          sudo cat /var/log/postgresql/postgresql-${PGVERSION}-test.log | tail -100 || true
+          tail -100 "${PGDATA}/server.log" || true
+
+  checks:
+    name: Lint, test lists, version numbers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PGVERSION: 18
+      LINT_STRICT: "1"
+      ACTIONLINT: 1.7.12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # check-version compares with the release tags
+          fetch-depth: 0
+      - name: Install the tools and the server headers (for clang-tidy)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-server-dev-${PGVERSION} shellcheck yamllint codespell clang-tidy
+          echo "/usr/lib/postgresql/${PGVERSION}/bin" >> "$GITHUB_PATH"
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT}/actionlint_${ACTIONLINT}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          sudo install -m 755 actionlint /usr/local/bin/actionlint && rm actionlint
+      - name: make lint
+        run: make lint
+      - name: make check-tests
+        run: make check-tests
+      - name: make check-version
+        run: make check-version
 
   docker:
     name: Docker compose
@@ -112,8 +126,8 @@ jobs:
       - name: Show diffs on failure
         if: failure()
         run: |
-          cat results/*.diff 2>/dev/null || true
-          cat tests/isolation/results/*.diff 2>/dev/null || true
+          cat tests/regress/regression.diffs 2>/dev/null || true
+          cat tests/isolation/regression.diffs 2>/dev/null || true
 
   cassert:
     name: PostgreSQL ${{ matrix.pg }} with --enable-cassert

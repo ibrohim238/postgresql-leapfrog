@@ -22,10 +22,25 @@ changes a step.
 There is no PostgreSQL on a typical host; use Docker.
 
 ```bash
-docker compose --profile test run --rm test         # build + all tests
+bash tests/run-in-docker.sh                         # build + all tests
 docker build -f docker/cassert.Dockerfile -t leapfrog-cassert . \
   && docker run --rm leapfrog-cassert               # assert-enabled server
+docker build --build-arg SANITIZE=address,undefined \
+  -f docker/cassert.Dockerfile -t leapfrog-san . \
+  && docker run --rm leapfrog-san                   # + ASAN/UBSAN (clang)
 ```
+
+`docker/cassert.Dockerfile` arguments: `PG_BRANCH` (`REL_18_STABLE`),
+`SANITIZE` (empty, or a `-fsanitize=` list: clang, server and extension
+instrumented, any report in `/tmp/asan.*`/`/tmp/ubsan.*` fails the run),
+`UID`/`GID`. Its `pg` stage is PostgreSQL alone (`--target pg`).
+
+The test image has no sources: it mounts the repository at `/src/leapfrog`
+and builds it there (`make clean` first) as a user with your UID/GID
+(`run-in-docker.sh` and `make docker-build` pass them), so objects and
+`tests/regress/results` on the host are yours. Test server settings live in
+`tests/scripts/temp.conf` only; a cluster is started with
+`tests/scripts/start-cluster.sh` (initdb, temp.conf, smoke check).
 
 Inside a container with the server headers (repository mounted at `/work`):
 
@@ -34,6 +49,7 @@ make clean                         # after ANY change to src/leapfrog.h
 make with_llvm=no WERROR=1 && make with_llvm=no install
 PGUSER=postgres make installcheck  # regression + isolation
 make pgindent                      # must be clean; pgindent-fix reformats
+make lint                          # must be clean; see CONTRIBUTING.md, "Lint"
 ```
 
 - PGXS does not track header dependencies: stale objects after a
@@ -45,7 +61,11 @@ make pgindent                      # must be clean; pgindent-fix reformats
 - New `typedef`s go into `src/typedefs.list`, or pgindent misformats them.
 - `make installcheck` stops after a failing regression suite without running
   the isolation suite; run `make installcheck REGRESS=` for isolation only.
-- Files written by the container are owned by root; `chown` them back.
+- One test, repeated: `make test-one TEST=leapfrog_nulls REPEATS=50`
+  (`KIND=isolation` for a spec; `tests/scripts/run-one.sh`), in a scratch
+  database after `leapfrog_setup`. `make installcheck-rerun` reruns what the
+  last `installcheck` failed. Both are for reproducing a failure locally; a
+  flaky test is fixed (CONTRIBUTING.md, "Flaky tests"), never retried in CI.
 
 ## Rules
 
@@ -95,6 +115,8 @@ Versions are `0.0.x` (still experimental). A release commit bumps
 `EXTVERSION` (Makefile) and `default_version` (`leapfrog.control`), renames
 the install script to `leapfrog--X.sql`, adds `leapfrog--PREV--X.sql`
 (empty when the SQL objects did not change), updates
-`expected/leapfrog_setup.out` and turns `Unreleased` into the version in
+`tests/regress/expected/leapfrog_setup.out` and turns `Unreleased` into the version in
 CHANGELOG.md. Tag `vX` (annotated, message `leapfrog X`) only after CI is
-green on that commit, and only when asked.
+green on that commit, and only when asked. `make check-version` must pass on
+the release commit, and `make check-version RELEASE=1` after creating the tag
+locally and before pushing it.
