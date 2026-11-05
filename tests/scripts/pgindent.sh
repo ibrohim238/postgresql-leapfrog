@@ -52,6 +52,7 @@ fi
 cat "$work/postgres/src/tools/pgindent/typedefs.list" "$root/src/typedefs.list" \
 	> "$work/typedefs.list"
 
+# $mode is two options or none, split on purpose
 # shellcheck disable=SC2086
 perl "$work/postgres/src/tools/pgindent/pgindent" $mode \
 	--indent="$work/pg_bsd_indent" \

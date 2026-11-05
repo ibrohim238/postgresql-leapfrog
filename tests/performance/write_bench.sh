@@ -48,7 +48,7 @@ filter_expr() {
 	echo "(abs(hashint8(($g)::bigint * 64 + $k)) % 100)"
 }
 
-columns="" ; values=""
+columns=""
 for k in $(seq 1 "$NFILTERS"); do
 	columns+=", f$k bigint NOT NULL"
 done

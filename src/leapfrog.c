@@ -133,28 +133,6 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
-	DefineCustomBoolVariable("leapfrog.prefetch",
-							 "Prefetches the next leaf page of every index stream, and heap pages of rows ahead where the Filter drops most of them.",
-							 NULL,
-							 &intersect_prefetch,
-							 true,
-							 PGC_USERSET,
-							 0,
-							 NULL,
-							 NULL,
-							 NULL);
-
-	DefineCustomBoolVariable("leapfrog.trace_planner",
-							 "Reports what planning an Index Merge Intersect did.",
-							 "A developer setting: the tests check the work of the planner by these counts.",
-							 &intersect_trace_planner,
-							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL,
-							 NULL,
-							 NULL);
-
 	DefineCustomBoolVariable("leapfrog.force",
 							 "Chooses Index Merge Intersect regardless of cost.",
 							 "The counterpart of MySQL's INDEX_MERGE hint.",
@@ -165,19 +143,6 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
-
-	DefineCustomIntVariable("leapfrog.skip_after",
-							"Entries a lagging scan reads in a row before it re-descends its B-tree.",
-							"Developer option for measuring skip-ahead; 0 turns skipping off.",
-							&intersect_skip_after,
-							INTERSECT_SKIP_AFTER,
-							0,
-							INT_MAX,
-							PGC_USERSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL,
-							NULL,
-							NULL);
 
 	DefineCustomIntVariable("leapfrog.max_indexes",
 							"The most indexes one Index Merge Intersect node combines.",
@@ -206,6 +171,17 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomBoolVariable("leapfrog.prefetch",
+							 "Prefetches the next leaf page of every index stream, and heap pages of rows ahead where the Filter drops most of them.",
+							 NULL,
+							 &intersect_prefetch,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	DefineCustomEnumVariable("leapfrog.require_node",
 							 "Raises an error when a plan lacks, or has, an Index Merge Intersect node.",
 							 "Developer setting for the tests: \"require\" fails a query whose "
@@ -214,6 +190,30 @@ _PG_init(void)
 							 &intersect_require_node,
 							 REQUIRE_NODE_ALLOW,
 							 require_node_options,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomIntVariable("leapfrog.skip_after",
+							"Entries a lagging scan reads in a row before it re-descends its B-tree.",
+							"Developer option for measuring skip-ahead; 0 turns skipping off.",
+							&intersect_skip_after,
+							INTERSECT_SKIP_AFTER,
+							0,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomBoolVariable("leapfrog.trace_planner",
+							 "Reports what planning an Index Merge Intersect did.",
+							 "A developer setting: the tests check the work of the planner by these counts.",
+							 &intersect_trace_planner,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL,

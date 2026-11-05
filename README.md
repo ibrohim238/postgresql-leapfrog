@@ -734,6 +734,7 @@ make test-isolation        # tests/isolation/specs/*.spec only
 make pgindent              # core code style
 make check-tests           # test lists, expected files, alternative outputs (no server)
 make check-version         # EXTVERSION, control file, scripts, CHANGELOG.md agree
+make lint                  # static checks of the tree (CONTRIBUTING.md, "Lint")
 make bench-smoke           # tiny run of the benchmark harness
 ```
 

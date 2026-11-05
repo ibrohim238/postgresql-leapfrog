@@ -1,0 +1,36 @@
+# Editor settings; tests/scripts/lint.sh checks the whitespace rules
+# (make lint), pgindent the layout of the C code (make pgindent).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# pgindent: 4-column tabs
+[*.{c,h}]
+indent_style = tab
+indent_size = 4
+tab_width = 4
+
+[{Makefile,*.mk}]
+indent_style = tab
+tab_width = 4
+
+[*.sh]
+indent_style = tab
+tab_width = 4
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+indent_style = space
+indent_size = 2
+
+# expected output of pg_regress and pg_isolation_regress, byte for byte
+[*.out]
+trim_trailing_whitespace = false
+insert_final_newline = false

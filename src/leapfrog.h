@@ -145,6 +145,13 @@ lf_instr_stop(StreamInstr *instr, const StreamClock *clock)
 		instr_time	now;
 
 		INSTR_TIME_SET_CURRENT(now);
+
+		/*
+		 * lf_instr_start set clock->start under the same instr->timer, which
+		 * nothing changes after the scan begins; clang-tidy's analyzer
+		 * assumes the calls between the two may.
+		 */
+		/* NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult) */
 		INSTR_TIME_ACCUM_DIFF(instr->time, now, clock->start);
 	}
 	if (instr->bufusage)

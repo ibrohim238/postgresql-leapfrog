@@ -16,9 +16,9 @@ versions: [SemVer](https://semver.org/).
 - Planner: a nullable sort column counts as `NOT NULL` when a strict condition of the
   relation rejects NULL in it (`val > 0`, `val > $1`, `val IS NOT NULL`, `val = ANY (…)`;
   `find_nonnullable_vars`, after TimescaleDB SkipScan's `check_notnull_skipkey`): no row
-  with a NULL there is in the result, so an index serves the order with its NULLs at either
-  end, and the streams start past their NULLs and stop at them instead of reading them
-  (`IS NOT NULL` scan key). Join clauses do not count. Tests in `leapfrog_nulls`.
+  with a NULL there is in the result, so an index serves the order with its NULLs at
+  either end, and the streams start past their NULLs and stop at them instead of reading
+  them (`IS NOT NULL` scan key). Join clauses do not count. Tests in `leapfrog_nulls`.
 - `leapfrog.require_node` (`allow` | `require` | `forbid`, default `allow`), a developer
   setting after TimescaleDB's `timescaledb.debug_require_vector_agg`: a `planner_hook`
   fails a query at plan time when its final plan has no Index Merge Intersect node under
@@ -29,22 +29,38 @@ versions: [SemVer](https://semver.org/).
   runs saw must differ.
 
 - Planner: with an MCV list or dependencies covering two columns of the conditions, the
-  first stream is priced in a pair with every other index, not only the next by size. The pass by size adds a large index
-  to the smaller ones only, so `(customer_id, id)` with `(id) WHERE deleted_at IS NULL`
-  was never priced where a `(product_id, id)` was smaller. No change without such
-  statistics, where the correlation is unknown, so no more range probes either; test in
-  `leapfrog_planner`.
+  first stream is priced in a pair with every other index, not only the next by size. The
+  pass by size adds a large index to the smaller ones only, so `(customer_id, id)` with
+  `(id) WHERE deleted_at IS NULL` was never priced where a `(product_id, id)` was smaller.
+  No change without such statistics, where the correlation is unknown, so no more range
+  probes either; test in `leapfrog_planner`.
 
 - Heap prefetch: where the node's `Filter` drops more rows than it passes, matches are
-  gathered ahead, doubling up to the tablespace's `effective_io_concurrency` and at most 32,
-  their heap pages asked for and the rows fetched in the same order; heap tables only.
+  gathered ahead, doubling up to the tablespace's `effective_io_concurrency` and at most
+  32, their heap pages asked for and the rows fetched in the same order; heap tables only.
   Found rows wait for no long stretch: the queue is fetched after 4,096 entries without a
-  match. A node without a `Filter`, or whose `Filter`
-  passes most rows, still fetches one match at a time, so that a `LIMIT` reads no further
-  in the indexes. MVCC snapshots only; under `leapfrog.prefetch`. `EXPLAIN ANALYZE` counts
-  the pages as `Heap Prefetches`; test in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query
-  fetching 20,012 rows for 11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm,
-  no change (BENCHMARKS.md, "Heap prefetch").
+  match. A node without a `Filter`, or whose `Filter` passes most rows, still fetches one
+  match at a time, so that a `LIMIT` reads no further in the indexes. MVCC snapshots only;
+  under `leapfrog.prefetch`. `EXPLAIN ANALYZE` counts the pages as `Heap Prefetches`; test
+  in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query fetching 20,012 rows for
+  11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm, no change
+  (BENCHMARKS.md, "Heap prefetch").
+
+- `make lint` (`tests/scripts/lint.sh`), after the CI checks of Citus and TimescaleDB:
+  banned C functions, `TODO`/`FIXME`/`XXX` notes, trailing whitespace and final newlines
+  (`.editorconfig`), the `#include` order, GUCs defined in alphabetical order (the
+  definitions in `leapfrog.c` are reordered, no change in behaviour), `CHANGELOG.md`
+  lines of at most 100 characters, and every `tests/scripts/*.sh` run from somewhere;
+  `make lint-fix` fixes the whitespace and the long lines. See CONTRIBUTING.md, "Lint".
+- `make lint` runs `shellcheck`, `actionlint`, `yamllint` (`.yamllint`) and `codespell`
+  (`.codespellrc`) when they are installed, as TimescaleDB's workflows do; `LINT_STRICT=1`
+  fails on a missing one. `bench_db.sh` gets a shell directive and loses an unused
+  argument and loop variables, `write_bench.sh` an unused variable (shellcheck warnings).
+- `make lint` runs `clang-tidy` on `src/*.c` when it is installed (`.clang-tidy`:
+  `bugprone-*` and the static analyzer, less the checks that only flag PostgreSQL idioms,
+  each named with the reason). Its one finding, uninitialised `clock->start` in
+  `lf_instr_stop`, is a false positive (the same `instr->timer` guards both ends) and
+  carries a `NOLINTNEXTLINE`.
 
 - `make installcheck-upgrade`: creates every earlier release still on an update path
   (its install script taken from the release tag) and runs `ALTER EXTENSION leapfrog
@@ -147,8 +163,8 @@ versions: [SemVer](https://semver.org/).
   for the other columns, 15); the read runs are labelled with their strategy.
 - `list_bench.sh`: the list query with rare, scattered matches, rows in random or `id`
   order, six plan modes and text plans; checked by `bench-smoke`.
-- `bitmap_bench.sh`: an `exact` mode, with indexes made for the queries, and index sizes in
-  `sizes.csv`. `write_bench.sh`: `STRATEGIES` picks the index sets to run.
+- `bitmap_bench.sh`: an `exact` mode, with indexes made for the queries, and index sizes
+  in `sizes.csv`. `write_bench.sh`: `STRATEGIES` picks the index sets to run.
 - Shorter script headers and fewer source comments; no change to the code.
 
 ### Fixed

@@ -1,0 +1,10 @@
+[codespell]
+# make lint (tests/scripts/lint.sh) runs codespell on src/, tests/, docs/ and
+# the Markdown files.  Expected test output repeats what the server prints and
+# is not checked; nor is the output of a test or benchmark run.
+skip = .git,.claude,*/expected,*.out,*/results,*.o,*.so,*.bc
+# Words of PostgreSQL and of this code that codespell takes for misspellings
+# go into ignore-words-list (lower case, comma-separated).  The default
+# dictionaries find none so far; the "code" one would add hist (histogram)
+# and od (the command):
+# ignore-words-list = hist,od

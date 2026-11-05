@@ -19,6 +19,8 @@
 #                       alternative outputs agree (no server needed)
 #   make check-version  the version numbers, scripts and CHANGELOG.md agree;
 #                       RELEASE=1 checks a release and its tag
+#   make lint           static checks of the tree (CONTRIBUTING.md, "Lint");
+#                       lint-fix repairs whitespace and long CHANGELOG lines
 
 MODULE_big = leapfrog
 OBJS = \
@@ -116,7 +118,7 @@ endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version
+.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version lint lint-fix
 
 test: installcheck
 
@@ -175,3 +177,11 @@ pgindent:
 
 pgindent-fix:
 	bash tests/scripts/pgindent.sh --fix
+
+# Static checks of the tree (tests/scripts/lint.sh, see CONTRIBUTING.md);
+# lint-fix first fixes whitespace and long CHANGELOG.md lines.
+lint:
+	bash tests/scripts/lint.sh
+
+lint-fix:
+	bash tests/scripts/lint.sh --fix

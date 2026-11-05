@@ -43,6 +43,59 @@ The script fetches `pgindent` and `pg_bsd_indent` from `REL_18_STABLE` and
 builds them against the installed server headers. New `typedef`s of the
 extension go into `src/typedefs.list`.
 
+### Lint
+
+`make lint` (`tests/scripts/lint.sh`) runs the checks that neither the
+compiler nor `pgindent` make, after those of Citus (`ci/`) and TimescaleDB
+(its code style workflow). Each failing check prints its findings and one
+line with the reason, and the script goes on with the next one:
+
+- banned C functions in `src/`: `strcpy`, `strcat`, `sprintf`, `vsprintf`,
+  `strncpy`, `strncat`, `gets`, `alloca` (use `strlcpy`, `snprintf`,
+  `psprintf`, a `StringInfo`); a line that must keep one carries an
+  `IGNORE-BANNED` comment with the reason;
+- no `TODO`, `FIXME` or `XXX` notes in `src/` and `tests/`: planned work goes
+  into `docs/roadmap.md`;
+- no trailing whitespace and a final newline in every tracked text file, as
+  `.editorconfig` says; expected test output (`tests/**/expected/*.out`) is
+  exempt;
+- `#include` order in `src/*.c`: `"postgres.h"`, then `<system>` headers,
+  then PostgreSQL headers, then the extension's own (`"leapfrog.h"`), each
+  group sorted;
+- the `DefineCustom*Variable` calls in alphabetical order of the GUC names,
+  as in the Settings table of the README;
+- `CHANGELOG.md` lines of at most 100 characters;
+- every `tests/scripts/*.sh` is run from the Makefile, a workflow, a
+  Dockerfile, a compose file or another script.
+
+`make lint-fix` (`lint.sh --fix`) first removes trailing whitespace, adds the
+final newline and wraps long `CHANGELOG.md` lines; the other findings are
+fixed by hand.
+
+Then the external tools, as in TimescaleDB's workflows:
+
+- `shellcheck -S warning -x` on every `*.sh`: errors and warnings, not
+  style. A `# shellcheck disable=SCxxxx` goes on the line before the one it
+  covers, with the reason in a comment next to it;
+- `actionlint` on `.github/workflows/*.yml`, with the shell of the `run:`
+  blocks checked at the same severity;
+- `yamllint` on every `*.yml` and `*.yaml` (`.yamllint`: no `---` required,
+  lines over 120 characters are reported as warnings, `on:` is a key);
+- `codespell` on `src/`, `tests/`, `docs/` and the Markdown files
+  (`.codespellrc`; expected output is skipped). A PostgreSQL or code term it
+  takes for a misspelling goes into `ignore-words-list` there;
+- `clang-tidy` on `src/*.c` against the headers of the server `pg_config`
+  names (`PG_CONFIG`, `CLANG_TIDY` pick others), with `.clang-tidy`:
+  `bugprone-*` and the static analyzer, every warning an error. The checks
+  left out only flag PostgreSQL idioms; `.clang-tidy` names each with the
+  reason. A false positive gets a `NOLINTNEXTLINE(<check>)` comment with a
+  comment saying why above it, as in `lf_instr_stop`.
+
+A tool that is not installed is skipped with a notice; `LINT_STRICT=1 make
+lint` fails instead, as CI should. On Debian or Ubuntu:
+`apt-get install shellcheck yamllint codespell clang-tidy`; `actionlint` is a single
+binary from its [releases](https://github.com/rhysd/actionlint/releases).
+
 ## Tests
 
 Every behaviour change comes with a test.

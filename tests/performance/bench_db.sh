@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Sourced by the benchmark scripts: the database they run in.
 #
 # The benchmarks drop and recreate tables with common names (orders), so they
@@ -23,7 +24,7 @@ BENCH_DB_LOCK_KEY='1818650210, 1'
 
 bench_admin_psql() {
 	psql -X -q -tA -v ON_ERROR_STOP=1 -d "${BENCH_ADMIN_DB:-postgres}" \
-		-v db="$BENCH_DB" -v mark="$BENCH_DB_MARK" "$@"
+		-v db="$BENCH_DB" -v mark="$BENCH_DB_MARK"
 }
 
 # bench_db_use: bench_db_prepare and bench_db_lock, released at exit.
@@ -66,7 +67,7 @@ bench_db_lock() {
 	# the session is recognised by its application name: a random token,
 	# since $$ repeats across containers (a script run as their entrypoint
 	# is PID 1 in each), first because PostgreSQL cuts the name at 63 bytes
-	local token app state i
+	local token app state
 	token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 	app="lf_bench $token $(basename "$0")"
 	app=${app:0:63}
@@ -81,7 +82,7 @@ bench_db_lock() {
 		\quit
 		\endif
 	SQL
-	for i in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		state=$(bench_lock_holders "a.application_name = '$app'")
 		[ -n "$state" ] && return 0
 		kill -0 "$BENCH_DB_LOCK_PID" 2>/dev/null || break
@@ -99,12 +100,12 @@ bench_db_lock() {
 # bench_db_unlock: release the lock and wait until it is gone, so that a
 # run started right after this one does not find it still held.
 bench_db_unlock() {
-	local i state
+	local state
 	[ -n "${BENCH_DB_LOCK_FD:-}" ] || return 0
 	exec {BENCH_DB_LOCK_FD}>&-
 	BENCH_DB_LOCK_FD=
 	wait "$BENCH_DB_LOCK_PID" 2>/dev/null || true
-	for i in $(seq 1 100); do
+	for _ in $(seq 1 100); do
 		state=$(bench_lock_holders "a.application_name = '$BENCH_DB_LOCK_APP'")
 		[ -z "$state" ] && return 0
 		sleep 0.1

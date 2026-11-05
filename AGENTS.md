@@ -34,6 +34,7 @@ make clean                         # after ANY change to src/leapfrog.h
 make with_llvm=no WERROR=1 && make with_llvm=no install
 PGUSER=postgres make installcheck  # regression + isolation
 make pgindent                      # must be clean; pgindent-fix reformats
+make lint                          # must be clean; see CONTRIBUTING.md, "Lint"
 ```
 
 - PGXS does not track header dependencies: stale objects after a
