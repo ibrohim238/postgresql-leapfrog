@@ -48,6 +48,7 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/restrictinfo.h"
 #include "parser/parse_oper.h"
 #include "parser/parsetree.h"
 #include "utils/datum.h"
@@ -1315,6 +1316,31 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 }
 
 /*
+ * add_predicates
+ *		The clauses with the predicates of a partial index added, as
+ *		RestrictInfos, which extended statistics require.  A predicate the
+ *		clauses imply is left out, as in btcostestimate's
+ *		add_predicate_to_index_quals: kind = 2 would otherwise count twice for an
+ *		equality kind = 2 and a predicate kind = 2.
+ */
+static List *
+add_predicates(PlannerInfo *root, List *clauses, List *indpred)
+{
+	ListCell   *lc;
+
+	clauses = list_copy(clauses);
+	foreach(lc, indpred)
+	{
+		Expr	   *pred = (Expr *) lfirst(lc);
+
+		if (!predicate_implied_by(list_make1(pred), clauses, false))
+			clauses = lappend(clauses, make_simple_restrictinfo(root, pred));
+	}
+
+	return clauses;
+}
+
+/*
  * lf_index_entries
  *		Entries of an index matching the equalities on its leading columns.
  *		A partial index holds index->tuples entries to begin with.
@@ -1322,9 +1348,23 @@ stream_overlap(PlannerInfo *root, RangeTblEntry *rte, Index rti,
 double
 lf_index_entries(PlannerInfo *root, Index rti, IndexCandidate *candidate)
 {
+	RelOptInfo *rel = root->simple_rel_array[rti];
 	double		entries = candidate->index->tuples;
 
-	if (candidate->clauses != NIL)
+	if (candidate->clauses == NIL)
+		return clamp_row_est(entries);
+
+	if (rel->statlist != NIL && candidate->index->indpred != NIL)
+	{
+		/* the equalities and the predicate may be correlated */
+		List	   *clauses = add_predicates(root, candidate->clauses,
+											 candidate->index->indpred);
+
+		entries = Min(entries,
+					  rel->tuples * clauselist_selectivity(root, clauses, rti,
+														   JOIN_INNER, NULL));
+	}
+	else
 		entries *= clauselist_selectivity(root, candidate->clauses, rti,
 										  JOIN_INNER, NULL);
 
@@ -1335,9 +1375,6 @@ lf_index_entries(PlannerInfo *root, Index rti, IndexCandidate *candidate)
  * stream_rows
  *		Rows that satisfy what the streams enforce: their equalities and the
  *		predicates of partial indexes.  The node fetches these from the heap.
- *		A predicate the other conditions imply is left out, as in
- *		btcostestimate's add_predicate_to_index_quals: kind = 2 would otherwise
- *		count twice for an equality kind = 2 and a predicate kind = 2.
  */
 static double
 stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -1350,17 +1387,7 @@ stream_rows(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		clauses = list_concat_unique_ptr(clauses, streams[i]->clauses);
 
 	for (int i = 0; i < nstreams; i++)
-	{
-		ListCell   *lc;
-
-		foreach(lc, streams[i]->index->indpred)
-		{
-			Node	   *pred = (Node *) lfirst(lc);
-
-			if (!predicate_implied_by(list_make1(pred), clauses, false))
-				clauses = lappend(clauses, pred);
-		}
-	}
+		clauses = add_predicates(root, clauses, streams[i]->index->indpred);
 
 	return clamp_row_est(rel->tuples *
 						 clauselist_selectivity(root, clauses, rti,

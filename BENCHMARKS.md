@@ -1133,6 +1133,69 @@ warm the cost is within the spread of the runs. In a separate load through `list
 loads with the same work (164 against 252 here, 206 above), so they compare within one
 load only.
 
+### The index pairs of the third query, and extended statistics
+
+Three ad hoc runs after `396a078`, scripts kept outside the repository, each one load of
+`list_bench.sh`'s data (100M rows, random order, `shared_buffers` 512MB, `work_mem` 512MB),
+cold runs after an Index Scan of another customer evicted the caches, ms.
+
+**Which pair.** The third query's sets forced one at a time, ABBA, 3 cold and 4 warm runs,
+medians:
+
+| Streams | Cold | Warm | Heap rows | Entries |
+|---|---:|---:|---:|---:|
+| `(product_id, id)` + `(customer_id, id)`, the planner's usual choice | **1,254** | **165** | 20,012 | 3.0M |
+| `(customer_id, id)` + `(id) WHERE deleted_at IS NULL` | 1,476 | 244 | 500 | 5.7M |
+| all three | 1,615 | 321 | 11 | 7.7M |
+
+The pair with the live-rows index fetches 40× fewer heap rows and is still slower: the
+live-rows index holds 5M entries, one in 20 ids, 980 ms of the 1,476 cold. It would win
+where the live rows are rare in the table as a whole, which they are not here.
+
+**Extended statistics, one deletion date** (the data above: every deleted row has the same
+`deleted_at`). `CREATE STATISTICS (mcv) ON customer_id, deleted_at`, `ANALYZE` at
+`SET STATISTICS` 100 (1 s), 1,000 (10 s) and 10,000 (16 s); one cold run per cell and 3 warm:
+
+| Target | leapfrog, third query | stock, third query | stock, customer 5M (cold) | stock, customer 1M (cold / warm) |
+|---|---|---|---|---|
+| none | pair, 1,248 cold / 166 warm | `BitmapAnd` 1,554–2,190 / 532 | Index Scan 81 s | Index Scan 15 s / 1.0–4.0 s |
+| 100 | three streams, 1,300 / 314 | `BitmapAnd` 787 / 568 | Index Scan 12 s | Index Scan 14 s / 0.9–2.1 s |
+| 1,000 | customer + live, 1,448 / 237 | `BitmapAnd` 1,692 / 503 | **`BitmapAnd` 2.0 s** | **`BitmapAnd` 1.1 s / 0.74–0.76 s** |
+| 10,000 | customer + live, 1,418 / 228 | `BitmapAnd` 1,241 / 466 | `BitmapAnd` 1.7 s | `BitmapAnd` 1.0 s / 0.65 s |
+
+leapfrog's plans for the first two queries stayed the same (0.53 s and 0.12–0.14 s cold,
+0.05 s warm for the second). The MCV list has no entry for the customers' live rows at any
+target; what it holds is "customer 4, this date" at 1 % and "customer 5, this date" at 5 %,
+and the planner derives the rest. The statistics on the expression `(deleted_at IS NULL)` are
+not applied to the clause `deleted_at IS NULL` at all (estimate 10,038 for 400 rows on a
+200,000-row copy of the shape); the columns are what works. With them stock PostgreSQL leaves
+the Index Scan of the first two queries for `BitmapAnd`: 3–4× the node on the large customer
+from disk, 8–14× on the small one, instead of 100× and more. The third query's choice between
+two and three streams, and the pair under statistics, is the planner pricing the pairs of the
+first stream (CHANGELOG, Unreleased).
+
+**Extended statistics, 730 deletion dates** (the same load with `deleted_at` spread over two
+years, as a real table has). The MCV list holds 4, 234 and 10,000 pairs at the three targets
+and none for customers 4 or 5: their 1M rows split over 730 dates, each pair too rare to be
+listed. Stock PostgreSQL keeps the Index Scan for the first two queries at every target
+(cold 3.9–41 s and 3.5–15 s, these evictions incomplete for the plan's own pages; warm
+1.0–3.4 s for the small customer), `BitmapAnd` for the third (cold 1,262–2,184, warm
+550–1,244). leapfrog: first query cold 590–768, second cold 67–157 and warm 70–178, third
+as the table below. `ANALYZE` at target 10,000 took 26 s.
+
+| Target | leapfrog, third query | Cold | Warm |
+|---|---|---:|---:|
+| none | three streams | 2,092–2,153 | 309–465 |
+| 100 | pair | 914 | 409–441 |
+| 1,000 | three streams | 2,074 | 401–750 |
+| 10,000 | pair | 1,503 | 168–170 |
+
+The estimates of the pair and of the three streams lie within a few percent of each other,
+so the sample decides; since the heap prefetch the pair is the better plan from disk and
+warm, and the cost model does not know the heap pages are asked for ahead (docs/roadmap.md).
+Warm times of this run are noisier than the others (other work on the machine); the order of
+the plans does not change.
+
 ### Two filters, 100 matches spread one per million ids
 
 Customers with 10k, 100k and 1M rows, products with 1M and 10M rows (`h1 =

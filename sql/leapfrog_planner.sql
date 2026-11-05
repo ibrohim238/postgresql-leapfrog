@@ -144,3 +144,105 @@ SELECT lf_pl_plan_rows($$ SELECT id FROM lf_pl_range WHERE a = 1 AND b = 1 ORDER
 SELECT lf_check($$ SELECT id FROM lf_pl_range WHERE a = 1 AND b = 1 ORDER BY id $$);
 DROP FUNCTION lf_pl_plan_rows(text);
 DROP TABLE lf_pl_range;
+
+-- A large index that restricts most, as extended statistics tell: live rows are
+-- half the table and the largest index, but rare for this customer.  The pass by
+-- size would add the product's index first and never price the customer with the
+-- live rows alone.
+CREATE TABLE lf_pl_pair (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	deleted_at timestamptz,
+	payload text
+);
+INSERT INTO lf_pl_pair
+SELECT g, CASE WHEN g % 10 = 0 THEN 0 ELSE g % 9 + 1 END,
+	CASE WHEN g % 20 = 0 OR g % 5 < 2 THEN 1 ELSE g % 50 + 2 END,
+	CASE WHEN g % 10 = 0 AND g % 500 <> 0 THEN '2026-01-01'::timestamptz
+		 WHEN g % 10 <> 0 AND g % 2 = 0 THEN '2026-01-01'::timestamptz END,
+	repeat('x', 300)
+FROM generate_series(1, 200000) g
+ORDER BY hashint8(g);
+CREATE INDEX lf_pl_pair_customer ON lf_pl_pair (customer_id, id);
+CREATE INDEX lf_pl_pair_product ON lf_pl_pair (product_id, id);
+CREATE INDEX lf_pl_pair_live ON lf_pl_pair (id) WHERE deleted_at IS NULL;
+CREATE STATISTICS lf_pl_pair_stats (mcv) ON customer_id, deleted_at FROM lf_pl_pair;
+VACUUM ANALYZE lf_pl_pair;
+BEGIN;
+SET LOCAL enable_seqscan = off;
+SET LOCAL enable_indexscan = off;
+SET LOCAL enable_indexonlyscan = off;
+SET LOCAL enable_bitmapscan = off;
+-- two streams, so that the pass ends at the customer and the product
+SET LOCAL leapfrog.max_indexes = 2;
+EXPLAIN (COSTS OFF)
+	SELECT id FROM lf_pl_pair WHERE customer_id = 0 AND product_id = 1 AND deleted_at IS NULL ORDER BY id DESC;
+COMMIT;
+BEGIN;
+SET LOCAL leapfrog.max_indexes = 2;
+SELECT lf_check($$ SELECT id FROM lf_pl_pair WHERE customer_id = 0 AND product_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$);
+SELECT line FROM lf_plan($$ SELECT id FROM lf_pl_pair WHERE customer_id = 0 AND product_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) AS line
+WHERE line LIKE '%Stream on%';
+COMMIT;
+-- a parameterized customer: the pairs do not take the place of the set with the
+-- parameter, and the plan keeps the nested loop into it
+EXPLAIN (COSTS OFF)
+SELECT o.c, l.id FROM (VALUES (0::bigint), (1)) o(c), LATERAL (
+	SELECT id FROM lf_pl_pair WHERE customer_id = o.c AND product_id = 1 AND deleted_at IS NULL
+	ORDER BY id DESC LIMIT 3) l;
+SELECT lf_check($$ SELECT o.c, l.id FROM (VALUES (0::bigint), (1)) o(c), LATERAL (
+	SELECT id FROM lf_pl_pair WHERE customer_id = o.c AND product_id = 1 AND deleted_at IS NULL
+	ORDER BY id DESC LIMIT 3) l $$);
+DROP TABLE lf_pl_pair;
+
+-- Statistics that do not cover two columns of the conditions change nothing: no
+-- pairs are priced (the sets in the NOTICE); with an MCV list on two of them they are.
+CREATE TABLE lf_pl_gate (id bigint PRIMARY KEY, a int NOT NULL, b int NOT NULL, e int NOT NULL, c int, d int);
+INSERT INTO lf_pl_gate SELECT g, g % 7, g % 11, g % 13, g % 3, g % 5 FROM generate_series(1, 20000) g;
+CREATE INDEX ON lf_pl_gate (a, id);
+CREATE INDEX ON lf_pl_gate (b, id);
+CREATE INDEX ON lf_pl_gate (e, id);
+CREATE STATISTICS lf_pl_gate_other (mcv) ON c, d FROM lf_pl_gate;
+CREATE STATISTICS lf_pl_gate_kind (ndistinct) ON a, b FROM lf_pl_gate;
+VACUUM ANALYZE lf_pl_gate;
+SET leapfrog.trace_planner = on;
+SET leapfrog.force = on;
+EXPLAIN (COSTS OFF) SELECT id FROM lf_pl_gate WHERE a = 1 AND b = 1 AND e = 1 ORDER BY id;
+CREATE STATISTICS lf_pl_gate_cover (mcv) ON a, e FROM lf_pl_gate;
+ANALYZE lf_pl_gate;
+EXPLAIN (COSTS OFF) SELECT id FROM lf_pl_gate WHERE a = 1 AND b = 1 AND e = 1 ORDER BY id;
+RESET leapfrog.force;
+RESET leapfrog.trace_planner;
+DROP TABLE lf_pl_gate;
+
+-- A partial index's entries with the equality correlated to its predicate: 18,000 for
+-- this customer, where taken as independent the conditions make 2,000.
+CREATE TABLE lf_pl_corr (id bigint PRIMARY KEY, customer_id bigint NOT NULL, product_id bigint NOT NULL, deleted_at timestamptz);
+INSERT INTO lf_pl_corr
+SELECT g, CASE WHEN g % 10 = 0 THEN 0 ELSE g % 9 + 1 END, g % 2,
+	CASE WHEN g % 10 = 0 AND g % 100 <> 0 THEN NULL
+		 WHEN g % 100 = 1 THEN NULL
+		 ELSE '2026-01-01'::timestamptz END
+FROM generate_series(1, 200000) g;
+CREATE INDEX lf_pl_corr_live ON lf_pl_corr (customer_id, id) WHERE deleted_at IS NULL;
+CREATE INDEX lf_pl_corr_product ON lf_pl_corr (product_id, id);
+CREATE STATISTICS lf_pl_corr_stats (mcv) ON customer_id, deleted_at FROM lf_pl_corr;
+VACUUM ANALYZE lf_pl_corr;
+CREATE FUNCTION lf_pl_entries(query text, index_name text) RETURNS float8 LANGUAGE plpgsql AS $$
+DECLARE
+	plan jsonb;
+BEGIN
+	PERFORM set_config('leapfrog.force', 'on', true);
+	EXECUTE 'EXPLAIN (VERBOSE, FORMAT JSON) ' || query INTO plan;
+	RETURN (SELECT (s ->> 'Entries Estimated')::float8
+			FROM jsonb_path_query(plan, 'strict $[0].Plan.**') AS n,
+				jsonb_array_elements(n -> 'Index Streams') AS s
+			WHERE s ->> 'Index Name' = index_name);
+END
+$$;
+SELECT lf_pl_entries($$ SELECT id FROM lf_pl_corr WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$,
+	'lf_pl_corr_live') BETWEEN 13000 AND 23000 AS entries_near_18000;
+SELECT lf_check($$ SELECT id FROM lf_pl_corr WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
+DROP FUNCTION lf_pl_entries(text, text);
+DROP TABLE lf_pl_corr;

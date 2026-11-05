@@ -7,6 +7,13 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Planner: with an MCV list or dependencies covering two columns of the conditions, the
+  first stream is priced in a pair with every other index, not only the next by size. The pass by size adds a large index
+  to the smaller ones only, so `(customer_id, id)` with `(id) WHERE deleted_at IS NULL`
+  was never priced where a `(product_id, id)` was smaller. No change without such
+  statistics, where the correlation is unknown, so no more range probes either; test in
+  `leapfrog_planner`.
+
 - Heap prefetch: where the node's `Filter` drops more rows than it passes, matches are
   gathered ahead, doubling up to the tablespace's `effective_io_concurrency` and at most 32,
   their heap pages asked for and the rows fetched in the same order; heap tables only.
@@ -17,6 +24,14 @@ versions: [SemVer](https://semver.org/).
   the pages as `Heap Prefetches`; test in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query
   fetching 20,012 rows for 11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm,
   no change (BENCHMARKS.md, "Heap prefetch").
+
+### Fixed
+
+- Cost model: the rows fetched from the heap and the entries of a partial index ignored
+  extended statistics, as predicates reached `clauselist_selectivity` without a
+  `RestrictInfo` and entries took the predicate as independent of the equalities. Tests in
+  `leapfrog_planner`. A statistics object must cover plain columns:
+  `(deleted_at IS NULL)` as an expression does not match a clause on `deleted_at`.
 
 ### Changed
 

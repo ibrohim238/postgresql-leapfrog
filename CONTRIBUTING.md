@@ -100,7 +100,8 @@ visibility).
 
 - `planner.c`: `find_index_candidate`, `is_inner_candidate` — conditions for a
   stream to join a set; `search_intersection` — one pass over the candidates,
-  fewest entries first, keeping the cheapest set (`leapfrog.max_indexes`);
+  fewest entries first, plus the first stream's pairs under extended statistics,
+  keeping the cheapest set (`leapfrog.max_indexes`);
   `build_set_path` — which stream is the outer one; planning time is measured
   with `tests/performance/planning_bench.sh`;
 - `planner.c`: `intersect_scan_qual` — which conditions stay in `Filter`; for

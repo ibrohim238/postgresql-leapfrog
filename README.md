@@ -283,6 +283,17 @@ Stock:
  Execution Time: 1549.398 ms
 ```
 
+Extended statistics do not change the picture here. An MCV list on
+`(customer_id, deleted_at)` tells the planner how rare a customer's live rows are
+only where the customer's pairs are frequent enough to be listed. With one
+deletion date for the whole table, as in this data set, and a statistics target
+of 1,000 or more, stock PostgreSQL leaves the Index Scan of cases 1 and 2 for
+`BitmapAnd`: 1.7–2.0 s and 1.0–1.1 s from disk, 3× and 8× the node instead of
+hundreds. With the deletion dates spread over two years, as in a real table, the
+customer's rows split over 730 pairs, none frequent enough, and every plan above
+stays as it is at every target (BENCHMARKS.md, "The index pairs of the third
+query, and extended statistics").
+
 ## Why index composition matters
 
 Measured with [`tests/performance/write_bench.sh`](tests/performance/write_bench.sh):
@@ -365,8 +376,9 @@ with `kind = 2` and `(id) WHERE kind = 2`. A plain `(id)` never joins a set.
 
 The planner works as `get_best_ror_intersect` does in MySQL: one pass over the
 candidates, fewest entries first. A stream joins the set when it adds a
-restriction, up to `leapfrog.max_indexes` (default 4), and the cheapest set seen
-in the pass becomes the path, along with the set quickest to its first row when
+restriction, up to `leapfrog.max_indexes` (default 4). With an MCV list or
+dependencies that cover two columns of the conditions, the first stream is also
+priced in a pair with each other index. The cheapest set seen becomes the path, along with the set quickest to its first row when
 that is another one; PostgreSQL picks between them and the stock plans as usual. A condition left out of the set becomes a `Filter`. The outer stream,
 whose entries are fetched from the heap, is the densest one without a
 predicate: the others are held in memory value by value.
@@ -642,7 +654,7 @@ replaces the file instead of rewriting it.
 |---|---|---|---|
 | `leapfrog.enabled` | `on` | `USERSET` | The planner offers the Index Merge Intersect node and picks it by cost. `off` disables the hook completely. |
 | `leapfrog.force` | `off` | `USERSET` | The node is preferred over every other plan whenever a suitable set of indexes exists (the counterpart of MySQL's `INDEX_MERGE` hint); among several sets the cheapest still wins. The plan-time check of the group estimate against `work_mem` is skipped as well. **Diagnostic setting**: it can make a query many times slower. |
-| `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search. |
+| `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search; with extended statistics on the conditions, the first stream is also priced in a pair with each other index. |
 | `leapfrog.min_indexes` | `2` | `USERSET` | Developer setting: smaller sets are not offered and the set that reaches the size is offered whatever its cost, so that a larger set can be run against the stock plans (the tests use it). Not in `postgresql.conf.sample`. |
 | `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page; where the node's `Filter` drops more rows than it passes, matches are gathered ahead and their heap pages asked for, up to the table's tablespace `effective_io_concurrency` and at most 32; not on a table access method other than the heap. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
 | `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by the tests; not in `postgresql.conf.sample`. |
@@ -909,8 +921,9 @@ Verified against `src/` and the tests.
 **Index sets**
 
 - Up to `leapfrog.max_indexes` streams (default 4, at most 16), added
-  in one pass, fewest entries first. A set that pass never reaches is not
-  considered.
+  in one pass, fewest entries first; a set that pass never reaches is not
+  considered, except the pairs of the first stream where extended statistics
+  cover two columns of the conditions.
 - Every index has equality columns or a predicate, then `sortcol`. Every stream
   must add an equality column or a predicate the other streams do not
   enforce; implication is proved with `predicate_implied_by`, so an

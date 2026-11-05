@@ -15,7 +15,9 @@
 
 #include "access/cmptype.h"
 #include "access/nbtree.h"
+#include "access/sysattr.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_type.h"
 #include "common/int.h"
 #include "miscadmin.h"
@@ -79,6 +81,7 @@ typedef struct IntersectSearch
 	IndexCandidate *candidates;
 	int			ncandidates;
 	double		ndistinct;		/* -1 until looked up */
+	bool		statistics_apply;	/* extended statistics on the conditions */
 } IntersectSearch;
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
@@ -756,9 +759,77 @@ build_set_path(IntersectSearch *search, IndexCandidate **streams, int nstreams,
 }
 
 /*
+ * statistics_cover_conditions
+ *		Does an MCV list or dependency statistics object cover two columns of
+ *		the candidates' equalities and predicates?  Only then can the estimate
+ *		of a set depart from the product of its conditions.  An object's
+ *		expressions do not count: a clause on the plain column does not match.
+ */
+static bool
+statistics_cover_conditions(IntersectSearch *search)
+{
+	Bitmapset  *attnos = NULL;
+	ListCell   *lc;
+
+	if (search->rel->statlist == NIL)
+		return false;
+
+	for (int i = 0; i < search->ncandidates; i++)
+	{
+		IndexCandidate *candidate = &search->candidates[i];
+
+		foreach(lc, candidate->clauses)
+			pull_varattnos((Node *) lfirst_node(RestrictInfo, lc)->clause,
+						   search->rti, &attnos);
+		pull_varattnos((Node *) candidate->index->indpred, search->rti,
+					   &attnos);
+	}
+
+	foreach(lc, search->rel->statlist)
+	{
+		StatisticExtInfo *stat = lfirst_node(StatisticExtInfo, lc);
+		int			covered = 0;
+		int			key = -1;
+
+		if (stat->kind != STATS_EXT_MCV &&
+			stat->kind != STATS_EXT_DEPENDENCIES)
+			continue;
+		while ((key = bms_next_member(stat->keys, key)) >= 0)
+		{
+			if (bms_is_member(key - FirstLowInvalidHeapAttributeNumber, attnos))
+				covered++;
+		}
+		if (covered >= 2)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * consider_set
+ *		Keep a priced set if it is the cheapest or the quickest to its first
+ *		row so far.
+ */
+static void
+consider_set(CustomPath *cpath, CustomPath **best, Cost *best_cost,
+			 CustomPath **quickest)
+{
+	if (*best == NULL || cpath->path.total_cost < *best_cost)
+	{
+		*best = cpath;
+		*best_cost = cpath->path.total_cost;
+	}
+	if (*quickest == NULL ||
+		cpath->path.startup_cost < (*quickest)->path.startup_cost)
+		*quickest = cpath;
+}
+
+/*
  * search_intersection
- *		One pass over the candidates: a stream joins the set when it adds a
- *		restriction, even if the set costs more with it.  The cheapest set seen
+ *		One pass over the candidates, and with extended statistics on the
+ *		conditions the pairs of the first stream: a stream joins the set when
+ *		it adds a restriction, even if the set costs more with it.  The cheapest set seen
  *		is offered, along with the one quickest to its first row when that is
  *		another: a stream that lowers the total can make the query wait for one
  *		more first group, which a LIMIT pays for.  A set smaller than
@@ -817,16 +888,42 @@ search_intersection(IntersectSearch *search, bool plain_only)
 		nstreams++;
 		last_cost = cpath->path.total_cost;
 
-		if (nstreams >= intersect_min_streams &&
-			(best == NULL || cpath->path.total_cost < best_cost))
+		if (nstreams >= intersect_min_streams)
+			consider_set(cpath, &best, &best_cost, &quickest);
+	}
+
+	/*
+	 * The pass adds the streams by size, so a large index only ever joins the
+	 * smaller ones.  It may still be the one that restricts most, where the
+	 * conditions are correlated, which only extended statistics can tell:
+	 * with them, pair the first stream with each of the others as well.  The
+	 * pass with parameters prices the sets that have one, the plain ones are
+	 * done.
+	 */
+	if (nstreams > 0 && intersect_min_streams <= 2 && search->statistics_apply)
+	{
+		for (int j = 0; j < search->ncandidates; j++)
 		{
-			best = cpath;
-			best_cost = cpath->path.total_cost;
+			IndexCandidate *candidate = &search->candidates[j];
+			IndexCandidate *pair[2];
+			Cost		pair_fetch_cost;
+			CustomPath *cpath;
+
+			if (plain_only ? !bms_is_empty(candidate->required_outer) :
+				bms_is_empty(streams[0]->required_outer) &&
+				bms_is_empty(candidate->required_outer))
+				continue;
+			if (nstreams > 1 && candidate == streams[1])
+				continue;
+			if (!is_inner_candidate(streams, 1, candidate))
+				continue;
+
+			pair[0] = streams[0];
+			pair[1] = candidate;
+			cpath = build_set_path(search, pair, 2, &pair_fetch_cost);
+			if (cpath != NULL)
+				consider_set(cpath, &best, &best_cost, &quickest);
 		}
-		if (nstreams >= intersect_min_streams &&
-			(quickest == NULL ||
-			 cpath->path.startup_cost < quickest->path.startup_cost))
-			quickest = cpath;
 	}
 
 	if (quickest != NULL && quickest != best)
@@ -921,6 +1018,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	qsort(search.candidates, search.ncandidates, sizeof(IndexCandidate),
 		  candidate_entries_cmp);
+	search.statistics_apply = statistics_cover_conditions(&search);
 
 	search_intersection(&search, true);
 	for (int i = 0; i < search.ncandidates; i++)
