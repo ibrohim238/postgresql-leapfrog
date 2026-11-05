@@ -7,6 +7,12 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Tests: `make test-one TEST=name [REPEATS=N] [KIND=isolation]`
+  (`tests/scripts/run-one.sh`, after Citus's `run_test.py -r`) runs one regression test or
+  isolation spec N times in a scratch database, after `leapfrog_setup`, and stops at the
+  first failure with its diff; `make installcheck-rerun` (after TimescaleDB's
+  `ci_rerun.sh`) reruns the tests the last `installcheck` failed. CONTRIBUTING.md has a
+  "Flaky tests" section on reproducing and fixing them.
 - Planner: a nullable sort column counts as `NOT NULL` when a strict condition of the
   relation rejects NULL in it (`val > 0`, `val > $1`, `val IS NOT NULL`, `val = ANY (…)`;
   `find_nonnullable_vars`, after TimescaleDB SkipScan's `check_notnull_skipkey`): no row

@@ -11,6 +11,10 @@
 #                   scripts from their git tags) and ALTER EXTENSION ...
 #                   UPDATE them on a running server on this machine;
 #                   UPGRADE_FROM="0.0.4" picks the versions
+#   make test-one TEST=leapfrog_nulls [REPEATS=50] [KIND=isolation]
+#                   run one test N times against a running server, stop at
+#                   the first failure (tests/scripts/run-one.sh)
+#   make installcheck-rerun   rerun the tests the last installcheck failed
 
 MODULE_big = leapfrog
 OBJS = \
@@ -108,7 +112,7 @@ endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix
+.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix
 
 test: installcheck
 
@@ -117,6 +121,22 @@ test-regress:
 
 test-isolation:
 	$(pg_isolation_regress_installcheck) $(ISOLATION_OPTS) $(ISOLATION)
+
+# One test, REPEATS times, in a scratch database of its own; KIND=isolation
+# for a spec.  See tests/scripts/run-one.sh.
+RUN_ONE_ENV = PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' \
+	PG_ISOLATION_REGRESS='$(top_builddir)/src/test/isolation/pg_isolation_regress' \
+	PG_BINDIR='$(bindir)'
+
+test-one:
+	@test -n '$(TEST)' || { echo 'usage: make test-one TEST=name [REPEATS=N] [KIND=isolation]' >&2; exit 2; }
+	$(RUN_ONE_ENV) bash tests/scripts/run-one.sh '$(TEST)' -r '$(or $(REPEATS),1)' \
+		$(if $(filter isolation,$(KIND)),--isolation)
+
+# The tests "not ok" in the last regression.out files, once each (REPEATS=N
+# for more); see tests/scripts/rerun-failed.sh.
+installcheck-rerun:
+	$(RUN_ONE_ENV) bash tests/scripts/rerun-failed.sh -r '$(or $(REPEATS),1)'
 
 # A release renames the install script, so the earlier ones exist only at
 # their tags; see tests/scripts/upgrade-check.sh.

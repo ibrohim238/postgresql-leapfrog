@@ -92,6 +92,46 @@ server: `leapfrog_basic`, `leapfrog_parameters` and `leapfrog_mvcc` have one for
 the core `EXPLAIN` format of PostgreSQL 19, `leapfrog_sort_icu` for a database
 without ICU collations. A change to such a test changes both files.
 
+### One test, repeated
+
+```bash
+make test-one TEST=leapfrog_nulls                    # once
+make test-one TEST=leapfrog_nulls REPEATS=50         # 50 times, stop at a failure
+make test-one TEST=leapfrog_delete KIND=isolation    # an isolation spec
+make installcheck-rerun                              # what the last installcheck failed
+```
+
+`tests/scripts/run-one.sh <name> [-r N] [--isolation]` (what `test-one` runs) uses
+the server of `PGHOST`/`PGPORT`/`PGUSER`, as `make installcheck` does, and a scratch
+database per run, `lf_one_<name>_<pid>`, created as pg_regress creates its own and
+dropped after the run (only when it carries the script's comment). A regression test
+runs after `leapfrog_setup` in that database, which creates `lf_check` and the other
+helpers; `leapfrog_setup`'s own output is checked too. On a failure it prints the diff
+and how many runs passed, and keeps the output directory.
+`make installcheck-rerun` takes the `not ok` names from `tests/regress/regression.out`
+and `tests/isolation/regression.out` and runs each with `run-one.sh`.
+
+### Flaky tests
+
+A test that fails now and then is a bug, in the test or in the extension; it is fixed,
+not retried. CI never reruns a failed test, and `installcheck-rerun` is for a local
+look only: a failing test stays red.
+
+1. Reproduce it: `make test-one TEST=<name> REPEATS=50` (more for a rare one). If it
+   only fails in the full suite, it depends on what an earlier test left behind.
+2. Fix the cause, in this order:
+   - `ORDER BY` on every query that returns more than one row, with a unique key;
+   - statistics that do not depend on the ANALYZE sample: the whole table in it,
+     `SET default_statistics_target = 1000` before `ANALYZE` on a small table, as
+     `leapfrog_first_group` does;
+   - `COLLATE "C"` on a text `ORDER BY`, as `leapfrog_nulls` does, so that the order
+     does not depend on the database's collation;
+   - `SET` every GUC the plan depends on (`enable_*`, `work_mem`,
+     `random_page_cost`, …) in the test instead of relying on the server's value;
+   - no `_N.out` alternative just to accept a second result: `_1.out` is for another
+     server (see above), not for nondeterminism.
+3. Check the fix with the same `REPEATS` that reproduced the failure.
+
 ## Source layout
 
 | File | Contents |

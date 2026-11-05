@@ -45,6 +45,11 @@ make pgindent                      # must be clean; pgindent-fix reformats
 - New `typedef`s go into `src/typedefs.list`, or pgindent misformats them.
 - `make installcheck` stops after a failing regression suite without running
   the isolation suite; run `make installcheck REGRESS=` for isolation only.
+- One test, repeated: `make test-one TEST=leapfrog_nulls REPEATS=50`
+  (`KIND=isolation` for a spec; `tests/scripts/run-one.sh`), in a scratch
+  database after `leapfrog_setup`. `make installcheck-rerun` reruns what the
+  last `installcheck` failed. Both are for reproducing a failure locally; a
+  flaky test is fixed (CONTRIBUTING.md, "Flaky tests"), never retried in CI.
 - Files written by the container are owned by root; `chown` them back.
 
 ## Rules
