@@ -23,6 +23,8 @@
 # Needs no server: it reads the Makefile and the files of the source tree.
 set -euo pipefail
 
+# shellcheck source=tests/scripts/makevars.sh
+. "$(dirname "${BASH_SOURCE[0]}")/makevars.sh"
 cd "$(dirname "$0")/../.."
 
 errors=0
@@ -30,22 +32,6 @@ errors=0
 error() {
 	echo "check-tests: $*" >&2
 	errors=$((errors + 1))
-}
-
-# The words of a Makefile variable assigned with "=", ":=" or "+=",
-# following backslash continuations.
-make_var() {
-	awk -v var="$1" '
-		function take(line) {
-			cont = sub(/\\[[:space:]]*$/, "", line)
-			printf "%s ", line
-		}
-		cont { take($0); next }
-		$0 ~ "^" var "[[:space:]]*[:+]?=" {
-			sub("^" var "[[:space:]]*[:+]?=", "")
-			take($0)
-		}
-	' Makefile | tr -s '[:blank:]' '\n' | sed '/^$/d'
 }
 
 # The header comment of a test file: the lines up to the first one that is

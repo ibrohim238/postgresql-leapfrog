@@ -7,9 +7,13 @@
 # as a benchmark database, and refused when it exists without that mark, so
 # that BENCH_DB naming a database with real data stops the run before
 # anything is dropped.  The server is reached through PGHOST/PGPORT/PGUSER;
-# CREATE DATABASE runs from BENCH_ADMIN_DB (default postgres).
+# CREATE DATABASE runs from BENCH_ADMIN_DB (default postgres; SCRATCH_ADMIN_DB
+# takes precedence when set, see tests/scripts/scratch_db.sh).
 #
 # The database is kept after a run; drop it with bench_db_drop or dropdb.
+# The mark is read and the database created by tests/scripts/scratch_db.sh;
+# bench_db_drop drops without FORCE, so that it fails, instead of ending the
+# run, while a benchmark is connected.
 #
 # One benchmark at a time per database: two would drop each other's tables,
 # and their timings would disturb each other anyway.  A run holds an
@@ -22,10 +26,8 @@
 BENCH_DB_MARK='leapfrog benchmark scratch database'
 BENCH_DB_LOCK_KEY='1818650210, 1'
 
-bench_admin_psql() {
-	psql -X -q -tA -v ON_ERROR_STOP=1 -d "${BENCH_ADMIN_DB:-postgres}" \
-		-v db="$BENCH_DB" -v mark="$BENCH_DB_MARK"
-}
+# shellcheck source=tests/scripts/scratch_db.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/scratch_db.sh"
 
 # bench_db_use: bench_db_prepare and bench_db_lock, released at exit.
 bench_db_use() {
@@ -38,11 +40,7 @@ bench_db_use() {
 bench_db_prepare() {
 	BENCH_DB=${BENCH_DB:-leapfrog_bench}
 	local state
-	state=$(bench_admin_psql <<-'SQL'
-		SELECT shobj_description(oid, 'pg_database') IS NOT DISTINCT FROM :'mark'
-		FROM pg_database WHERE datname = :'db'
-	SQL
-	)
+	state=$(scratch_db_state "$BENCH_DB" "$BENCH_DB_MARK")
 	case $state in
 		t) ;;
 		f)
@@ -50,12 +48,7 @@ bench_db_prepare() {
 				"a benchmark database (no comment '$BENCH_DB_MARK');" \
 				"set BENCH_DB to another name" >&2
 			exit 1 ;;
-		*)
-			bench_admin_psql <<-'SQL'
-				CREATE DATABASE :"db";
-				COMMENT ON DATABASE :"db" IS :'mark';
-			SQL
-			;;
+		*) scratch_db_create "$BENCH_DB" "$BENCH_DB_MARK" ;;
 	esac
 	export PGDATABASE=$BENCH_DB
 	psql -X -q -v ON_ERROR_STOP=1 -c "SET client_min_messages = warning" \
@@ -124,15 +117,9 @@ bench_lock_holders() {
 			AND $1" 2>/dev/null || true
 }
 
-# bench_db_drop: drop BENCH_DB if it carries the mark.
+# bench_db_drop: drop BENCH_DB if it carries the mark; a BENCH_DB without
+# the mark is left alone and is not an error.
 bench_db_drop() {
-	local state
-	state=$(bench_admin_psql <<-'SQL'
-		SELECT shobj_description(oid, 'pg_database') IS NOT DISTINCT FROM :'mark'
-		FROM pg_database WHERE datname = :'db'
-	SQL
-	)
-	if [ "$state" = t ]; then
-		bench_admin_psql <<< 'DROP DATABASE :"db"'
-	fi
+	scratch_db_drop "$BENCH_DB" "$BENCH_DB_MARK" --no-force ||
+		[ $? -eq "$SCRATCH_DB_FOREIGN" ]
 }

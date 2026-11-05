@@ -27,6 +27,8 @@
 # Needs no server; the tag checks need the git history (git fetch --tags).
 set -euo pipefail
 
+# shellcheck source=tests/scripts/makevars.sh
+. "$(dirname "${BASH_SOURCE[0]}")/makevars.sh"
 cd "$(dirname "$0")/../.."
 
 release=
@@ -48,21 +50,6 @@ error() {
 
 notice() {
 	echo "check-version: notice: $*" >&2
-}
-
-# The words of a Makefile variable, following backslash continuations.
-make_var() {
-	awk -v var="$1" '
-		function take(line) {
-			cont = sub(/\\[[:space:]]*$/, "", line)
-			printf "%s ", line
-		}
-		cont { take($0); next }
-		$0 ~ "^" var "[[:space:]]*[:+]?=" {
-			sub("^" var "[[:space:]]*[:+]?=", "")
-			take($0)
-		}
-	' Makefile | tr -s '[:blank:]' '\n' | sed '/^$/d'
 }
 
 # "a is older than b" for versions like 0.0.5

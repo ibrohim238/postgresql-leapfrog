@@ -120,7 +120,15 @@ line with the reason, and the script goes on with the next one:
   as in the Settings table of the README;
 - `CHANGELOG.md` lines of at most 100 characters;
 - every `tests/scripts/*.sh` is run from the Makefile, a workflow, a
-  Dockerfile, a compose file or another script.
+  Dockerfile, a compose file or another script. A helper the scripts share
+  is a file of functions they source: `makevars.sh` (`make_var`, the words of
+  a Makefile variable, for `check-tests.sh` and `check-version.sh`) and
+  `scratch_db.sh` (a database of a script's own, created with a comment that
+  marks it, dropped only when it carries the mark, and never touched when a
+  database of that name lacks it: `run-one.sh`, `upgrade-check.sh`,
+  `bench-smoke.sh` and `tests/performance/bench_db.sh`). The scratch
+  databases are created and dropped from `SCRATCH_ADMIN_DB` (default
+  `BENCH_ADMIN_DB`, then `postgres`).
 
 `make lint-fix` (`lint.sh --fix`) first removes trailing whitespace, adds the
 final newline and wraps long `CHANGELOG.md` lines; the other findings are

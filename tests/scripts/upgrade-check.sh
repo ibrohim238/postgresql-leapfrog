@@ -20,13 +20,17 @@
 #   UPGRADE_FROM  the versions to update from, separated by spaces; default:
 #                 the newest release tag below EXTVERSION, and every older one
 #                 the source tree still has an update script from
+#   SCRATCH_ADMIN_DB  the database the scratch databases are created and
+#                 dropped from (default postgres; see scratch_db.sh)
 #
 # Connection: PGHOST/PGPORT/PGUSER, a superuser (extension_control_path is a
 # superuser setting).  Scratch databases: leapfrog_upgrade_*, recognised by
 # their comment and dropped; one of those names without the comment is not
-# touched, and the test fails.
+# touched, and the test fails (see scratch_db.sh).
 set -euo pipefail
 
+# shellcheck source=tests/scripts/scratch_db.sh
+. "$(dirname "${BASH_SOURCE[0]}")/scratch_db.sh"
 cd "$(dirname "$0")/../.."
 
 : "${EXTVERSION:?EXTVERSION is not set; run make installcheck-upgrade}"
@@ -34,7 +38,6 @@ cd "$(dirname "$0")/../.."
 : "${PG_BINDIR:?PG_BINDIR is not set; run make installcheck-upgrade}"
 
 PSQL="psql -X -q -v ON_ERROR_STOP=1"
-ADMIN_DB=${UPGRADE_ADMIN_DB:-postgres}
 mark='leapfrog installcheck-upgrade scratch database'
 
 fail() {
@@ -63,33 +66,21 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/leapfrog-upgrade.XXXXXX")
 dbs=()
 
-drop_db() {
-	local state
-	state=$($PSQL -tA -d "$ADMIN_DB" -v db="$1" -v mark="$mark" <<-'SQL'
-		SELECT shobj_description(oid, 'pg_database') IS NOT DISTINCT FROM :'mark'
-		FROM pg_database WHERE datname = :'db'
-	SQL
-	)
-	case "$state" in
-		t) $PSQL -d "$ADMIN_DB" -v db="$1" <<< 'DROP DATABASE :"db"' ;;
-		f) fail "database $1 exists and is not this test's (no comment '$mark')" ;;
-	esac
-}
-
 create_db() {
-	drop_db "$1"
-	$PSQL -d "$ADMIN_DB" -v db="$1" -v mark="$mark" -v path="$tmp" <<-'SQL'
-		CREATE DATABASE :"db" TEMPLATE template0;
-		COMMENT ON DATABASE :"db" IS :'mark';
-		ALTER DATABASE :"db" SET extension_control_path = :'path';
-	SQL
+	local status=0
+	scratch_db_drop "$1" "$mark" || status=$?
+	[ "$status" -ne "$SCRATCH_DB_FOREIGN" ] ||
+		fail "database $1 exists and is not this test's (no comment '$mark')"
+	[ "$status" -eq 0 ] || exit "$status"
+	SCRATCH_DB_OPTIONS='TEMPLATE template0' scratch_db_create "$1" "$mark" \
+		"extension_control_path=$tmp"
 	dbs+=("$1")
 }
 
 cleanup() {
 	local db
 	for db in "${dbs[@]}"; do
-		drop_db "$db" >/dev/null 2>&1 || true
+		scratch_db_drop "$db" "$mark" >/dev/null 2>&1 || true
 	done
 	rm -rf "$tmp"
 }

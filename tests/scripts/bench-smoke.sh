@@ -14,6 +14,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=tests/performance/bench_db.sh
 . tests/performance/bench_db.sh
 
 BENCH_DB=leapfrog_bench_smoke
@@ -22,27 +23,12 @@ foreign_mark='leapfrog bench-smoke stand-in for a database with real data'
 PSQL="psql -X -q -v ON_ERROR_STOP=1"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/leapfrog-bench-smoke.XXXXXX")
 
-# drop the stand-in database if it carries its comment
-drop_foreign() {
-	local state
-	state=$($PSQL -tA -d "${BENCH_ADMIN_DB:-postgres}" -v db="$foreign" \
-		-v mark="$foreign_mark" <<-'SQL'
-		SELECT shobj_description(oid, 'pg_database') IS NOT DISTINCT FROM :'mark'
-		FROM pg_database WHERE datname = :'db'
-	SQL
-	)
-	if [ "$state" = t ]; then
-		$PSQL -d "${BENCH_ADMIN_DB:-postgres}" -v db="$foreign" \
-			<<< 'DROP DATABASE :"db"'
-	fi
-}
-
 smoke_lock_key='1818650210, 2'
 
 cleanup() {
 	PGDATABASE=$BENCH_DB bench_db_unlock
 	bench_db_drop >/dev/null 2>&1 || true
-	drop_foreign >/dev/null 2>&1 || true
+	scratch_db_drop "$foreign" "$foreign_mark" >/dev/null 2>&1 || true
 	BENCH_DB_LOCK_FD=$smoke_lock_fd BENCH_DB_LOCK_PID=$smoke_lock_pid \
 		BENCH_DB_LOCK_APP=$smoke_lock_app BENCH_DB_LOCK_KEY=$smoke_lock_key \
 		PGDATABASE=${BENCH_ADMIN_DB:-postgres} bench_db_unlock
@@ -58,23 +44,21 @@ smoke_lock_app=$BENCH_DB_LOCK_APP
 BENCH_DB_LOCK_FD=
 trap cleanup EXIT
 
-if ! bench_db_drop || ! drop_foreign; then
-	echo "bench-smoke: could not drop $BENCH_DB or $foreign left by an" \
-		"earlier run; is a benchmark from it still running?" >&2
-	exit 1
-fi
-if [ -n "$($PSQL -tA -d "${BENCH_ADMIN_DB:-postgres}" -v db="$foreign" \
-	<<< "SELECT 1 FROM pg_database WHERE datname = :'db'")" ]; then
+status=0
+scratch_db_drop "$foreign" "$foreign_mark" || status=$?
+if [ "$status" -eq "$SCRATCH_DB_FOREIGN" ]; then
 	echo "bench-smoke: database $foreign exists and is not this script's" \
 		"(no comment '$foreign_mark')" >&2
 	exit 1
 fi
+if [ "$status" -ne 0 ] || ! bench_db_drop; then
+	echo "bench-smoke: could not drop $BENCH_DB or $foreign left by an" \
+		"earlier run; is a benchmark from it still running?" >&2
+	exit 1
+fi
 
 # a database with data of its own, as PGDATABASE often names
-$PSQL -d "${BENCH_ADMIN_DB:-postgres}" -v db="$foreign" -v mark="$foreign_mark" <<-'SQL'
-	CREATE DATABASE :"db";
-	COMMENT ON DATABASE :"db" IS :'mark';
-SQL
+scratch_db_create "$foreign" "$foreign_mark"
 $PSQL -d "$foreign" -c "CREATE TABLE orders (id bigint)" -c "INSERT INTO orders VALUES (1), (2), (3)"
 export PGDATABASE=$foreign
 

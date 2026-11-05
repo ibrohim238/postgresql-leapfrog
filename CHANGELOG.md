@@ -114,6 +114,15 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- Test scripts: code that several of them carried a copy of is in helpers they source:
+  `tests/scripts/makevars.sh` (`make_var`, for `check-tests.sh` and
+  `check-version.sh`) and `tests/scripts/scratch_db.sh` (a scratch database created with
+  a marking comment, dropped only when it carries the mark, refused when it exists
+  without it; for `run-one.sh`, `upgrade-check.sh`, `bench-smoke.sh` and `bench_db.sh`).
+  `installcheck-upgrade` now drops its databases `WITH (FORCE)`, as `test-one` did; a
+  failing psql (no server, a wrong port) is reported as psql's error, not as a database
+  that is not the script's; the admin database of both is `SCRATCH_ADMIN_DB` (default
+  `BENCH_ADMIN_DB`, then `postgres`).
 - Docker: the test image no longer copies the sources; Compose and `tests/run-in-docker.sh`
   mount the repository at `/src/leapfrog`, and the entrypoint runs `make clean`, builds with
   `WERROR=1` and installs before the suites, as a user with the host's UID/GID (build

@@ -20,11 +20,16 @@
 #
 # Environment: PGHOST/PGPORT/PGUSER (a superuser, as for make installcheck);
 # PG_REGRESS, PG_ISOLATION_REGRESS, PG_BINDIR (set by the Makefile; default:
-# the PGXS tree of PG_CONFIG).  Scratch database: lf_one_<name>_<pid>,
+# the PGXS tree of PG_CONFIG); SCRATCH_ADMIN_DB, the database the scratch
+# database is created and dropped from (default postgres; see scratch_db.sh).
+# Scratch database: lf_one_<name>_<pid>,
 # recognised by its comment and dropped after every run; a database of that
-# name without the comment is not touched, and the script fails.
+# name without the comment is not touched, and the script fails (see
+# scratch_db.sh).
 set -euo pipefail
 
+# shellcheck source=tests/scripts/scratch_db.sh
+. "$(dirname "${BASH_SOURCE[0]}")/scratch_db.sh"
 cd "$(dirname "$0")/../.."
 
 usage() {
@@ -87,33 +92,20 @@ fi
 [ -f "$source" ] || { echo "run-one: no $source" >&2; exit 2; }
 [ -x "$runner" ] || { echo "run-one: no $runner (PGXS of $PG_CONFIG)" >&2; exit 2; }
 
-PSQL="psql -X -q -v ON_ERROR_STOP=1 -d ${RUN_ONE_ADMIN_DB:-postgres}"
 db=lf_one_${name}_$$
 db=${db:0:63}
 mark="leapfrog run-one scratch database (pid $$)"
 out=$(mktemp -d "${TMPDIR:-/tmp}/leapfrog-run-one-$name.XXXXXX")
 keep_out=false
 
-# 1 when the database exists, empty when not
-db_exists() {
-	$PSQL -tA -v db="$db" <<< "SELECT 1 FROM pg_database WHERE datname = :'db'"
-}
-
 # drop the scratch database if it carries this run's comment
 drop_db() {
-	local mine
-	mine=$($PSQL -tA -v db="$db" -v mark="$mark" <<-'SQL'
-		SELECT shobj_description(oid, 'pg_database') IS NOT DISTINCT FROM :'mark'
-		FROM pg_database WHERE datname = :'db'
-	SQL
-	)
-	case "$mine" in
-		t) $PSQL -v db="$db" <<< 'DROP DATABASE :"db" WITH (FORCE)' ;;
-		f)
-			echo "run-one: database $db is not this script's (no comment '$mark'); not dropped" >&2
-			return 1
-			;;
-	esac
+	local status=0
+	scratch_db_drop "$db" "$mark" || status=$?
+	if [ "$status" -eq "$SCRATCH_DB_FOREIGN" ]; then
+		echo "run-one: database $db is not this script's (no comment '$mark'); not dropped" >&2
+	fi
+	return "$status"
 }
 
 cleanup() {
@@ -124,20 +116,13 @@ trap cleanup EXIT
 
 # a database as pg_regress's create_database() makes it, with the comment
 create_db() {
-	if [ -n "$(db_exists)" ]; then
+	if scratch_db_exists "$db"; then
 		echo "run-one: database $db exists and is not this run's; not touched" >&2
 		exit 1
 	fi
-	$PSQL -v db="$db" -v mark="$mark" <<-'SQL'
-		CREATE DATABASE :"db" TEMPLATE template0;
-		COMMENT ON DATABASE :"db" IS :'mark';
-		ALTER DATABASE :"db" SET lc_messages TO 'C';
-		ALTER DATABASE :"db" SET lc_monetary TO 'C';
-		ALTER DATABASE :"db" SET lc_numeric TO 'C';
-		ALTER DATABASE :"db" SET lc_time TO 'C';
-		ALTER DATABASE :"db" SET bytea_output TO 'hex';
-		ALTER DATABASE :"db" SET timezone_abbreviations TO 'Default';
-	SQL
+	SCRATCH_DB_OPTIONS='TEMPLATE template0' scratch_db_create "$db" "$mark" \
+		lc_messages=C lc_monetary=C lc_numeric=C lc_time=C \
+		bytea_output=hex timezone_abbreviations=Default
 	psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c 'CREATE EXTENSION IF NOT EXISTS leapfrog'
 }
 
