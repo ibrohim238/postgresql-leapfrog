@@ -1,7 +1,4 @@
-# EvalPlanQual with a text sort column: the node rechecks its equalities on
-# the new version of the row, whatever the type it merges on.  Every
-# permutation runs with the node and with the stock plan under the same
-# interleaving.
+# EvalPlanQual with a text sort column; every permutation runs with the node and with the stock plan.
 
 setup
 {

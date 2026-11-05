@@ -1,7 +1,4 @@
-# The column of the partial index predicate flips while another session
-# holds a snapshot.  The row moves between the two partial indexes: the old
-# entry stays in one, a new one appears in the other.  Each session must see
-# exactly its snapshot's version through either index pair.
+# The partial index predicate column flips under a snapshot: each session sees its own version.
 
 setup
 {
@@ -56,17 +53,14 @@ step s2_both_std	{
 }
 step s2_commit	{ COMMIT; }
 
-# REPEATABLE READ: the snapshot predates the flip; the counts do not change
-# until the transaction ends, and agree with the standard plan.
+# REPEATABLE READ: the counts do not change until the transaction ends.
 permutation s2_begin_rr s2_live s2_deleted s1_begin s1_soft_delete s1_commit s2_live s2_deleted s2_both_std s2_commit s2_live s2_deleted s2_both_std
 
 # The reverse flip
 permutation s2_begin_rr s2_live s2_deleted s1_begin s1_restore s1_commit s2_live s2_deleted s2_both_std s2_commit s2_live s2_deleted s2_both_std
 
-# READ COMMITTED: every statement takes a new snapshot and sees the
-# committed flip; an uncommitted flip is invisible.
+# READ COMMITTED: a new snapshot per statement sees the committed flip only.
 permutation s2_begin_rc s2_live s1_begin s1_soft_delete s2_live s2_deleted s1_commit s2_live s2_deleted s2_both_std s2_commit
 
-# Both flips in one transaction, read in between by a REPEATABLE READ
-# session: nothing changes for it.
+# Both flips in one transaction: nothing changes for a REPEATABLE READ reader.
 permutation s2_begin_rr s2_live s1_begin s1_soft_delete s1_restore s1_commit s2_live s2_deleted s2_both_std s2_commit s2_live s2_deleted

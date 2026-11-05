@@ -1,9 +1,5 @@
-# EvalPlanQual for the intersection of two ordinary indexes,
-# (customer_id, id) and (product_id, id).  The equality on product_id is
-# enforced by the inner scan only and is not in the node's Filter, so the
-# recheck of a concurrently updated row must evaluate it again on the new
-# version.  Every permutation runs with the node and with the stock plan
-# under the same interleaving.
+# EvalPlanQual for two ordinary indexes: the inner equality is not in the Filter and must be rechecked.
+# Every permutation runs with the node and with the stock plan.
 
 setup
 {
@@ -69,7 +65,6 @@ permutation s1_begin s1_move_customer s2_lock_std s1_commit
 permutation s1_begin s1_join_product s2_lock s1_commit
 permutation s1_begin s1_join_product s2_lock_std s1_commit
 
-# A column outside both indexes changes: the row is returned with the new
-# payload.
+# A column outside both indexes changes: the row is returned with the new payload.
 permutation s1_begin s1_payload s2_lock s1_commit
 permutation s1_begin s1_payload s2_lock_std s1_commit

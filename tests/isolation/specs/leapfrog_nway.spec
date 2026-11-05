@@ -1,7 +1,4 @@
-# EvalPlanQual with three streams: a concurrent update changes the column of
-# the second or the third stream while SELECT FOR UPDATE waits for the row.
-# The recheck evaluates every stream's conditions on the new version.  Every
-# permutation is followed by the stock plan under the same interleaving.
+# EvalPlanQual with three streams: the recheck evaluates every stream's conditions on the new version.
 
 setup
 {

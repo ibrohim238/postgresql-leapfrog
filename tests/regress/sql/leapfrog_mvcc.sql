@@ -1,13 +1,5 @@
---
--- leapfrog_mvcc
---
--- Row versions within one session: dead tuples, HOT chains, rows moving
--- between the partial indexes, snapshots of a REPEATABLE READ transaction,
--- the row marks of SELECT FOR UPDATE and the EvalPlanQual recheck path on
--- the node's own tuple.  Concurrent sessions are covered by the isolation
--- tests in tests/isolation.
+-- leapfrog_mvcc: row versions within one session; concurrent sessions are in tests/isolation
 -- alternative output leapfrog_mvcc_1.out: PostgreSQL 19 plans "= ANY (subquery)" with Unique and names it unnamed_subquery; remove when PostgreSQL 19 is the oldest supported version
---
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 
@@ -25,11 +17,9 @@ CREATE INDEX lf_mvcc_live_id ON lf_mvcc (id) WHERE deleted_at IS NULL;
 CREATE INDEX lf_mvcc_deleted_id ON lf_mvcc (id) WHERE deleted_at IS NOT NULL;
 ANALYZE lf_mvcc;
 
--- Baseline
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
 
--- HOT updates of a column that is in no index: the index entries stay,
--- the chain is followed to the visible version.
+-- HOT updates: the chain is followed to the visible version.
 UPDATE lf_mvcc SET payload = payload || '-hot' WHERE owner_id = 2;
 UPDATE lf_mvcc SET payload = payload || '-hot2' WHERE owner_id = 2 AND id % 2 = 0;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
@@ -38,8 +28,7 @@ SELECT count(*) FILTER (WHERE payload LIKE '%-hot2') AS hot2,
 	count(*) FILTER (WHERE payload LIKE '%-hot') AS hot
 FROM (SELECT payload FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 
--- Rows moving between the partial indexes: the old entries are dead in
--- one index, new ones live in the other.
+-- Rows moving between the partial indexes
 UPDATE lf_mvcc SET deleted_at = now() WHERE owner_id = 2 AND id % 10 = 1;
 UPDATE lf_mvcc SET deleted_at = NULL WHERE owner_id = 2 AND id % 10 = 3;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
@@ -56,13 +45,11 @@ UPDATE lf_mvcc SET owner_id = 2 WHERE owner_id = 4 AND id % 10 = 9;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 3 AND deleted_at IS NULL ORDER BY id $$);
 
--- Deleted rows are dead in both indexes.
 DELETE FROM lf_mvcc WHERE owner_id = 2 AND id % 4 = 0;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
 
--- Uncommitted changes of the own transaction are visible to it; after a
--- rollback they are dead.
+-- Own uncommitted changes are visible; after a rollback they are dead.
 BEGIN;
 UPDATE lf_mvcc SET deleted_at = NULL WHERE owner_id = 2;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
@@ -71,13 +58,11 @@ ROLLBACK;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
 
--- After VACUUM the dead entries are gone; the results are the same.
 VACUUM lf_mvcc;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
 
--- REPEATABLE READ: changes made by the transaction itself are seen, the
--- snapshot is kept across statements.
+-- REPEATABLE READ: own changes are seen, the snapshot is kept across statements.
 BEGIN ISOLATION LEVEL REPEATABLE READ;
 SELECT count(*) FROM (SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id) s;
 UPDATE lf_mvcc SET deleted_at = now() WHERE owner_id = 2 AND deleted_at IS NULL AND id < 1000;
@@ -85,8 +70,7 @@ SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NU
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
 ROLLBACK;
 
--- SELECT FOR UPDATE / FOR SHARE: a LockRows node above the scan, the
--- clauses implied by the inner predicate stay in the plan for EPQ.
+-- FOR UPDATE: the clauses implied by the inner predicate stay in the plan for EPQ.
 SET leapfrog.force = on;
 EXPLAIN (COSTS OFF)
 SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 5 FOR UPDATE;
@@ -96,8 +80,7 @@ SELECT id, owner_id, deleted_at FROM lf_mvcc WHERE owner_id = 2 AND deleted_at I
 ROLLBACK;
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 50 FOR UPDATE $$);
 
--- UPDATE and DELETE driven by the scan: the target relation keeps its
--- quals, the rows are modified exactly once.
+-- UPDATE and DELETE driven by the scan modify every row once.
 EXPLAIN (COSTS OFF)
 UPDATE lf_mvcc SET payload = payload || '+' WHERE id IN (
 	SELECT id FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id LIMIT 10);
@@ -109,7 +92,6 @@ DELETE FROM lf_mvcc WHERE id IN (
 SELECT lf_check($$ SELECT * FROM lf_mvcc WHERE owner_id = 2 AND deleted_at IS NULL ORDER BY id $$);
 RESET leapfrog.force;
 
--- A cursor over the scan, fetched in pieces and moved backwards
 SET leapfrog.force = on;
 BEGIN;
 DECLARE lf_cur SCROLL CURSOR FOR
@@ -125,11 +107,7 @@ RESET leapfrog.force;
 
 DROP TABLE lf_mvcc;
 
--- Dead index entries with a NULL merge column.  The column was nullable,
--- the NULL row got a value, then SET NOT NULL made the planner accept the
--- column; until VACUUM both indexes still hold the dead entry with NULL.
--- A backward scan reads it first (NULLs sort last in an ASC btree), so it
--- must be skipped rather than taken for a value.
+-- A dead entry with a NULL id from before SET NOT NULL: a backward scan reads it first and skips it.
 CREATE TABLE lf_mvcc_null (
 	id bigint,
 	owner_id bigint NOT NULL,

@@ -1,32 +1,8 @@
 #!/usr/bin/env bash
-# Extension upgrade test ("make installcheck-upgrade"): install an earlier
-# release with CREATE EXTENSION leapfrog VERSION 'PREV', update it with
-# ALTER EXTENSION leapfrog UPDATE, and check that the result is the current
-# version with the same objects as a fresh CREATE EXTENSION.  The
-# leapfrog_setup regression test then runs against the updated database.
-#
-# A release renames the install script, so leapfrog--PREV.sql exists only in
-# the git history, at tag vPREV.  It is taken from there with git show and put,
-# with the control file and every script of the source tree, into a scratch
-# directory that the server reads through extension_control_path (PostgreSQL
-# 18): nothing is written into the installation, but the server must run on
-# this machine and see the scratch directory.  The shared library must be
-# installed (make install) and match the source tree.
-#
-# Environment (set by the Makefile):
-#   EXTVERSION    the current version
-#   PG_REGRESS    the pg_regress binary of PGXS
-#   PG_BINDIR     the directory of psql, for pg_regress --bindir
-#   UPGRADE_FROM  the versions to update from, separated by spaces; default:
-#                 the newest release tag below EXTVERSION, and every older one
-#                 the source tree still has an update script from
-#   SCRATCH_ADMIN_DB  the database the scratch databases are created and
-#                 dropped from (default postgres; see scratch_db.sh)
-#
-# Connection: PGHOST/PGPORT/PGUSER, a superuser (extension_control_path is a
-# superuser setting).  Scratch databases: leapfrog_upgrade_*, recognised by
-# their comment and dropped; one of those names without the comment is not
-# touched, and the test fails (see scratch_db.sh).
+# Update the earlier releases to EXTVERSION and compare with a fresh install.
+# Usage: make installcheck-upgrade [UPGRADE_FROM=...]
+# Environment: EXTVERSION, PG_REGRESS, PG_BINDIR (from the Makefile), UPGRADE_FROM,
+# SCRATCH_ADMIN_DB, PGHOST/PGPORT/PGUSER (a superuser).  See docs/tooling.md.
 set -euo pipefail
 
 # shellcheck source=tests/scripts/scratch_db.sh
@@ -96,7 +72,6 @@ for v in $UPGRADE_FROM; do
 done
 chmod -R a+rX "$tmp"
 
-# The extension's member objects with their definitions and comments.
 objects_sql="
 SELECT pg_describe_object(d.classid, d.objid, d.objsubid),
 	CASE WHEN d.classid = 'pg_proc'::regclass

@@ -1,12 +1,5 @@
---
--- leapfrog_setup
---
--- Shared helpers for the regression tests.  Runs first (see REGRESS in the
--- Makefile); every other test depends on the functions created here.
---
--- The planner hook is installed when the library is loaded.  The test
--- server may not preload it, so load it explicitly; LOAD is a no-op when
--- shared_preload_libraries already did it.
+-- leapfrog_setup: the helpers every other test uses; runs first
+-- LOAD installs the planner hook when the server does not preload the library.
 LOAD 'leapfrog';
 
 -- The extension itself is created by pg_regress --load-extension.
@@ -17,17 +10,13 @@ SELECT leapfrog_version(), leapfrog_is_loaded();
 SELECT source, target, path FROM pg_extension_update_paths('leapfrog')
 WHERE path IS NOT NULL ORDER BY source, target;
 
--- The GUCs exist with their defaults.
 SHOW leapfrog.enabled;
 SHOW leapfrog.force;
 SHOW leapfrog.skip_after;
 
--- Deterministic plans.
 SET max_parallel_workers_per_gather = 0;
 
---
--- lf_plan(query): the plan of a query under leapfrog.force, as text.
---
+-- lf_plan(query): the plan under leapfrog.force
 CREATE FUNCTION lf_plan(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -41,11 +30,7 @@ BEGIN
 END
 $$;
 
---
--- lf_plan_costs(query): the plan with costs, numbers masked, so that the
--- presence and shape of the estimates can be checked without depending on
--- their exact values.
---
+-- lf_plan_costs(query): the plan with costs, numbers masked
 CREATE FUNCTION lf_plan_costs(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -59,16 +44,8 @@ BEGIN
 END
 $$;
 
---
--- lf_check(query, ordered): run the query with leapfrog disabled and again
--- with leapfrog.force, and compare the results as multisets with EXCEPT ALL
--- in both directions.  With ordered = true the output position of every row
--- is compared as well, so the sort order must be deterministic (a unique
--- sort key).  Reports whether the forced plan actually used the custom scan,
--- so a test cannot pass by accident through a standard plan.  A canary, after
--- TimescaleDB's skip_scan tests: the settings each run saw are captured and
--- must differ, or the comparison would be of a plan with itself.
---
+-- lf_check(query, ordered): stock and forced results compared with EXCEPT ALL both ways (and by
+-- position when ordered), whether the custom scan ran, and a canary that the runs' settings differ
 CREATE FUNCTION lf_check(query text, ordered boolean DEFAULT true)
 RETURNS text
 LANGUAGE plpgsql AS $$
@@ -125,10 +102,7 @@ BEGIN
 END
 $$;
 
---
--- lf_counters(query): the instrumentation of the custom scan node under
--- leapfrog.force, from EXPLAIN ANALYZE in JSON format.
---
+-- lf_counters(query): the node's EXPLAIN ANALYZE counters under leapfrog.force
 CREATE FUNCTION lf_counters(query text) RETURNS TABLE (counter text, value jsonb)
 LANGUAGE plpgsql AS $$
 DECLARE

@@ -1,8 +1,5 @@
-# EvalPlanQual through partitions: the node under a Merge Append rechecks the
-# equalities enforced by its inner index on the new row version.  Every
-# permutation runs with the node and with the stock plan under the same
-# interleaving and must give the same rows; a row moved to another partition
-# fails the same way in both.
+# EvalPlanQual through partitions: the node under a Merge Append rechecks its inner equalities.
+# Every permutation runs with the node and with the stock plan.
 
 setup
 {

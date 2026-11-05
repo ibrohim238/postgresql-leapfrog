@@ -1,8 +1,5 @@
-# EvalPlanQual through the overflow fallback.  The TID group of the only
-# grp value exceeds work_mem (64kB), so every outer row of the value is
-# fetched and the inner equality (product_id) is checked on the row; under
-# EvalPlanQual it is checked again on the new version.  Row order inside one
-# grp value is not defined, so the results are compared as count and sum.
+# EvalPlanQual through the overflow fallback: the inner equality is rechecked on the new version.
+# Order inside one grp value is undefined: results compared as count and sum.
 
 setup
 {
@@ -51,11 +48,9 @@ step s2_lock_std	{
 	SET leapfrog.require_node = require;
 }
 
-# the plan: the node, overflowing its group
 permutation s2_explain
 
-# Rows leave the inner side while the locking query waits for them: the
-# fallback's recheck drops them, as the stock plan does.
+# Rows leave the inner side while the lock waits: the fallback's recheck drops them.
 permutation s1_begin s1_move_product s2_lock s1_commit
 permutation s1_begin s1_move_product s2_lock_std s1_commit
 

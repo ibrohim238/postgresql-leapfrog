@@ -1,30 +1,7 @@
 #!/usr/bin/env bash
-# Version consistency ("make check-version"), after TimescaleDB's
-# release_sanity.yml, Citus's ci/check_migration_files.sh and pgaudit, where
-# the control file is the source of truth.  Checks that:
-#
-#   - EXTVERSION in the Makefile equals default_version in leapfrog.control;
-#   - leapfrog--EXTVERSION.sql exists and is in DATA;
-#   - an update script from the newest release tag below EXTVERSION,
-#     leapfrog--PREV--EXTVERSION.sql, exists and is in DATA, and EXTVERSION
-#     is not older than the newest tag (skipped with a notice without tags,
-#     e.g. in a shallow clone);
-#   - every leapfrog--*.sql of the tree is in DATA and every file of DATA
-#     exists;
-#   - tests/regress/expected/leapfrog_setup.out shows EXTVERSION;
-#   - CHANGELOG.md has "## [Unreleased]"; when EXTVERSION is newer than the
-#     newest tag, either Unreleased has entries or "## [EXTVERSION]" exists;
-#     every released section has its link at the bottom, and the
-#     "[Unreleased]:" link compares from the newest released section.
-#
-# With --release (RELEASE=1 through make), the state of a release, checked
-# after "git tag -a vX -m 'leapfrog X'" and before pushing the tag:
-#
-#   - Unreleased has no entries and "## [EXTVERSION] — YYYY-MM-DD" exists;
-#   - vEXTVERSION is an annotated tag on HEAD with the message
-#     "leapfrog EXTVERSION".
-#
-# Needs no server; the tag checks need the git history (git fetch --tags).
+# Check the version numbers and, with --release, the release.
+# Usage: check-version.sh [--release]
+# See docs/tooling.md.
 set -euo pipefail
 
 # shellcheck source=tests/scripts/makevars.sh
@@ -52,7 +29,6 @@ notice() {
 	echo "check-version: notice: $*" >&2
 }
 
-# "a is older than b" for versions like 0.0.5
 version_lt() {
 	[ "$1" != "$2" ] &&
 		[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]
@@ -97,8 +73,7 @@ readable=1
 if git rev-parse --git-dir >/dev/null 2>&1; then
 	tags=$(git tag --list 'v[0-9]*' | sed 's/^v//' | sort -V)
 elif [ -e .git ]; then
-	# a repository git refuses to read (ownership, a worktree whose main
-	# repository is not there) must not look like one without tags
+	# unreadable (ownership, a missing main worktree): not "no tags"
 	git rev-parse --git-dir >&2 || true
 	error "git cannot read the repository; the tags are not checked"
 	readable=
@@ -124,8 +99,6 @@ else
 			error "leapfrog--$prev--$version.sql is not in DATA in the Makefile"
 	fi
 fi
-
-# -- the expected output of leapfrog_setup -----------------------------------
 
 grep -qE "(^|[^0-9.])$qversion([^0-9.]|\$)" tests/regress/expected/leapfrog_setup.out ||
 	error "tests/regress/expected/leapfrog_setup.out does not show $version; run leapfrog_setup and update it"
@@ -157,7 +130,6 @@ if [ -n "$newest" ] && version_lt "$newest" "$version" && [ -f "leapfrog--$versi
 	error "EXTVERSION $version is newer than the tag v$newest, but CHANGELOG.md has neither entries under Unreleased nor a '## [$version]' section"
 fi
 
-# Links: one per released section, and Unreleased compared from the newest.
 sections=$(sed -nE 's/^## \[([0-9][^]]*)\].*/\1/p' CHANGELOG.md)
 for s in $sections; do
 	grep -qE "^\\[${s//./\\.}\\]: " CHANGELOG.md ||

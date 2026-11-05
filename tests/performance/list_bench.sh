@@ -1,32 +1,8 @@
 #!/usr/bin/env bash
-# The list query with rare, scattered matches, one scenario at a time, the way a test
-# looks at one case: each has its query and its exact index, its results in a directory
-# of its own, and runs without the exact index of another.
-#
-#   large_customer  a customer with 5 % of the rows, one live per 200,000 ids
-#   small_customer  a customer with 1 % of the rows, one live per 200,000 ids
-#   two_filters     that customer and a product with 2 % of the rows
-#
-# At 100M rows each customer has 500 live rows and the two filters share 20,012 rows, 11
-# live. Below 20M rows the customers have fewer than the query's LIMIT 100 and it never
-# stops early: another workload, which a warning says.
-#
-# Table: SIZE rows in random physical order (ORDER=id: in id order), 5 % of them live.
-# Indexes (customer_id, id), (product_id, id), (id) WHERE deleted_at IS NULL. Loaded once.
-#
-# Modes, in ABBA order:
-#   node    leapfrog on, stock scans disabled
-#   bitmap  leapfrog off, a bitmap plan
-#   indexscan  leapfrog off, an Index Scan with a Filter
-#   stock   leapfrog off, the planner's choice
-#   auto    leapfrog on, the planner's choice
-#   exact   leapfrog off, with the scenario's exact index; runs last
-# Text plans of node, stock and exact go to explain-<mode>.txt.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); SCENARIOS (all three),
-# SIZE (1000000), ORDER (random | id), REPEATS (3), WARMUP (1), WORK_MEM (server's),
-# EXACT (1), BENCH_OUT (must not exist). Output in results/list-<timestamp>/: server.txt,
-# sizes.csv, and <scenario>/ with runs.csv, summary.csv and explain-*.txt.
+# The list query with rare, scattered matches, one scenario at a time.
+# Usage: [VAR=value ...] list_bench.sh
+# Environment: PGHOST/PGPORT/PGUSER, BENCH_DB, SCENARIOS, SIZE, ORDER, REPEATS,
+# WARMUP, WORK_MEM, EXACT, BENCH_OUT.  See docs/benchmarks.md.
 set -euo pipefail
 
 cd "$(dirname "$0")"

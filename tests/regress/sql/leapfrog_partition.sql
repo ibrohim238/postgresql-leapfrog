@@ -1,7 +1,4 @@
---
--- Partitioned tables and inheritance: each child gets the node on its own
--- indexes, under the parent's MergeAppend or ordered Append.
---
+-- leapfrog_partition: partitioned tables and inheritance, the node on each child's own indexes
 CREATE TABLE lf_part (id bigint NOT NULL, owner_id bigint NOT NULL, kind integer NOT NULL, deleted_at timestamptz)
 	PARTITION BY HASH (owner_id);
 CREATE TABLE lf_part_0 PARTITION OF lf_part FOR VALUES WITH (MODULUS 3, REMAINDER 0);
@@ -18,7 +15,6 @@ CREATE INDEX lf_part_kind ON lf_part (kind, id);
 CREATE INDEX lf_part_live ON lf_part (id) WHERE deleted_at IS NULL;
 ANALYZE lf_part;
 
--- several partitions: a MergeAppend over the node
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_part WHERE kind = 3 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 SELECT lf_check($$ SELECT id, owner_id, kind FROM lf_part WHERE kind = 3 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
@@ -41,7 +37,6 @@ DEALLOCATE lf_part_q;
 RESET leapfrog.force;
 RESET plan_cache_mode;
 
--- a join: the values come from the other side, per partition
 CREATE TABLE lf_part_pick (owner_id bigint NOT NULL, kind integer NOT NULL);
 INSERT INTO lf_part_pick VALUES (5, 3), (7, 1), (9, 8);
 SELECT lf_check($$ SELECT p.owner_id, q.id FROM lf_part_pick p
@@ -49,11 +44,7 @@ SELECT lf_check($$ SELECT p.owner_id, q.id FROM lf_part_pick p
 	ORDER BY 1, 2 $$);
 DROP TABLE lf_part_pick;
 
--- Partitionwise join: a join of the partitions, the node the inner side of
--- its nested loop.  The path of a partition of lf_part is parameterized by
--- the other partitioned table and is moved to the matching partition when
--- the plan is made; its equality values must refer to that partition, not
--- to the parent (whose Var crashed the executor).
+-- Partitionwise join: the equality values must refer to the partition, not to the parent.
 CREATE TABLE lf_part_owners (owner_id bigint NOT NULL, name text NOT NULL)
 	PARTITION BY HASH (owner_id);
 CREATE TABLE lf_part_owners_0 PARTITION OF lf_part_owners FOR VALUES WITH (MODULUS 3, REMAINDER 0);
@@ -78,7 +69,6 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 DROP TABLE lf_part_owners;
 
--- FOR UPDATE keeps conditions for EvalPlanQual per partition
 SELECT lf_check($$ SELECT id, owner_id FROM lf_part WHERE kind = 3 AND deleted_at IS NULL ORDER BY id LIMIT 20 FOR UPDATE $$);
 
 -- row-level security reaches the partitions: numeric = is not leakproof

@@ -1,6 +1,4 @@
-# Concurrent INSERT under READ COMMITTED, and VACUUM removing dead entries
-# while a cursor over the node is in the middle of its scan.  Every result
-# is followed by the stock plan's answer on the same snapshot.
+# Concurrent INSERT and VACUUM under an open cursor; every result is followed by the stock plan's.
 
 setup
 {
@@ -71,22 +69,12 @@ step s2_drain	{
 }
 step s2_commit	{ COMMIT; }
 
-# READ COMMITTED: an uncommitted insert is invisible, a committed one is
-# seen by the next statement, by both plans.
+# READ COMMITTED: a committed insert is seen by the next statement, by both plans.
 permutation s2_begin s2_count s1_begin s1_insert s2_count s2_count_std s1_commit s2_count s2_count_std s2_commit
 
-# A row inserted by the transaction SELECT FOR UPDATE waits for is not seen
-# by that statement after the wait (its snapshot predates the insert); the
-# locked row is returned with its new payload.  The next statement sees the
-# new row.
+# A row inserted by the transaction FOR UPDATE waits for is not seen after the wait; the next statement sees it.
 permutation s1_begin s1_lock_and_insert s2_begin s2_lock s1_commit s2_lock s2_commit
 permutation s1_begin s1_lock_and_insert s2_begin s2_lock_std s1_commit s2_lock_std s2_commit
 
-# VACUUM removing the dead entries of rows deleted before the cursor's
-# snapshot, with the cursor still open after its scan has run out, and the
-# answers of both plans afterwards.  (VACUUM while the node's scan is
-# positioned on a leaf page waits for the scan to move on, as it does for an
-# Index Only Scan: the scan keeps its leaf page pinned because it reads the
-# sort value from the index tuple.  isolationtester cannot see buffer pin
-# waits, so that case is not in this spec.)
+# VACUUM of entries deleted before the cursor's snapshot, with the cursor open after its scan ran out.
 permutation s1_delete_tail s2_begin s2_declare s2_fetch s2_drain s1_vacuum s2_count s2_count_std s2_commit

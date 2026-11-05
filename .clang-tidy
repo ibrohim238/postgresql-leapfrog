@@ -1,25 +1,4 @@
-# clang-tidy configuration (make lint, tests/scripts/lint.sh): the bug and
-# static analyzer checks, less those that only flag the idioms of PostgreSQL
-# C code.  Every check left out is named here with the reason:
-#
-# bugprone-easily-swappable-parameters
-#     adjacent parameters of one type are everywhere in the planner API.
-# bugprone-narrowing-conversions
-#     int loop counters stored as AttrNumber, Index (unsigned) read into int,
-#     int64 counters into double for EXPLAIN: PostgreSQL's own style.
-# bugprone-implicit-widening-of-multiplication-result
-#     fires on ALLOCSET_SMALL_SIZES and the like (int constant products
-#     passed as Size), in the core headers' macros.
-# bugprone-multi-level-implicit-pointer-conversion
-#     palloc() returns void *, assigned to a pointer to pointers.
-# bugprone-branch-clone
-#     two conditions with the same outcome are kept apart where each has its
-#     own reason (intersect_scan_qual).
-# clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
-#     asks for memset_s and the other optional C11 Annex K functions, which
-#     neither glibc nor PostgreSQL provide.
-# clang-analyzer-optin.performance.Padding
-#     the field order of the scan state follows its meaning, not its size.
+# make lint; every check left out is explained in docs/tooling.md.
 Checks: >-
   -*,
   bugprone-*,
@@ -32,5 +11,4 @@ Checks: >-
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -clang-analyzer-optin.performance.Padding
 WarningsAsErrors: "*"
-# the extension's own headers, not PostgreSQL's
 HeaderFilterRegex: "(^|/)src/[^/]*\\.h$"

@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
-# Run the regression and isolation suites against the server described by
-# PGHOST/PGPORT/PGUSER/PGDATABASE.  Used as the entrypoint of the "test"
-# compose service and by the cassert image; works against any reachable
-# PostgreSQL 18 that has the extension installed and preloaded.  With
-# --build and no PGHOST (the test image run on its own, "docker run --rm
-# leapfrog-test"), it starts a server of its own first, with
-# tests/scripts/start-cluster.sh, and stops it at the end.
-#
-#   bash tests/scripts/run-tests.sh           run the suites
-#   bash tests/scripts/run-tests.sh --build   first make clean, build with
-#                                             warnings as errors and install
-#                                             (the test image, whose sources
-#                                             are mounted)
-#
-# Exits non-zero when any test fails; the diffs are printed.
+# Run the regression and isolation suites against PGHOST/PGPORT/PGUSER.
+# Usage: run-tests.sh [--build]   (--build: build and install first)
+# See docs/testing.md and docs/docker.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -32,8 +20,7 @@ if [ "$build" -eq 1 ]; then
 		exit 2
 	fi
 	echo "== build"
-	# The sources are mounted: objects of another build (the host's, another
-	# server's) must not be linked into this one.
+	# the mounted tree may hold objects of another build
 	make clean >/dev/null
 	make with_llvm=no WERROR=1
 	make with_llvm=no install
@@ -61,9 +48,6 @@ wait_for_server() {
 
 wait_for_server
 
-# The planner hook must be installed; LOAD in the tests covers a session,
-# but the isolation sessions and the plan cache are simpler to reason about
-# when the server preloads the library.
 preload=$(psql -tAc "SHOW shared_preload_libraries")
 case ",$preload," in
 	*,leapfrog,*|*leapfrog*) ;;

@@ -1,12 +1,5 @@
---
--- leapfrog_basic
---
--- The index pair the extension is built for: (owner_id, id) plus a partial
--- (id) WHERE deleted_at IS NULL, and the mirror partial index for the
--- deleted rows.  Results are compared with the standard plans through
--- lf_check (EXCEPT ALL in both directions, plus the output order).
+-- leapfrog_basic: the index pair the extension is built for, (owner_id, id) + partial (id)
 -- alternative output leapfrog_basic_1.out: PostgreSQL 19 prints "Replaces:" under a dummy Result; remove when PostgreSQL 19 is the oldest supported version
---
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 
@@ -19,9 +12,7 @@ CREATE TABLE lf_basic (
 	payload text
 );
 
--- 20000 rows: 20 owners, every 7th row deleted, owner 19 never deleted,
--- owner 18 always deleted; rows are inserted out of id order so that the
--- heap order does not coincide with the sort order.
+-- Owner 19 is never deleted, owner 18 always; out of id order, so heap order is not sort order.
 INSERT INTO lf_basic (id, owner_id, kind_id, deleted_at, status, payload)
 SELECT g,
 	g % 20,
@@ -41,19 +32,17 @@ CREATE INDEX lf_basic_live_low_status_id ON lf_basic (id)
 	WHERE deleted_at IS NULL AND status < 10;
 ANALYZE lf_basic;
 
--- On this small table the standard plan wins on cost (the cost-driven
--- choice is covered by leapfrog_explain) ...
+-- On this small table the standard plan wins on cost; forced, the custom scan.
 SET leapfrog.force = off;
 EXPLAIN (COSTS OFF)
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100;
 
--- ... and the forced plan is the custom scan with both indexes named.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 100 $$);
 
--- Disabled: the standard plan comes back, force has no effect.
+-- Disabled: force has no effect.
 SET leapfrog.enabled = off;
 SET leapfrog.force = on;
 EXPLAIN (COSTS OFF)
@@ -62,7 +51,6 @@ ORDER BY id DESC LIMIT 100;
 RESET leapfrog.enabled;
 RESET leapfrog.force;
 
--- ORDER BY ASC / DESC, with and without LIMIT
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id LIMIT 1 $$);
@@ -72,78 +60,65 @@ SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS N
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
 
--- LIMIT with OFFSET
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 OFFSET 50 $$);
 
--- Empty intersection: owner 19 has no deleted rows, owner 18 no live rows.
+-- Empty intersections
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 19 AND deleted_at IS NOT NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 18 AND deleted_at IS NULL ORDER BY id DESC LIMIT 5 $$);
 
--- Full intersection: every row of owner 19 is live, of owner 18 deleted.
+-- Full intersections
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 19 AND deleted_at IS NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 18 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
 
--- No such owner
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 12345 AND deleted_at IS NULL ORDER BY id $$);
 
--- Early termination: LIMIT 1 reads a handful of entries, not the indexes.
+-- LIMIT 1 reads a handful of entries, not the indexes.
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
 ORDER BY id DESC LIMIT 1 $$);
 
--- Without LIMIT every entry of both sides is read, and only matches are
--- fetched from the heap.
+-- Without LIMIT only the matches are fetched from the heap.
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL
 ORDER BY id $$);
 
--- Several equality columns: the three-column outer index.
+-- The three-column outer index
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND kind_id = 2 AND deleted_at IS NULL
 ORDER BY id DESC LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND kind_id = 2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND kind_id = 2 AND deleted_at IS NOT NULL ORDER BY id $$);
 
--- Equality with integer and smallint constants, and the column on the right
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5::integer AND deleted_at IS NULL ORDER BY id LIMIT 10 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5::smallint AND deleted_at IS NULL ORDER BY id LIMIT 10 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE 5 = owner_id AND deleted_at IS NULL ORDER BY id LIMIT 10 $$);
 
--- Partial index with two conditions: the query implies the predicate
--- (status < 5 implies status < 10), the rows with status 5..9 that the
--- inner index holds are removed by the node's filter.
+-- Predicate implied (status < 5 => status < 10): the node filters status 5..9.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 5
 ORDER BY id LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 5 ORDER BY id LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 5 ORDER BY id DESC $$);
--- Predicate exactly equal to the query: no filter left.
+-- Predicate equal to the query: no filter left.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 10
 ORDER BY id LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND status < 10 ORDER BY id LIMIT 20 $$);
 
--- Extra filter that neither index covers stays in the plan.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND payload LIKE '%45'
 ORDER BY id LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL AND payload LIKE '%45' ORDER BY id LIMIT 20 $$);
 
--- Projection of a subset of columns and an expression
 SELECT lf_check($$ SELECT id, upper(payload) FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 
--- Aggregation over the scan
 SELECT lf_check($$ SELECT count(*), sum(id) FROM (SELECT id FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id) s $$, false);
 
---
 -- Cases that must NOT produce the custom scan, even when forced
---
 
--- No ORDER BY: no sort key to merge on.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL LIMIT 20 $$);
 
--- ORDER BY another column
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY status LIMIT 20 $$);
 
@@ -153,7 +128,6 @@ SELECT * FROM lf_basic WHERE owner_id = 5 ORDER BY id LIMIT 20 $$);
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND status < 20 ORDER BY id LIMIT 20 $$);
 
--- No equality on the outer index's leading column (range instead).
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id > 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 
@@ -161,8 +135,7 @@ SELECT * FROM lf_basic WHERE owner_id > 5 AND deleted_at IS NULL ORDER BY id LIM
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id IN (5, 6) AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 
--- NULL constant: the clause is "owner_id = NULL", nothing can match; the
--- planner reduces it to a dummy result and the hook sees no base rel.
+-- owner_id = NULL: reduced to a dummy result, the hook sees no base rel.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = NULL AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 SELECT lf_check($$ SELECT * FROM lf_basic WHERE owner_id = NULL AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
@@ -178,7 +151,6 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic WHERE owner_id = 5 AND deleted_at IS NOT NULL ORDER BY id LIMIT 20 $$);
 ROLLBACK;
 
--- Without the outer index there is no pair either.
 BEGIN;
 DROP INDEX lf_basic_owner_id;
 DROP INDEX lf_basic_owner_kind_id;
@@ -209,7 +181,6 @@ SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1
 ALTER TABLE lf_basic_nullable ADD CONSTRAINT lf_basic_nullable_id_notnull NOT NULL id NOT VALID;
 SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
 SELECT count(*) AS null_rows FROM lf_basic_nullable WHERE id IS NULL;
--- once validated the column holds none
 UPDATE lf_basic_nullable SET id = 1000 + owner_id WHERE id IS NULL;
 ALTER TABLE lf_basic_nullable VALIDATE CONSTRAINT lf_basic_nullable_id_notnull;
 SELECT lf_check($$ SELECT owner_id, id FROM lf_basic_nullable WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id $$);
@@ -237,7 +208,6 @@ SELECT * FROM lf_plan($$
 SELECT * FROM lf_basic_int4_owner WHERE owner_id = 5 AND deleted_at IS NULL ORDER BY id LIMIT 20 $$);
 DROP TABLE lf_basic_int4_owner;
 
--- A partitioned table: the node per partition (more in leapfrog_partition).
 CREATE TABLE lf_basic_part (id bigint NOT NULL, owner_id bigint NOT NULL, deleted_at timestamptz)
 	PARTITION BY HASH (id);
 CREATE TABLE lf_basic_part_0 PARTITION OF lf_basic_part FOR VALUES WITH (MODULUS 2, REMAINDER 0);

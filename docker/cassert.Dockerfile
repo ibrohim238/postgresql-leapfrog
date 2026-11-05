@@ -1,32 +1,6 @@
-# PostgreSQL 18 built from source with assertions (--enable-cassert), and
-# the extension built against it.  The container starts a server with the
-# library preloaded and runs the regression and isolation suites:
-#
-#   docker build -f docker/cassert.Dockerfile -t leapfrog-cassert .
-#   docker run --rm leapfrog-cassert
-#
-# With sanitizers (clang; the server and the extension both instrumented):
-#
-#   docker build --build-arg SANITIZE=address,undefined \
-#       -f docker/cassert.Dockerfile -t leapfrog-san .
-#   docker run --rm leapfrog-san
-#
-# Two stages: "pg", PostgreSQL alone (it depends on PG_BRANCH and SANITIZE
-# only, so it can be built once and pushed to a registry: --target pg), and
-# the extension built on top of it.
-#
-# Build arguments:
-#   PG_BRANCH   PostgreSQL git branch or tag (REL_18_STABLE)
-#   SANITIZE    empty (default: gcc, no sanitizer), or a -fsanitize= list
-#               such as address,undefined: clang, -fsanitize=$SANITIZE
-#               -fno-omit-frame-pointer -fno-sanitize-recover=all, for
-#               PostgreSQL and the extension; tests/scripts/run-cassert.sh
-#               fails on any report (ASAN_OPTIONS, UBSAN_OPTIONS there;
-#               leak detection is off)
-#   UID, GID    ids of the user running the server and the tests (1000),
-#               the host user's when the sources are mounted over the copy
+# docker build -f docker/cassert.Dockerfile -t leapfrog-cassert . && docker run --rm leapfrog-cassert; see docs/docker.md.
 
-# -- pg stage: PostgreSQL from git, with assertions -------------------------
+# -- pg ---------------------------------------------------------------------
 FROM debian:bookworm-slim AS pg
 ARG PG_BRANCH=REL_18_STABLE
 ARG SANITIZE=
@@ -38,9 +12,7 @@ RUN apt-get update \
         ${SANITIZE:+clang llvm libclang-rt-dev} \
     && rm -rf /var/lib/apt/lists/*
 
-# Under AddressSanitizer every instrumented program, pg_config included,
-# fails at exit on memory it never freed; PGXS asks pg_config for its paths,
-# so leak detection is off image-wide (run-cassert.sh keeps it off).
+# pg_config would fail at exit on its leaks, and PGXS needs it
 ENV ASAN_OPTIONS=detect_leaks=0
 
 RUN git clone --depth 1 --branch ${PG_BRANCH} \
@@ -64,7 +36,7 @@ ENV PATH=/usr/local/pgsql/bin:$PATH \
     PGHOST=/tmp \
     PGUSER=postgres
 
-# -- the extension, built against it ----------------------------------------
+# -- leapfrog ---------------------------------------------------------------
 FROM pg AS leapfrog
 ARG UID=1000
 ARG GID=1000
@@ -77,8 +49,7 @@ RUN groupadd -o -g "${GID}" postgres \
 WORKDIR /src/leapfrog
 COPY --chown=postgres Makefile leapfrog.control leapfrog--*.sql ./
 COPY --chown=postgres src ./src
-# pg_config gives the compiler and the flags PostgreSQL was built with, the
-# sanitizer ones included.
+# the compiler and flags, sanitizers included, come from pg_config
 RUN make clean && make WERROR=1 && make install
 
 COPY --chown=postgres tests ./tests

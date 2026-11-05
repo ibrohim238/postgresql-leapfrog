@@ -1,31 +1,8 @@
 #!/usr/bin/env bash
-# Run one regression test or isolation spec, N times, against a running
-# server ("make test-one"), after Citus's run_test.py -r and TimescaleDB's
-# TESTS=.  Stops at the first failure, prints its diff and the number of runs
-# that passed before it.
-#
+# Run one regression test or isolation spec N times ("make test-one").
 # Usage: run-one.sh <name> [-r N] [--isolation]
-#   <name>        tests/regress/sql/<name>.sql, or with --isolation
-#                 tests/isolation/specs/<name>.spec
-#   -r N          run it N times (default 1)
-#   --isolation   an isolation spec instead of a regression test
-#
-# Every run gets a fresh database, created here the way pg_regress creates
-# one (template0, the same ALTER DATABASE settings, CREATE EXTENSION
-# leapfrog) and passed with --use-existing, so pg_regress never creates or
-# drops a database itself.  A regression test other than leapfrog_setup runs
-# after leapfrog_setup in the same database: that test creates the helpers
-# (lf_check, lf_plan, ...) the others use, and its own output is checked as in
-# the full suite, so no expected file changes.
-#
-# Environment: PGHOST/PGPORT/PGUSER (a superuser, as for make installcheck);
-# PG_REGRESS, PG_ISOLATION_REGRESS, PG_BINDIR (set by the Makefile; default:
-# the PGXS tree of PG_CONFIG); SCRATCH_ADMIN_DB, the database the scratch
-# database is created and dropped from (default postgres; see scratch_db.sh).
-# Scratch database: lf_one_<name>_<pid>,
-# recognised by its comment and dropped after every run; a database of that
-# name without the comment is not touched, and the script fails (see
-# scratch_db.sh).
+# Environment: PGHOST/PGPORT/PGUSER, PG_REGRESS, PG_ISOLATION_REGRESS,
+# PG_BINDIR, SCRATCH_ADMIN_DB.  See docs/testing.md.
 set -euo pipefail
 
 # shellcheck source=tests/scripts/scratch_db.sh
@@ -98,7 +75,6 @@ mark="leapfrog run-one scratch database (pid $$)"
 out=$(mktemp -d "${TMPDIR:-/tmp}/leapfrog-run-one-$name.XXXXXX")
 keep_out=false
 
-# drop the scratch database if it carries this run's comment
 drop_db() {
 	local status=0
 	scratch_db_drop "$db" "$mark" || status=$?

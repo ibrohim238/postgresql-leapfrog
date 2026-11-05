@@ -1,23 +1,8 @@
 #!/usr/bin/env bash
-# Start a test server: initdb into PGDATA, the settings of tests/scripts/
-# temp.conf, wait until it accepts connections, and run the smoke check
-# (tests/scripts/smoke.sql: CREATE EXTENSION, the node in a forced plan and
-# not in a disabled one).  The extension must be installed already.  Used by
-# the cassert image, by the test image when no PGHOST is given, and by CI.
-#
-#   bash tests/scripts/start-cluster.sh [postgres options ...]
-#
-# Environment:
-#   PGDATA        data directory, created; must not exist or be empty
-#   PGHOST        a directory: the Unix socket goes there and TCP is off
-#                 (default /tmp); a host name: listen on it
-#   PGPORT        port (5432)
-#   PGUSER        the bootstrap superuser (postgres)
-#   PGLOG         server log ($PGDATA/server.log)
-#   LEAPFROG_SHARED_BUFFERS   shared_buffers (128MB)
-#
-# Further arguments go to the server, e.g. "-c max_stack_depth=8MB".  Stop
-# it with "pg_ctl -w stop" (PGDATA set).
+# Start a test server with tests/scripts/temp.conf and run the smoke check.
+# Usage: start-cluster.sh [postgres options ...]
+# Environment: PGDATA (required), PGHOST, PGPORT, PGUSER, PGLOG,
+# LEAPFROG_SHARED_BUFFERS.  See docs/testing.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

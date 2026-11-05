@@ -1,7 +1,4 @@
--- Smoke check of a freshly started test server (tests/scripts/start-cluster.sh):
--- the extension is created, the library is loaded, and the key query gets
--- the node under leapfrog.force and the stock plan with leapfrog.enabled
--- off.  Runs in a database of its own, dropped at the end.
+-- Smoke check of a fresh test server (start-cluster.sh), in a database of its own
 \set ON_ERROR_STOP 1
 SET client_min_messages = warning;
 DROP DATABASE IF EXISTS leapfrog_smoke;
@@ -15,7 +12,6 @@ CREATE INDEX idx_orders_customer_id ON orders (customer_id, id);
 CREATE INDEX idx_orders_active_id ON orders (id) WHERE deleted_at IS NULL;
 ANALYZE orders;
 
--- The forced plan must contain the custom scan, the disabled one must not.
 CREATE FUNCTION smoke_plan(setting text, value text) RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE

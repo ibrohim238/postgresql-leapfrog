@@ -1,14 +1,4 @@
---
--- leapfrog_nway
---
--- Intersection of more than two indexes: every stream after the first is an
--- inner one with its own TID group, the merge advances every lagging stream
--- to the frontmost value and matches an outer entry only when every inner
--- group holds its TID.  The planner adds a stream only while it lowers the
--- estimated cost; leapfrog.min_indexes (a developer setting) requires a set
--- size so that larger sets can be run against the stock plans.  Results are
--- compared with the standard plans throughout.
---
+-- leapfrog_nway: more than two streams; leapfrog.min_indexes forces a set size to test larger sets.
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 
@@ -22,9 +12,7 @@ CREATE TABLE lf_nway (
 	flagged boolean NOT NULL,
 	payload text
 );
--- 60,000 rows; hashed values, independent of each other and of id.  The
--- statistics target makes ANALYZE sample every row, so the estimates and
--- with them the chosen sets do not vary between runs.
+-- Hashed, independent values; ANALYZE samples every row, so the chosen sets do not vary.
 SET default_statistics_target = 200;
 INSERT INTO lf_nway
 SELECT g, abs(hashint8(g * 8 + 1)) % 30, abs(hashint8(g * 8 + 2)) % 20,
@@ -43,9 +31,7 @@ CREATE INDEX lf_nway_archived_id ON lf_nway (id) WHERE archived;
 CREATE INDEX lf_nway_flagged_id ON lf_nway (id) WHERE flagged;
 ANALYZE lf_nway;
 
--- Three streams: two ordinary indexes and a partial one.  The node fetches
--- only the rows every stream agrees on; with two streams the third
--- condition filters the fetched rows.
+-- Three streams fetch only the rows all agree on; with two the third condition filters.
 SET leapfrog.min_indexes = 3;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NULL
@@ -63,7 +49,6 @@ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS
 WHERE counter IN ('Outer Index', 'Inner Index', 'Inner Index 2', 'Matched TIDs', 'Heap Fetches', 'Rows Removed by Filter');
 RESET leapfrog.max_indexes;
 
--- Four and five streams.
 SET leapfrog.min_indexes = 4;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND region = 2 AND archived
@@ -84,9 +69,7 @@ ORDER BY id $$) WHERE lf_plan ~ 'Index';
 RESET leapfrog.max_indexes;
 RESET leapfrog.min_indexes;
 
--- A bigger set is used only when it is estimated cheaper.  The stock scans
--- are disabled so that the sets compete among themselves by their real
--- costs, without leapfrog.force.
+-- A bigger set only when cheaper; stock scans disabled so the sets compete by real costs.
 CREATE FUNCTION lf_plan_node(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -101,35 +84,26 @@ BEGIN
 	END LOOP;
 END
 $$;
--- The pair customer + archived leaves 250 rows to fetch and region cuts them
--- to 50: a third stream of 12,000 entries saves 200 heap fetches.
+-- customer + archived leave 250 rows, region cuts them to 50: the third stream pays.
 SELECT * FROM lf_plan_node($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$);
--- The pair customer + product leaves 100 rows and the live rows are 9 in 10
--- of them: a third stream of 54,000 entries would save 10 heap fetches.
+-- customer + product leave 100 rows, 9 in 10 live: a third stream would not pay.
 SELECT * FROM lf_plan_node($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NULL ORDER BY id $$);
--- With leapfrog.max_indexes = 2 the third stream is never added.
 SET leapfrog.max_indexes = 2;
 SELECT count(*) FROM lf_plan_node($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$)
 WHERE lf_plan_node ~ 'Stream on';
 RESET leapfrog.max_indexes;
--- leapfrog.force scales down the costs of the paths it offers; the sets are
--- still compared by their own costs, so the same three streams are chosen.
--- (The cheapest pair's cost used to be read back from the offered path:
--- scaled, so no other pair or third stream could beat it; and freed when
--- add_path rejected or replaced it.)
+-- Under leapfrog.force the sets are still compared by their own costs: the same three streams.
 SET leapfrog.force = on;
 SELECT * FROM lf_plan_node($$
 SELECT * FROM lf_nway WHERE customer_id = 7 AND region = 2 AND archived ORDER BY id $$);
 RESET leapfrog.force;
 DROP FUNCTION lf_plan_node(text);
 
--- Parameters: a prepared statement with a generic plan, and a LATERAL
--- subquery rescanned for every outer row.
 SET leapfrog.min_indexes = 3;
 SET plan_cache_mode = force_generic_plan;
 PREPARE lf_nway_q (bigint, bigint) AS
@@ -153,8 +127,7 @@ FROM (VALUES (7::bigint, 3::bigint), (8, 4), (7, 3), (9, 19)) v (c, p),
 			 ORDER BY id DESC LIMIT 4) s $$);
 RESET leapfrog.min_indexes;
 
--- A non-unique sort column: every value has several entries in every
--- stream, matched by TID across three groups.
+-- A non-unique sort column: matched by TID across three groups.
 CREATE TABLE lf_nway_dup (
 	id bigint PRIMARY KEY,
 	grp bigint NOT NULL,
@@ -178,9 +151,7 @@ SELECT * FROM lf_counters($$
 SELECT * FROM lf_nway_dup WHERE customer_id = 3 AND product_id = 1 AND deleted_at IS NULL ORDER BY grp $$)
 WHERE counter IN ('Inner Index 2', 'Matched TIDs', 'Heap Fetches', 'Peak Group Memory');
 
--- Groups larger than work_mem in more than one stream: with every row in
--- one grp value both inner groups overflow and the inner conditions are
--- checked on the fetched rows.
+-- Both inner groups overflow work_mem: the inner conditions are checked on the fetched rows.
 UPDATE lf_nway_dup SET grp = 1;
 ANALYZE lf_nway_dup;
 SET work_mem = '64kB';
@@ -194,8 +165,7 @@ RESET work_mem;
 RESET leapfrog.min_indexes;
 DROP TABLE lf_nway_dup;
 
--- Rows moving between the streams: updates and deletes leave dead entries
--- in some indexes and new ones in others.
+-- Rows moving between the streams
 SET leapfrog.min_indexes = 3;
 UPDATE lf_nway SET deleted_at = now() WHERE customer_id = 7 AND id % 3 = 0;
 UPDATE lf_nway SET deleted_at = NULL WHERE product_id = 3 AND id % 7 = 0;
@@ -206,16 +176,12 @@ SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 4 AND deleted_at IS NOT NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND region = 2 AND deleted_at IS NULL ORDER BY id $$);
--- FOR UPDATE: the row marks and the recheck path with three streams
 SELECT lf_check($$ SELECT * FROM lf_nway WHERE customer_id = 7 AND product_id = 3 AND deleted_at IS NULL ORDER BY id LIMIT 10 FOR UPDATE $$);
 RESET leapfrog.min_indexes;
 
 DROP TABLE lf_nway;
 
--- Every stream of a set must add a restriction the others do not enforce:
--- an equality column no other stream has, or a predicate the other streams'
--- equalities and predicates do not imply.  Under leapfrog.force any set the
--- planner may form shows up, so a redundant one would be visible here.
+-- Every stream must add a restriction the others do not enforce; force shows any set formed.
 CREATE TABLE lf_nway_red (
 	id bigint PRIMARY KEY,
 	membership_id bigint NOT NULL,
@@ -233,25 +199,19 @@ CREATE INDEX lf_nway_red_membership_live ON lf_nway_red (membership_id, id) WHER
 CREATE INDEX lf_nway_red_live ON lf_nway_red (id) WHERE deleted_at IS NULL;
 CREATE INDEX lf_nway_red_kind2 ON lf_nway_red (id) WHERE kind = 2;
 ANALYZE lf_nway_red;
--- One condition: neither the primary key (id) nor (campaign_id, id), which
--- has no equality, nor anything else narrows (membership_id, id) down.
+-- Nothing narrows (membership_id, id) down.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway_red WHERE membership_id = 3 ORDER BY id DESC LIMIT 100 $$);
--- (membership_id, id) WHERE deleted_at IS NULL alone enforces both
--- conditions: (membership_id, id) adds nothing to it, nor does
--- (id) WHERE deleted_at IS NULL, whose predicate it implies.  With the fewest
--- entries it comes first, and no set forms.
+-- The partial (membership_id, id) enforces both conditions alone: no set forms.
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
 SELECT lf_check($$ SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
--- The same without the (id) WHERE index.
 BEGIN;
 DROP INDEX lf_nway_red_live;
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_nway_red WHERE membership_id = 3 AND deleted_at IS NULL ORDER BY id DESC LIMIT 100 $$);
 ROLLBACK;
--- A predicate implied by an equality: (id) WHERE kind = 2 adds nothing to
--- (kind, id) with kind = 2, so the two are never in one set, at any size.
+-- (id) WHERE kind = 2 adds nothing to (kind, id) with kind = 2, at any set size.
 SET leapfrog.max_indexes = 4;
 SET leapfrog.min_indexes = 3;
 SELECT * FROM lf_plan($$

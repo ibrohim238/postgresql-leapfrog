@@ -1,26 +1,7 @@
 #!/usr/bin/env bash
-# Consistency of the test lists and expected files ("make check-tests"), after
-# Citus's ci/check_all_tests_are_run.sh and TimescaleDB's
-# scripts/check_orphaned_test_output_files.sh.  Fails when:
-#
-#   - a tests/regress/sql/*.sql is not in REGRESS, or a
-#     tests/isolation/specs/*.spec is not in ISOLATION (the Makefile);
-#   - a name in REGRESS or ISOLATION has no .sql or .spec;
-#   - an expected file, <name>.out or <name>_N.out, belongs to no test;
-#   - an alternative output <name>_N.out is identical to <name>.out;
-#   - an alternative output is not explained in the header comment of its
-#     test, or the header explains one that does not exist.
-#
-# The header rule is Citus's (src/test/regress/README.md): every alternative
-# output says why it exists and when it can go.  The header comment is the
-# block of comment and blank lines at the top of the .sql or .spec file, and
-# it holds, on one line, for every <name>_N.out:
-#
-#   -- alternative output <name>_N.out: <why>; remove when <condition>
-#
-# in a .sql file, and the same with "#" in place of "--" in a .spec file.
-#
-# Needs no server: it reads the Makefile and the files of the source tree.
+# Check the test lists and expected files; no server.
+# Usage: check-tests.sh
+# See docs/testing.md.
 set -euo pipefail
 
 # shellcheck source=tests/scripts/makevars.sh
@@ -34,8 +15,7 @@ error() {
 	errors=$((errors + 1))
 }
 
-# The header comment of a test file: the lines up to the first one that is
-# neither a comment (with the given marker) nor blank.
+# header <file> <marker>: the leading comment and blank lines
 header() {
 	awk -v marker="$2" '
 		index($0, marker) == 1 || /^[[:space:]]*$/ { print; next }
@@ -86,8 +66,7 @@ check_suite() {
 			error "$f is identical to $name.out; remove the unnecessary alternative"
 		fi
 
-		# not "header | grep -q": grep may exit first, and pipefail would
-		# report the writer's SIGPIPE
+		# not a pipe: grep -q may exit first, a SIGPIPE under pipefail
 		if ! grep -qE "^$marker alternative output ${base}\\.out: .+; remove when .+" \
 			<<<"$(header "$src/$name.$ext" "$marker")"; then
 			error "$f is not explained in the header comment of $src/$name.$ext;" \

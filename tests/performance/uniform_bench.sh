@@ -1,28 +1,8 @@
 #!/usr/bin/env bash
-# Uniform data: filter values spread evenly over the table.
-# Index Merge Intersect against BitmapAnd and an exact index as the table grows.
-#
-# Table: customer_id (100 values), product_id (50), deleted_at, with indexes
-# (customer_id, id), (product_id, id), (id) WHERE deleted_at IS NOT NULL.
-# Deleted rows are "hashed" (10 %, evenly spread) or "batches" (12.5 %, per
-# customer in blocks of id, loaded in random order; stock plans misjudge this).
-#
-# Modes, in ABBA order so that none always follows the one evicting most pages:
-#   node    leapfrog on, stock scans disabled
-#   bitmap  leapfrog off, a bitmap plan
-#   indexscan  leapfrog off, an Index Scan with a Filter
-#   stock   leapfrog off, the planner's choice
-#   auto    leapfrog on, the planner's choice
-#   exact   leapfrog off, with indexes made for the queries; runs last, as they
-#           would change the other plans (EXACT=0 skips it)
-#
-# A bitmap over work_mem turns lossy: 256MB keeps it exact up to 50M rows.
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); SIZES ("100000
-# 1000000 10000000"), REPEATS (11), WARMUP (2), DELETED ("hashed batches"),
-# WORK_MEM (server's), EXACT (1), BENCH_OUT (must not exist).
-# Output in results/uniform-<timestamp>/: runs.csv, summary.csv (median, p90),
-# sizes.csv (table and indexes), server.txt.
+# Uniform data: the node against BitmapAnd and an exact index as the table grows.
+# Usage: [VAR=value ...] uniform_bench.sh
+# Environment: PGHOST/PGPORT/PGUSER, BENCH_DB, SIZES, REPEATS, WARMUP, DELETED,
+# WORK_MEM, EXACT, BENCH_OUT.  See docs/benchmarks.md.
 set -euo pipefail
 
 cd "$(dirname "$0")"

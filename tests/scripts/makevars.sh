@@ -1,10 +1,7 @@
 # shellcheck shell=bash
-# Sourced by the scripts that read the Makefile (check-tests.sh,
-# check-version.sh); functions only.
+# Sourced: make_var, to read Makefile variables.
 
-# make_var <variable>: the words of a Makefile variable assigned with "=",
-# ":=" or "+=", following backslash continuations, one per line.  Reads
-# ./Makefile: the caller runs from the top of the source tree.
+# make_var <variable>: its words in ./Makefile, one per line
 make_var() {
 	awk -v var="$1" '
 		function take(line) {

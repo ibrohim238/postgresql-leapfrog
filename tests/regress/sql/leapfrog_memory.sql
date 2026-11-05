@@ -1,20 +1,5 @@
---
--- leapfrog_memory
---
--- Memory of the predicate fallback.  When a TID group overflows work_mem,
--- every outer entry of the value is fetched and the inner index predicate is
--- evaluated on the row inside one call of the access method; rows that fail
--- it never return to ExecScan, which is where the per-tuple context is
--- normally reset.  The node must reset it itself after every evaluation, or
--- whatever the predicate allocates piles up for the whole run of rejected
--- rows.
---
--- The predicate here allocates about 4 kB per evaluation and 50,000
--- consecutive rows fail it: without the reset that is about 200 MB.  The
--- check is the growth of the backend's peak resident set (VmHWM), so the
--- test runs in its own file, i.e. in a fresh backend.  Linux only: it reads
--- /proc/self/status, which needs superuser (pg_regress runs as one).
---
+-- leapfrog_memory: per-tuple memory of the predicate fallback and of the equality values.
+-- Measures the backend's peak RSS (VmHWM), so it runs in its own file; Linux, superuser.
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 
@@ -31,8 +16,7 @@ CREATE TABLE lf_memory (
 	deleted_at timestamptz,
 	tag text NOT NULL
 );
--- One value of group_id: 50,000 deleted rows first (in TID order), then
--- 11,000 live rows, more than the 10,922 TIDs that fit into 64kB.
+-- 50,000 rows failing the predicate first, then 11,000 live: more than 10,922 TIDs fit into 64kB.
 INSERT INTO lf_memory
 SELECT g, 1, 1, '2026-01-01', 't' FROM generate_series(1, 50000) g;
 INSERT INTO lf_memory
@@ -45,9 +29,7 @@ VACUUM ANALYZE lf_memory;
 SET work_mem = '64kB';
 SET leapfrog.force = on;
 
--- Peak memory before and after the query.  This must be the first run of
--- the query in the backend: a leak raises the peak once, and every later
--- run would start from the raised peak and show no growth.
+-- Must be the first run in the backend: a leak raises the peak only once.
 SELECT lf_peak_rss_kb() AS before_kb \gset
 SELECT count(*) FROM (
 	SELECT id FROM lf_memory
@@ -67,7 +49,6 @@ WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
 ORDER BY group_id $$)
 WHERE counter IN ('Group Overflows', 'Rows Checked by Predicate', 'Actual Rows');
 
--- The result is still the one of the standard plan.
 SELECT lf_check($$
 SELECT id FROM lf_memory
 WHERE owner_id = 1 AND length(repeat(tag, 4000)) > 0 AND deleted_at IS NULL
@@ -77,11 +58,7 @@ RESET leapfrog.force;
 RESET work_mem;
 DROP TABLE lf_memory;
 
--- Memory of the equality values.  Values of by-reference types are copied
--- out of the per-tuple memory for the whole scan and freed on the next
--- rescan.  40,000 rescans of a nested loop with two text values of about
--- 3 kB each would keep about 240 MB without that.  The "C" collation keeps
--- the comparisons of the long values cheap.
+-- Equality values are kept until the next rescan; "C" keeps comparing the long values cheap.
 CREATE TABLE lf_memory_values (
 	id bigint PRIMARY KEY,
 	path text COLLATE "C" NOT NULL,

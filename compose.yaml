@@ -1,21 +1,4 @@
-# docker compose up -d --build --wait      PostgreSQL 18 with leapfrog preloaded
-# docker compose run --rm test             regression + isolation tests
-# docker compose --profile bench run --rm bench   benchmarks (see tests/performance)
-#
-# The benchmarks run in a database of their own, leapfrog_bench, never in
-# PGDATABASE; tests/run-in-docker.sh runs in a Compose project unique to the
-# run and leaves this one and its volume alone.
-#
-# The test and bench containers mount this repository at /src/leapfrog and
-# run as a user with the ids LEAPFROG_UID:LEAPFROG_GID (default 1000:1000;
-# tests/run-in-docker.sh and "make docker-build" pass those of the user
-# running them), so that the files they write here are that user's.
-#
-# Environment: PG_MAJOR (default 18) is the PostgreSQL major version of the
-# images, LEAPFROG_TAG (default PG_MAJOR) their tag; LEAPFROG_PORT (default
-# 5433) is the host port of the server, published on LEAPFROG_BIND (default
-# 127.0.0.1, this machine only: the password is well known; 0.0.0.0 for
-# every interface); POSTGRES_PASSWORD defaults to "leapfrog".
+# docker compose up -d --build --wait (profiles test, bench); see docs/docker.md.
 
 name: leapfrog
 
@@ -35,8 +18,7 @@ services:
       - postgres
       - -c
       - shared_preload_libraries=leapfrog
-      # the rest of tests/scripts/temp.conf is in the image's
-      # postgresql.conf.sample, so in every new data directory
+      # the rest of tests/scripts/temp.conf is in postgresql.conf.sample
       - -c
       - shared_buffers=${LEAPFROG_SHARED_BUFFERS:-512MB}
     ports:
@@ -44,9 +26,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
-      # The extension must be installed and the data directory made by this
-      # image: a pgdata volume of an earlier image lacks the test settings
-      # (tests/scripts/temp.conf); recreate it with docker compose down -v.
+      # an older pgdata volume lacks the test settings: docker compose down -v
       test: ["CMD-SHELL", "pg_isready -U postgres -d leapfrog && psql -U postgres -d leapfrog -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'\" | grep -q 1 && psql -U postgres -d leapfrog -tAc 'SHOW lc_messages' | grep -qx C"]
       interval: 2s
       timeout: 5s

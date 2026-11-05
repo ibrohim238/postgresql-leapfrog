@@ -1,14 +1,4 @@
---
--- leapfrog_types
---
--- Equality columns of any type with a btree operator family (uuid, text,
--- varchar, smallint, integer, timestamptz) and integer sort columns of every
--- width.  Values of a by-reference type outlive the per-tuple memory they
--- are evaluated in, rows are rechecked with the column's own equality
--- operator and collation, and an index sorted in another collation than the
--- condition's is not used.  Results are compared with the standard plans
--- throughout.
---
+-- leapfrog_types: equality columns of any B-tree type, integer sort columns of every width
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 
@@ -23,7 +13,7 @@ CREATE TABLE lf_types (
 	deleted_at timestamptz,
 	payload text
 ) WITH (autovacuum_enabled = false);
--- 40,000 rows; hashed values, independent of each other and of id.
+-- hashed, independent values; the statistics target makes ANALYZE sample every row
 SET default_statistics_target = 200;
 INSERT INTO lf_types
 SELECT g,
@@ -44,8 +34,7 @@ CREATE INDEX lf_types_created_at_id ON lf_types (created_at, id);
 CREATE INDEX lf_types_live_id ON lf_types (id) WHERE deleted_at IS NULL;
 ANALYZE lf_types;
 
--- uuid, varchar and text equalities, with constants and with the
--- varchar = text comparison the parser produces for a text literal.
+-- uuid, varchar and text equalities, and the varchar = text comparison of a text literal
 SELECT * FROM lf_plan($$
 SELECT * FROM lf_types WHERE owner_id = '00000000-0000-0000-0000-000000000007'
 	AND status = 'sent' ORDER BY id LIMIT 20 $$);
@@ -53,7 +42,6 @@ SELECT lf_check($$ SELECT * FROM lf_types WHERE owner_id = '00000000-0000-0000-0
 SELECT lf_check($$ SELECT * FROM lf_types WHERE model_type = 'App\Models\Invoice' AND status = 'error' AND deleted_at IS NULL ORDER BY id DESC LIMIT 50 $$);
 SELECT lf_check($$ SELECT * FROM lf_types WHERE model_type = 'App\Models\Invoice'::text AND kind = 3 ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_types WHERE kind = 3::bigint AND created_at = '2026-01-02' ORDER BY id DESC $$);
--- a value no row has
 SELECT lf_check($$ SELECT * FROM lf_types WHERE model_type = 'App\Models\Feed' AND status = 'sent' ORDER BY id $$);
 
 -- Three streams of three different types.
@@ -76,8 +64,7 @@ RESET plan_cache_mode;
 SELECT id FROM lf_types WHERE status = 'sent' AND owner_id = '00000000-0000-0000-0000-000000000007' ORDER BY id LIMIT 5;
 SELECT id FROM lf_types WHERE status = 'draft' AND owner_id = '00000000-0000-0000-0000-000000000011' ORDER BY id LIMIT 5;
 
--- Values from the outer side of a nested loop: the text and uuid values
--- change on every rescan.
+-- Text and uuid values from the outer side change on every rescan.
 CREATE TABLE lf_types_pick (status text, owner_id uuid);
 INSERT INTO lf_types_pick VALUES
 	('sent', '00000000-0000-0000-0000-000000000007'),
@@ -87,9 +74,7 @@ SELECT lf_check($$
 SELECT p.status, t.id FROM lf_types_pick p
 CROSS JOIN LATERAL (SELECT id FROM lf_types t
 	WHERE t.status = p.status AND t.owner_id = p.owner_id ORDER BY id LIMIT 10) t $$, false);
--- Values computed from parameters and outer columns, evaluated once per
--- rescan as for an Index Cond: a parameter expression in a generic plan,
--- a join on an expression of the other side, a LATERAL expression.
+-- Expressions of parameters and outer columns, evaluated once per rescan as for an Index Cond
 SET plan_cache_mode = force_generic_plan;
 SET leapfrog.force = on;
 PREPARE lf_types_by_prefix(text, text) AS
@@ -120,9 +105,7 @@ SELECT id FROM lf_types WHERE status = (CASE WHEN random() >= 0 THEN 'sent' END)
 RESET leapfrog.force;
 DROP TABLE lf_types_pick;
 
--- Overflow: an inner group too large for work_mem (64kB holds about 10900
--- TIDs, each group has 20000) is checked on the row with the text and uuid
--- equalities of the inner stream.
+-- An inner group overflowing work_mem is checked with the text and uuid equalities.
 CREATE TABLE lf_types_overflow (
 	id bigint PRIMARY KEY,
 	owner_id uuid NOT NULL,
@@ -148,7 +131,6 @@ SELECT lf_check($$ SELECT * FROM lf_types_overflow WHERE owner_id = '00000000-00
 RESET work_mem;
 DROP TABLE lf_types_overflow;
 
--- Integer sort columns of every width.
 CREATE TABLE lf_types_sort (
 	id2 smallint NOT NULL,
 	id4 integer NOT NULL,
@@ -170,8 +152,7 @@ SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'c' AND kind = 0 O
 SELECT lf_check($$ SELECT * FROM lf_types_sort WHERE status = 'c' AND kind = 0 ORDER BY id4 DESC LIMIT 30 $$);
 DROP TABLE lf_types_sort;
 
--- Long text values, compressed in the index tuples, as constants and from
--- the outer side of a nested loop; HOT updates of the matched rows.
+-- Long text values, compressed in the index tuples; HOT updates of the matched rows
 CREATE TABLE lf_types_long (
 	id bigint PRIMARY KEY,
 	path text NOT NULL,
@@ -199,9 +180,7 @@ SELECT lf_check($$ SELECT id, payload FROM lf_types_long WHERE path = repeat(md5
 COMMIT;
 DROP TABLE lf_types_long;
 
--- A sort column of a domain over an integer type.  The ORDER BY equivalence
--- class holds the column relabeled to the base type, (id)::bigint, which
--- the pathkey match has to look through to the Var.
+-- A domain sort column: the pathkey holds (id)::bigint, looked through to the Var.
 CREATE DOMAIN lf_types_id AS bigint;
 CREATE DOMAIN lf_types_small_id AS integer CHECK (VALUE > 0);
 CREATE TABLE lf_types_domain (

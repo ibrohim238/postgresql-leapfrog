@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
-# Smoke test of the benchmark harness, so that CI catches a broken one.  Tiny runs of
-# list_bench.sh and uniform_bench.sh, checking that they:
-#   - replace helper objects left in another shape by an older version;
-#   - leave no lf_bitmap table behind, also on failure;
-#   - refuse an output directory that exists;
-#   - list_bench.sh: every scenario and mode runs, the node and the exact index are used;
-#   - never touch a database that is not theirs (no benchmark mark), and refuse
-#     one that another benchmark holds the lock of.
-#
-# Connection: PGHOST/PGPORT/PGUSER.  Scratch databases: leapfrog_bench_smoke and
-# leapfrog_bench_smoke_foreign, recognised by their comment and dropped; one of those
-# names without the comment is not touched, and the test fails.  One run per server.
+# Smoke test of the benchmark harness: tiny runs of list_bench.sh and uniform_bench.sh.
+# Usage: bench-smoke.sh
+# Environment: PGHOST/PGPORT/PGUSER.  See docs/tooling.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

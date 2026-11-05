@@ -1,11 +1,8 @@
-# yamllint configuration (make lint, tests/scripts/lint.sh).
 extends: default
 
 rules:
-  # the workflows and compose files start without "---"
   document-start: disable
-  # long shell commands and SQL in "run:" blocks; a longer line is reported
-  # but does not fail
+  # long shell commands and SQL in "run:" blocks
   line-length:
     max: 120
     level: warning

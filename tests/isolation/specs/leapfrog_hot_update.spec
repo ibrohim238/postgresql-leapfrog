@@ -1,7 +1,4 @@
-# HOT updates: a column outside both indexes is updated repeatedly while
-# another session reads.  The index entries point at the root of the HOT
-# chain; the scan follows the chain to the version visible to its snapshot
-# and returns each row exactly once.
+# HOT updates while another session reads: every row returned once, at its visible version.
 
 setup
 {
@@ -64,13 +61,11 @@ step s2_std	{
 }
 step s2_commit	{ COMMIT; }
 
-# A REPEATABLE READ reader keeps seeing v0 through three committed HOT
-# updates, with no duplicate rows; after its commit it sees the mix.
+# A REPEATABLE READ reader keeps seeing v0 through three HOT updates.
 permutation s2_begin_rr s2_versions s1_begin s1_v1 s1_v2 s1_v3 s1_commit s2_versions s2_versions_desc s2_unique s2_std s2_commit s2_versions s2_versions_desc s2_unique s2_std
 
 # The updates are HOT (the updated column is in no index).
 permutation s1_begin s1_v1 s1_hot_stats s1_commit
 
-# Uncommitted updates are invisible to a READ COMMITTED reader and visible
-# right after the commit.
+# Uncommitted updates are invisible to READ COMMITTED, visible after the commit.
 permutation s1_begin s1_v1 s2_versions s1_v2 s2_versions s1_commit s2_versions s2_unique s2_std

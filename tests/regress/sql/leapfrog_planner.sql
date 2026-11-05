@@ -1,11 +1,4 @@
---
--- leapfrog_planner
---
--- The work planning does, by the counts of leapfrog.trace_planner: time is not
--- something a test can check.  One pass over the candidates; statistics, range
--- and correlation read once however many sets ask; no costing for a stream that
--- cannot pay for itself.
---
+-- leapfrog_planner: planning work by the counts of leapfrog.trace_planner; estimates from statistics
 SET max_parallel_workers_per_gather = 0;
 
 CREATE TABLE lf_pl (id bigint PRIMARY KEY, f1 integer NOT NULL, f2 integer NOT NULL,
@@ -33,8 +26,7 @@ SET leapfrog.trace_planner = on;
 -- A pair: one range probe per stream, statistics and correlation once.
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl WHERE f1 = 1 AND f2 = 2 ORDER BY id LIMIT 10;
 
--- Six equalities: the third stream makes the set dearer, and what is left to
--- fetch cannot pay for a fourth: no set, no range probe for it.
+-- Six equalities: what is left to fetch cannot pay for a fourth stream, so no range probe for it.
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl
 WHERE f1 = 1 AND f2 = 2 AND f3 = 3 AND f4 = 4 AND f5 = 5 AND f6 = 6 ORDER BY id LIMIT 10;
 
@@ -44,16 +36,14 @@ EXPLAIN (COSTS OFF) SELECT id FROM lf_pl
 WHERE f1 = 1 AND f2 = 2 AND f3 = 3 AND f4 = 4 AND f5 = 5 AND f6 = 6 ORDER BY id LIMIT 10;
 RESET leapfrog.min_indexes;
 
--- A stream with a predicate does not become the outer one: the set that follows
--- has the same outer stream, whose correlation is read once.
+-- A stream with a predicate is not the outer one: the outer correlation is read once.
 CREATE INDEX lf_pl_any ON lf_pl (id) WHERE f6 >= 0;
 SET leapfrog.min_indexes = 3;
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl WHERE f1 = 1 AND f2 = 2 AND f6 >= 0 ORDER BY id LIMIT 10;
 RESET leapfrog.min_indexes;
 DROP INDEX lf_pl_any;
 
--- Statistics in another order than the query's cannot tell: the selectivity
--- functions do.
+-- An order other than the statistics' one: the selectivity functions decide.
 CREATE INDEX lf_pl_f1_val ON lf_pl (f1, val text_pattern_ops);
 CREATE INDEX lf_pl_f2_val ON lf_pl (f2, val text_pattern_ops);
 SET leapfrog.force = on;
@@ -62,8 +52,7 @@ RESET leapfrog.force;
 RESET leapfrog.trace_planner;
 DROP TABLE lf_pl;
 
--- No row comes before the inner stream has read the whole group of the first
--- value: at the newest end one value has most of the rows.
+-- At the newest end one value has most of the rows.
 CREATE TABLE lf_pl_group (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, ts integer NOT NULL)
 	WITH (autovacuum_enabled = false);
 INSERT INTO lf_pl_group
@@ -98,9 +87,7 @@ SELECT lf_check($$ SELECT id FROM lf_pl_group WHERE a = 7 AND b = 2 ORDER BY ts 
 DROP FUNCTION lf_pl_startup(text);
 DROP TABLE lf_pl_group;
 
--- The estimate from the statistics read once, where the streams hold parts of
--- the sort column's range: 40000 rows, a = 1 in the first 40 %, b = 1 in the last
--- 80 %, each every other row of its part in a pattern that keeps them independent.
+-- a = 1 in the first 40 % of ids, b = 1 in the last 80 %, independent within their parts
 CREATE TABLE lf_pl_range (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL)
 	WITH (autovacuum_enabled = false);
 INSERT INTO lf_pl_range
@@ -124,14 +111,12 @@ BEGIN
 		'$.** ? (@."Custom Plan Provider" == "Index Merge Intersect")')->>'Plan Rows')::float8;
 END
 $$;
--- the overlap is 8001..16000: 2000 rows there, far from the 4800 of independence
--- over the whole table
+-- the overlap 8001..16000 holds 2000 rows; independence over the table would say 4800
 SELECT count(*) AS actual FROM lf_pl_range WHERE a = 1 AND b = 1;
 SELECT lf_pl_plan_rows($$ SELECT id FROM lf_pl_range WHERE a = 1 AND b = 1 ORDER BY id $$)
 	BETWEEN 1500 AND 2700 AS estimate_in_the_overlap;
 SELECT lf_check($$ SELECT id FROM lf_pl_range WHERE a = 1 AND b = 1 ORDER BY id $$);
--- An overlap inside one bin of the histogram, 100 ids of its 200: by value, not
--- nothing.
+-- An overlap inside one histogram bin is estimated by value, not as nothing.
 UPDATE lf_pl_range SET a = (id <= 20100 AND abs(hashint8(id)) % 2 = 0)::int,
 	b = (id > 20000 AND abs(hashint8(id * 3)) % 2 = 0)::int;
 VACUUM lf_pl_range;
@@ -145,10 +130,7 @@ SELECT lf_check($$ SELECT id FROM lf_pl_range WHERE a = 1 AND b = 1 ORDER BY id 
 DROP FUNCTION lf_pl_plan_rows(text);
 DROP TABLE lf_pl_range;
 
--- A large index that restricts most, as extended statistics tell: live rows are
--- half the table and the largest index, but rare for this customer.  The pass by
--- size would add the product's index first and never price the customer with the
--- live rows alone.
+-- Live rows: the largest index, but rare for this customer (extended statistics).
 CREATE TABLE lf_pl_pair (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
@@ -185,8 +167,7 @@ SELECT lf_check($$ SELECT id FROM lf_pl_pair WHERE customer_id = 0 AND product_i
 SELECT line FROM lf_plan($$ SELECT id FROM lf_pl_pair WHERE customer_id = 0 AND product_id = 1 AND deleted_at IS NULL ORDER BY id DESC $$) AS line
 WHERE line LIKE '%Stream on%';
 COMMIT;
--- a parameterized customer: the pairs do not take the place of the set with the
--- parameter, and the plan keeps the nested loop into it
+-- a parameterized customer: the plan keeps the nested loop into the set with the parameter
 EXPLAIN (COSTS OFF)
 SELECT o.c, l.id FROM (VALUES (0::bigint), (1)) o(c), LATERAL (
 	SELECT id FROM lf_pl_pair WHERE customer_id = o.c AND product_id = 1 AND deleted_at IS NULL
@@ -196,8 +177,7 @@ SELECT lf_check($$ SELECT o.c, l.id FROM (VALUES (0::bigint), (1)) o(c), LATERAL
 	ORDER BY id DESC LIMIT 3) l $$);
 DROP TABLE lf_pl_pair;
 
--- Statistics that do not cover two columns of the conditions change nothing: no
--- pairs are priced (the sets in the NOTICE); with an MCV list on two of them they are.
+-- Pairs are priced only with an MCV list on two condition columns (the sets in the NOTICE).
 CREATE TABLE lf_pl_gate (id bigint PRIMARY KEY, a int NOT NULL, b int NOT NULL, e int NOT NULL, c int, d int);
 INSERT INTO lf_pl_gate SELECT g, g % 7, g % 11, g % 13, g % 3, g % 5 FROM generate_series(1, 20000) g;
 CREATE INDEX ON lf_pl_gate (a, id);
@@ -216,8 +196,7 @@ RESET leapfrog.force;
 RESET leapfrog.trace_planner;
 DROP TABLE lf_pl_gate;
 
--- A partial index's entries with the equality correlated to its predicate: 18,000 for
--- this customer, where taken as independent the conditions make 2,000.
+-- Partial index entries correlated with its predicate: 18,000 for this customer, not 2,000.
 CREATE TABLE lf_pl_corr (id bigint PRIMARY KEY, customer_id bigint NOT NULL, product_id bigint NOT NULL, deleted_at timestamptz);
 INSERT INTO lf_pl_corr
 SELECT g, CASE WHEN g % 10 = 0 THEN 0 ELSE g % 9 + 1 END, g % 2,

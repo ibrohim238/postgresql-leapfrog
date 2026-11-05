@@ -1,11 +1,4 @@
---
--- leapfrog_sort_types
---
--- Sort columns of any B-tree type: the merge compares them with the pathkey's
--- own comparator, and a by-reference value survives the streams moving on.
--- Ties in the sort column are broken by id above the node, so that the order
--- is deterministic for lf_check.
---
+-- leapfrog_sort_types: sort columns of any B-tree type; ties are broken by id above the node.
 SET max_parallel_workers_per_gather = 0;
 CREATE TYPE lf_st_mood AS ENUM ('sad', 'ok', 'happy');
 CREATE DOMAIN lf_st_code AS text;
@@ -26,8 +19,7 @@ CREATE TABLE lf_st (
 	code lf_st_code NOT NULL,
 	r real NOT NULL
 ) WITH (autovacuum_enabled = false);
--- 3000 distinct values over 30000 rows, in hashed physical order; numeric
--- values equal in different scales, long text that needs many leaf pages.
+-- numeric values equal in different scales, long text that needs many leaf pages
 INSERT INTO lf_st
 SELECT g,
 	abs(hashint8(g * 3)) % 20,
@@ -56,7 +48,6 @@ BEGIN
 END
 $$;
 ANALYZE lf_st;
--- Every type, both directions, with and without LIMIT: same rows as stock.
 SELECT col, ord, lim, lf_check(format(
 	'SELECT id, owner_id, kind FROM lf_st WHERE owner_id = 3 AND kind = 2 ORDER BY %s %s, id %s',
 	col, ord, lim))
@@ -152,7 +143,6 @@ SELECT lf_check($$ SELECT id FROM lf_st WHERE owner_id = 3 AND kind = 2 ORDER BY
 (1 row)
 
 -- Skip-ahead with long text: the bound must outlive the stream it came from.
--- One stream is dense, one holds only the upper half of the values.
 CREATE TABLE lf_st_skip (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val text NOT NULL)
 	WITH (autovacuum_enabled = false);
 INSERT INTO lf_st_skip
@@ -258,8 +248,7 @@ SELECT id FROM lf_st_big WHERE a = 1 AND b = 1 ORDER BY val $$) WHERE counter = 
 
 DROP TABLE lf_st_big;
 RESET work_mem;
--- Collations: an index sorted in another collation than the query's is no
--- stream of its order, alone or paired.
+-- An index in another collation than the query's is no stream of its order, alone or paired.
 SELECT lf_check($$ SELECT id FROM lf_st WHERE owner_id = 3 AND kind = 2 ORDER BY txt COLLATE "C", id LIMIT 5 $$);
                     lf_check                     
 -------------------------------------------------

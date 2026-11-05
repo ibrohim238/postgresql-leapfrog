@@ -1,18 +1,8 @@
 #!/usr/bin/env bash
-# Cost model check: estimated cost against measured time, on skewed and correlated
-# data.  Columns: customer_id, product_id (hashed), region (follows the heap order),
-# deleted_at (10 % of the oldest 20 % of ids), archived (1.6 %, uniform).
-# Modes: leapfrog on, forced (stock scans disabled, keeps the real estimate), off.
-#
-# The summary marks:
-#   miss       forced node > 15 % faster than the planner's choice, which is not it
-#   wrong      the planner chose the node, stock > 15 % faster
-#   bias       (node cost / ms) / (stock cost / ms); above 1 the node is overcosted
-#   est_ratio  entries expected / read; meaningful without LIMIT
-#
-# Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); ROWS (1000000),
-# REPEATS (5), RANDOM_PAGE_COST (4), BENCH_OUT (must not exist).
-# Output: results/cost-<timestamp>/cost.csv and a summary.
+# Cost model check: estimated cost against measured time, skewed and correlated data.
+# Usage: [VAR=value ...] cost_bench.sh
+# Environment: PGHOST/PGPORT/PGUSER, BENCH_DB, ROWS, REPEATS, RANDOM_PAGE_COST,
+# BENCH_OUT.  See docs/benchmarks.md.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -122,9 +112,7 @@ for c in "${conditions[@]}"; do
 		for mode in on force off; do
 			case $mode in
 				on) set_mode="" ;;
-				# leapfrog.force scales the node's cost down; with the stock
-				# scans disabled the node wins on disabled_nodes and keeps
-				# its estimated cost
+				# not leapfrog.force: it scales the node's cost down
 				force) set_mode="SET enable_seqscan = off; SET enable_indexscan = off; SET enable_indexonlyscan = off; SET enable_bitmapscan = off;" ;;
 				off) set_mode="SET leapfrog.enabled = off;" ;;
 			esac

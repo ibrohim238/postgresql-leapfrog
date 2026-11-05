@@ -1,7 +1,4 @@
-# EvalPlanQual with a nullable sort column: a row whose sort value becomes NULL
-# while it is being locked.  The sort position is taken from the old version,
-# as for an Index Scan.  Every permutation runs with the node and with the
-# stock plan under the same interleaving.
+# EvalPlanQual with a nullable sort column: the sort position comes from the old version, as for an Index Scan.
 
 setup
 {

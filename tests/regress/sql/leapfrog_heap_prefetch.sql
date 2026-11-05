@@ -1,11 +1,4 @@
---
--- leapfrog_heap_prefetch
---
--- Where the node's Filter drops most rows, matches are gathered ahead and their
--- heap pages asked for before they are fetched, in the order found.  Without a
--- Filter, or where it drops few rows, one match is fetched at a time, so that a
--- LIMIT reads no further in the indexes.
---
+-- leapfrog_heap_prefetch: heap pages asked for ahead when the Filter drops most rows.
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 SET effective_io_concurrency = 16;
@@ -41,7 +34,6 @@ SELECT counter, value FROM lf_counters($$
 	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$)
 WHERE counter IN ('Matched TIDs', 'Heap Fetches');
 
--- off turns it off
 SET leapfrog.prefetch = off;
 SELECT count(*) AS asked FROM lf_counters($$
 	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$)
@@ -65,7 +57,6 @@ SELECT counter, value FROM lf_counters($$
 	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND payload IS NOT NULL ORDER BY id DESC LIMIT 5 $$)
 WHERE counter IN ('Heap Fetches');
 
--- a non-unique sort column: the rows of one value keep their matching
 SELECT lf_check($$ SELECT sort_key, id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id $$, false);
 
 -- rescans start with an empty queue and a target of 1
@@ -74,7 +65,7 @@ SELECT lf_check($$
 		SELECT id FROM lf_hp WHERE customer_id = o.c AND product_id = 0 AND deleted_at IS NULL
 		ORDER BY id DESC LIMIT 3) l $$);
 
--- a cursor stopped with matches in the queue returns the rows of the stock plan
+-- a cursor stopped with matches in the queue
 SET leapfrog.enabled = off;
 SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 4;
 RESET leapfrog.enabled;
@@ -89,21 +80,17 @@ FETCH 2 FROM lf_hp_cursor;
 CLOSE lf_hp_cursor;
 COMMIT;
 
--- FOR UPDATE: the same rows through the node, with the queue in use
 SELECT lf_check($$ SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE $$);
 SELECT counter, (value)::bigint > 0 AS asked FROM lf_counters($$
 	SELECT id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC LIMIT 3 FOR UPDATE $$)
 WHERE counter = 'Heap Prefetches';
 
--- a group overflowing work_mem is fetched on its own, after what is queued
 BEGIN;
 SET LOCAL work_mem = '64kB';
 SELECT lf_check($$ SELECT sort_key, id FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id $$, false);
 ROLLBACK;
 
--- dead rows and HOT chains among the queued matches; an entry the queue found
--- dead must not get the entry the scan stands on marked dead: every live row
--- stays reachable through its index afterwards
+-- dead rows and HOT chains in the queue: every live row stays reachable through its index
 UPDATE lf_hp SET payload = 'hot' WHERE customer_id = 0 AND product_id = 0 AND id % 1200 = 0;
 DELETE FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND id % 7 = 0;
 SELECT lf_check($$ SELECT id, payload FROM lf_hp WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
@@ -125,8 +112,7 @@ RESET leapfrog.enabled;
 
 DROP TABLE lf_hp;
 
--- rows found wait for no long stretch: the rows the Filter drops grow the target,
--- then three pass, then the streams hold no common value for 200,000 entries
+-- a LIMIT does not wait for a 200,000-entry stretch without a common value
 CREATE TABLE lf_hp_gap (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
@@ -147,11 +133,7 @@ SELECT counter, (value)::bigint < 20000 AS bounded FROM lf_counters($$
 WHERE counter IN ('Outer Entries Read', 'Inner Entries Read');
 DROP TABLE lf_hp_gap;
 
--- A queued row found dead must mark no other entry.  From the top: rows the Filter
--- drops, which grow the target; rows deleted, which end up in the queue; then a stretch
--- without a common value, where the queue is fetched with the outer scan already on a
--- live entry of another row.  That entry would be marked dead on the next step, and
--- the row lost to every scan of the index: the counts must stay equal to the heap's.
+-- A queued row found dead must not get the outer scan's current entry marked dead.
 CREATE TABLE lf_hp_kill (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
@@ -189,7 +171,7 @@ RESET enable_bitmapscan;
 RESET leapfrog.enabled;
 DROP TABLE lf_hp_kill;
 
--- a Filter that drops few rows does not grow the target: one row in ten
+-- a Filter that drops one row in ten does not grow the target
 CREATE TABLE lf_hp_few (id bigint PRIMARY KEY, customer_id bigint NOT NULL, product_id bigint NOT NULL);
 INSERT INTO lf_hp_few SELECT g, g % 2, g % 3 FROM generate_series(1, 30000) g;
 CREATE INDEX lf_hp_few_customer ON lf_hp_few (customer_id, id);
@@ -201,9 +183,7 @@ WHERE counter = 'Heap Prefetches';
 SELECT lf_check($$ SELECT id FROM lf_hp_few WHERE customer_id = 0 AND product_id = 0 AND id % 10 <> 0 ORDER BY id DESC LIMIT 50 $$);
 DROP TABLE lf_hp_few;
 
--- the same wait within one value of a non-unique sort column: after the rows the
--- Filter drops and three that pass, a value with 100,000 entries on each side and
--- no row in common; the outer entries looked up by TID count as a stretch too
+-- the same wait within one value of a non-unique sort column
 CREATE TABLE lf_hp_group (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
@@ -221,14 +201,12 @@ CREATE INDEX lf_hp_group_customer ON lf_hp_group (customer_id, sort_key);
 CREATE INDEX lf_hp_group_product ON lf_hp_group (product_id, sort_key);
 VACUUM ANALYZE lf_hp_group;
 SELECT lf_check($$ SELECT id FROM lf_hp_group WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id LIMIT 3 $$, false);
--- the group alone counts: fetched before any of its outer entries is looked up
 SELECT counter, (value)::bigint < 3000 AS bounded FROM lf_counters($$
 	SELECT id FROM lf_hp_group WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC LIMIT 3 $$)
 WHERE counter = 'Outer Entries Read';
 DROP TABLE lf_hp_group;
 
--- a small inner group, so that the lookups alone count: the customer has 100 rows of
--- the value, the product 100,000, none of them in common
+-- a small inner group, so that the outer lookups by TID alone count
 CREATE TABLE lf_hp_lookup (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
@@ -254,7 +232,7 @@ SELECT counter, (value)::bigint < 20000 AS bounded FROM lf_counters($$
 WHERE counter = 'Outer Entries Read';
 DROP TABLE lf_hp_lookup;
 
--- row versions the snapshot does not see are heap reads for nothing as well
+-- invisible row versions are heap reads for nothing as well
 CREATE TABLE lf_hp_dead (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
@@ -276,8 +254,7 @@ SELECT lf_check($$ SELECT id FROM lf_hp_dead WHERE customer_id = 0 AND product_i
 ROLLBACK;
 DROP TABLE lf_hp_dead;
 
--- The queue is fetched ahead of an overflowing group with the scan already on
--- that group's first entry: a queued row found dead must not mark that entry.
+-- Queue fetched with the scan on an overflowing group's first entry: that entry stays live.
 CREATE TABLE lf_hp_over (
 	id bigint PRIMARY KEY,
 	customer_id bigint NOT NULL,
@@ -285,7 +262,6 @@ CREATE TABLE lf_hp_over (
 	sort_key bigint NOT NULL,
 	deleted_at timestamptz
 );
--- from the top: rows the Filter drops, then rows to delete, then one large group
 INSERT INTO lf_hp_over
 SELECT g, 0, 0, CASE WHEN g <= 30000 THEN 0 ELSE g END,
 	CASE WHEN g > 30500 THEN '2026-01-01'::timestamptz END
@@ -315,9 +291,7 @@ RESET enable_indexonlyscan;
 RESET enable_bitmapscan;
 RESET leapfrog.enabled;
 
--- Three streams, one group overflowing, one stream without the entry the scan
--- stands on, so that it is passed over without a fetch: every row stays reachable
--- through both indexes.
+-- Three streams, one passed over without a fetch: every row stays reachable.
 ALTER TABLE lf_hp_over ADD COLUMN kind int NOT NULL DEFAULT 1;
 UPDATE lf_hp_over SET kind = 0 WHERE id > 30500 OR (id % 300 = 0 AND id <> 30000);
 DELETE FROM lf_hp_over WHERE id > 30500 AND id <= 30600;

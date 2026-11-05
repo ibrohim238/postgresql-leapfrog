@@ -1,18 +1,10 @@
---
--- leapfrog_merge_order
---
--- The rule is that of a MySQL index merge: indexes merge when they read in the
--- same order once their equalities are fixed.  The streams take turns catching up
--- with a candidate, sparsest first, so a dense stream reads only around the values
--- the sparser ones agree on.
---
+-- leapfrog_merge_order: indexes merge when they read in the same order; the sparsest stream leads.
 SET max_parallel_workers_per_gather = 0;
 
 CREATE TABLE lf_mo (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL,
 	c integer NOT NULL, x integer NOT NULL, p integer NOT NULL, q integer NOT NULL)
 	WITH (autovacuum_enabled = false);
--- a = 1: 400 rows; b = 1: 357; they agree on 100, every 2000 ids; c = 1: half
--- of the rows, about 1000 entries between two values a and b agree on
+-- a = 1 and b = 1 agree on 100 rows; c = 1 is half the table, the dense stream.
 INSERT INTO lf_mo
 SELECT g, (g % 500 = 0)::int, (g % 2000 = 0 OR g % 777 = 0)::int,
 	(abs(hashint8(g * 5)) % 2 = 0)::int, g % 1000,
@@ -25,8 +17,7 @@ SET default_statistics_target = 1000;
 ANALYZE lf_mo;
 RESET default_statistics_target;
 
--- The dense stream reads a fraction of its 100000 entries: the values a and b
--- agree on, not all of a's.
+-- The dense stream reads only around the values a and b agree on.
 SET leapfrog.min_indexes = 3;
 SELECT lf_check($$ SELECT id FROM lf_mo WHERE a = 1 AND b = 1 AND c = 1 ORDER BY id $$);
 SELECT max(value::bigint) BETWEEN 1000 AND 12000 AS few_entries
@@ -34,8 +25,7 @@ FROM lf_counters($$ SELECT id FROM lf_mo WHERE a = 1 AND b = 1 AND c = 1 ORDER B
 WHERE counter LIKE '%Entries Read%';
 RESET leapfrog.min_indexes;
 
--- Columns after the sort column do not change the order it reads in, on either
--- side of the node.
+-- Columns after the sort column do not change its order.
 DROP INDEX lf_mo_a, lf_mo_b;
 CREATE INDEX lf_mo_a_tail ON lf_mo (a, id, x);
 CREATE INDEX lf_mo_b_tail ON lf_mo (b, id, x);
@@ -52,9 +42,7 @@ SELECT lf_check($$ SELECT id FROM lf_mo WHERE p = 1 AND q = 1 ORDER BY id LIMIT 
 SELECT lf_check($$ SELECT id FROM lf_mo WHERE p = 1 AND q = 1 ORDER BY id DESC LIMIT 500 $$);
 DROP INDEX lf_mo_p, lf_mo_q;
 
--- A stream that needs a parameter from a join, here the sparsest, does not take
--- the set without parameters away: on the outer side of the join the node gives
--- its order.
+-- A stream that needs a join parameter does not take away the set without parameters.
 CREATE INDEX lf_mo_a ON lf_mo (a, id);
 CREATE INDEX lf_mo_b ON lf_mo (b, id);
 CREATE INDEX lf_mo_x ON lf_mo (x, id);
@@ -68,8 +56,7 @@ SELECT lf_check($$ SELECT t.id FROM lf_mo t JOIN lf_mo_pick k ON t.x = k.x
 DROP TABLE lf_mo_pick;
 DROP INDEX lf_mo_a, lf_mo_b, lf_mo_x;
 
--- Indexes that do not read in that order are no streams: (a) with a fixed reads
--- by TID, and BitmapAnd is the plan for those.
+-- (a) alone reads by TID, not in id order: no stream, BitmapAnd is the plan.
 CREATE INDEX lf_mo_ax ON lf_mo (a);
 CREATE INDEX lf_mo_bx ON lf_mo (b);
 SELECT lf_check($$ SELECT id FROM lf_mo WHERE a = 1 AND b = 1 ORDER BY id $$);

@@ -1,11 +1,4 @@
---
--- leapfrog_nulls
---
--- A nullable sort column: NULL is a value of the merge in B-tree order, and
--- the NULL group is intersected by TID like any other.  A bound on a value
--- excludes NULLs, so a stream that skipped goes back for them when they come
--- after the values.
---
+-- leapfrog_nulls: a nullable sort column; NULL is a value of the merge, in B-tree order.
 SET max_parallel_workers_per_gather = 0;
 CREATE TABLE lf_null (
 	id bigint PRIMARY KEY,
@@ -31,7 +24,6 @@ CREATE INDEX lf_null_b_txt ON lf_null (b, txt);
 CREATE INDEX lf_null_a_txt_first ON lf_null (a, txt NULLS FIRST);
 CREATE INDEX lf_null_b_txt_first ON lf_null (b, txt NULLS FIRST);
 ANALYZE lf_null;
--- All four orders, with and without LIMIT, by-value and by-reference.
 SELECT col, ord, lim, lf_check(format(
 	'SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY %s %s, id %s', col, ord, lim))
 FROM unnest(ARRAY['val', 'txt']) col,
@@ -66,7 +58,6 @@ ORDER BY 1, 2, 3;
  val | DESC NULLS LAST  | LIMIT 60 | custom scan: t, rows: 60/60, missing: 0, extra: 0
 (24 rows)
 
--- Each order uses the indexes whose NULLs lie where the query wants them.
 SELECT * FROM lf_plan($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val ASC NULLS LAST LIMIT 5 $$);
                        lf_plan                        
 ------------------------------------------------------
@@ -111,7 +102,7 @@ SELECT * FROM lf_plan($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY v
                Index Cond: (b = 2)
 (6 rows)
 
--- Indexes with their NULLs at the other end are no use for this order.
+-- Indexes with their NULLs at the other end are no use for this order, nor is a mixed pair.
 DROP INDEX lf_null_a_first, lf_null_b_first;
 SELECT lf_check($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val ASC NULLS FIRST, id LIMIT 5 $$);
                     lf_check                     
@@ -125,7 +116,6 @@ SELECT lf_check($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val DES
  custom scan: f, rows: 5/5, missing: 0, extra: 0
 (1 row)
 
--- nor is a mixed pair
 CREATE INDEX lf_null_b_first ON lf_null (b, val NULLS FIRST);
 DROP INDEX lf_null_b_last;
 SELECT lf_check($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val, id LIMIT 5 $$);
@@ -135,9 +125,7 @@ SELECT lf_check($$ SELECT id FROM lf_null WHERE a = 3 AND b = 2 ORDER BY val, id
 (1 row)
 
 DROP TABLE lf_null;
--- Skip-ahead across the NULL boundary.  Stream "sparse" has a few values and
--- its NULLs; stream "dense" has many values and its NULLs: with NULLs after
--- the values the dense stream skips on values and must come back for them.
+-- A bound excludes NULLs: a stream that skipped on values must come back for the NULLs after them.
 CREATE TABLE lf_null_skip (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val bigint, note text)
 	WITH (autovacuum_enabled = false);
 INSERT INTO lf_null_skip
@@ -172,8 +160,7 @@ WHERE c.counter = 'Skips' ORDER BY 1;
  DESC NULLS LAST | t
 (2 rows)
 
--- The target of a skip is the NULL group: one stream has values far behind
--- and the other only NULLs.
+-- The target of a skip is the NULL group.
 UPDATE lf_null_skip SET a = 2 WHERE a = 1 AND val IS NOT NULL;
 UPDATE lf_null_skip SET a = 1 WHERE val IS NULL;
 VACUUM ANALYZE lf_null_skip;
@@ -195,8 +182,7 @@ WHERE c.counter = 'Skips';
  t
 (1 row)
 
--- NULLs in one stream only: with NULLs first the other stream, already on a
--- value, is ahead and waits; with NULLs last the one still on values leads.
+-- NULLs in one stream only
 CREATE TABLE lf_null_one (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val bigint);
 INSERT INTO lf_null_one
 SELECT g, CASE WHEN g % 10 = 0 THEN 2 ELSE 1 END, g % 2,
@@ -224,8 +210,7 @@ ORDER BY 1, 2;
 (8 rows)
 
 DROP TABLE lf_null_one;
--- The planner's estimate: the values of the streams do not overlap, the NULLs
--- do, so the node expects rows.
+-- The values of the streams do not overlap, the NULLs do: the node expects rows.
 CREATE TABLE lf_null_range (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val bigint);
 INSERT INTO lf_null_range
 SELECT g, CASE WHEN g <= 5000 THEN 1 ELSE 2 END, CASE WHEN g <= 5000 THEN 2 ELSE 1 END,
@@ -261,8 +246,7 @@ SELECT lf_check($$ SELECT id FROM lf_null_range WHERE a = 1 AND b = 1 ORDER BY v
 (1 row)
 
 DROP TABLE lf_null_range;
--- Row versions: a value that becomes NULL and back, HOT updates in the NULL
--- group.
+-- A value that becomes NULL and back, HOT updates in the NULL group
 SELECT lf_check($$ SELECT id FROM lf_null_skip WHERE a = 1 AND b = 1 ORDER BY val, id LIMIT 20 $$);
                      lf_check                      
 ---------------------------------------------------
@@ -291,10 +275,7 @@ SELECT lf_check($$ SELECT id, val FROM lf_null_skip WHERE a = 1 AND b = 1 ORDER 
 (1 row)
 
 DROP TABLE lf_null_skip;
--- A strict restriction on the sort column leaves its NULLs out: no row with
--- one is in the result, so an index serves the order with its NULLs at either
--- end, and the streams do not read them.  The pair below has its NULLs at
--- opposite ends: no order is served without such a restriction.
+-- A strict restriction leaves the NULLs out: the pair, NULLs at opposite ends, serves every order.
 CREATE TABLE lf_null_strict (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val bigint)
 	WITH (autovacuum_enabled = false);
 INSERT INTO lf_null_strict
@@ -321,7 +302,6 @@ SELECT * FROM lf_plan($$ SELECT id FROM lf_null_strict WHERE a = 3 AND b = 2 AND
                Index Cond: (a = 3)
 (7 rows)
 
--- strict: an operator, IS NOT NULL, = ANY, in all four orders
 SELECT cond, ord, lim, lf_check(format(
 	'SELECT id, val FROM lf_null_strict WHERE a = 3 AND b = 2 AND %s ORDER BY val %s, id %s', cond, ord, lim))
 FROM unnest(ARRAY['val > 0', 'val IS NOT NULL', 'val = ANY (ARRAY[1, 52, 502, 997])']) cond,
@@ -367,7 +347,6 @@ ORDER BY cond COLLATE "C";
  COALESCE(val, 0) > 0     | custom scan: f, rows: 5/5, missing: 0, extra: 0
 (2 rows)
 
--- a parameter: the value comes from the outer row
 SELECT lf_check($$ SELECT p.x, s.id, s.val FROM (VALUES (0), (500), (NULL)) p(x),
 	LATERAL (SELECT id, val FROM lf_null_strict WHERE a = 3 AND b = 2 AND val > p.x
 		ORDER BY val DESC NULLS FIRST, id LIMIT 5) s $$, false);

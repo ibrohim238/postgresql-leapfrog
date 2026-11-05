@@ -1,51 +1,8 @@
 /*-------------------------------------------------------------------------
  *
  * leapfrog.c
- *	  Index Merge Intersect custom scan: intersection of btree indexes by
- *	  merging their sorted streams.  Module entry point, settings and
- *	  SQL-callable functions.
- *
- * With every column before sortcol fixed by equality with a value known at
- * execution time, the scans of the indexes produce sortcol values in the same
- * order (planner.c).  The merge column may be of any type with a btree
- * operator family: values compare with the comparator of the query's sort
- * key, and NULLs are values of the merge, in the order the query asks for.
- *
- * The entries of one value are matched by heap TID as well (executor.c), so
- * the merge stays correct when sortcol is not unique or dead row versions are
- * still in the index.  The TIDs of one value are not in a usable order on both
- * sides (a backward scan returns posting-list TIDs ascending), so the inner
- * entries of the value are collected into a sorted group and the outer entries
- * are looked up in it.  The path is offered only when the estimated inner
- * entries per value fit into work_mem, and at execution time a group that
- * outgrows work_mem is abandoned for that value: its outer entries are all
- * fetched from the heap and checked against the inner index conditions
- * (equalities and predicate) before the node's qual sees them, so the fallback
- * does not depend on what the qual holds.  The heap is otherwise visited only
- * for matches, walking HOT chains the way index_getnext_slot does.
- *
- * leapfrog.force chooses the intersection whenever a suitable set of indexes
- * exists, regardless of the cost of other plans; the cheapest set still wins.
- * It is a diagnostic knob and can make a query far slower.
- *
- * Under EvalPlanQual the scan rechecks what it guaranteed by construction, as
- * an index scan rechecks indexqualorig: the equalities on the columns of the
- * indexes and the predicate of an inner index.
- *
- * Limitations: the scan covers a single relation only; a partitioned table
- * gets one per partition.
- *
- * The library installs set_rel_pathlist_hook from _PG_init, so it must be
- * loaded into the backend: shared_preload_libraries, session_preload_libraries
- * or LOAD.  CREATE EXTENSION registers SQL helpers only; PostgreSQL never
- * unloads a shared library, so the hook stays until the backend exits and
- * leapfrog.enabled = off is the way to switch it off.
- *
- * leapfrog.require_node is a guard for the tests, after TimescaleDB's
- * timescaledb.debug_require_vector_agg: a planner_hook looks at every final
- * plan and raises an error when it lacks the node under "require" or holds
- * one under "forbid", so that a test meant for the node cannot pass through a
- * stock plan unnoticed.
+ *	  Index Merge Intersect custom scan: module entry point, settings and
+ *	  SQL-callable functions.  Design notes are in docs/design.md.
  *
  * IDENTIFICATION
  *	  src/leapfrog.c
@@ -70,14 +27,7 @@ PG_MODULE_MAGIC_EXT(
 					.version = LEAPFROG_VERSION
 );
 
-/*
- * A lagging scan is re-positioned once it has read this many entries in a row
- * without catching up.  A re-descent costs tree_height buffer accesses plus
- * restarting the scan, while a leaf page holds about 400 int8 entries, so a
- * skip pays only when it moves past the next leaf page.  This is the start of
- * each side's adaptive threshold (SkipAhead in executor.c); measurements are
- * in the README, 16 and 32 differ from 64 by less than 5 %.
- */
+/* Starting skip-ahead threshold, in entries; see docs/design.md. */
 #define INTERSECT_SKIP_AFTER 64
 
 bool		intersect_enabled = true;
@@ -89,7 +39,6 @@ PlannerTrace lf_trace;
 int			intersect_max_streams = 4;
 int			intersect_min_streams = 2;
 
-/* leapfrog.require_node */
 typedef enum RequireNode
 {
 	REQUIRE_NODE_ALLOW,
@@ -234,9 +183,8 @@ _PG_init(void)
 
 /*
  * intersect_planner
- *		planner_hook: plan the query as usual, then enforce
- *		leapfrog.require_node on the final plan.  EXPLAIN plans through here
- *		as well, so it fails the same way the query would.
+ *		planner_hook: plan as usual, then enforce leapfrog.require_node on
+ *		the final plan.
  */
 static PlannedStmt *
 intersect_planner(LF_PLANNER_ARGS)
@@ -269,9 +217,8 @@ intersect_planner(LF_PLANNER_ARGS)
 
 /*
  * plan_has_node
- *		Does the plan tree contain an Index Merge Intersect node?  The plans
- *		of SubPlans and CTEs are in PlannedStmt.subplans, not in the tree;
- *		the caller checks them.
+ *		Does the plan tree contain the node?  PlannedStmt.subplans are not
+ *		in the tree; the caller checks them.
  */
 static bool
 plan_has_node(Plan *plan)
@@ -318,8 +265,7 @@ plan_has_node(Plan *plan)
 
 /*
  * plan_list_has_node
- *		plan_has_node over a list of plans; an entry may be NULL (a subplan
- *		removed as unused).
+ *		plan_has_node over a list; an entry may be NULL (an unused subplan).
  */
 static bool
 plan_list_has_node(List *plans)
@@ -346,9 +292,7 @@ leapfrog_version(PG_FUNCTION_ARGS)
 
 /*
  * leapfrog_is_loaded
- *		SQL-callable: is the planner hook active in this session?  Calling it
- *		loads the library, so the answer is true whenever the call succeeds;
- *		it exists for scripts that need an explicit check.
+ *		SQL-callable: is the planner hook active in this session?
  */
 Datum
 leapfrog_is_loaded(PG_FUNCTION_ARGS)

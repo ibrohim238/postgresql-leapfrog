@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# Check (or apply) the PostgreSQL core code style with pgindent.
-#
-#   bash tests/scripts/pgindent.sh          fail and print a diff when the code
-#                                           is not pgindent-clean
-#   bash tests/scripts/pgindent.sh --fix    reformat the sources in place
-#
-# pgindent and pg_bsd_indent are fetched from the PostgreSQL REL_18_STABLE
-# branch and built against the installed server headers (pg_config); the
-# typedefs of this extension are appended to the core typedefs list.  Before
-# that, find_typedef from the same branch checks src/typedefs.list against
-# the built objects (src/*.o, so run make first).
+# Check, or with --fix apply, pgindent; also checks src/typedefs.list.
+# Usage: pgindent.sh [--fix]
+# Environment: PG_CONFIG, PGINDENT_WORKDIR, CC.  See docs/tooling.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -54,22 +46,12 @@ fi
 cat "$work/postgres/src/tools/pgindent/typedefs.list" "$root/src/typedefs.list" \
 	> "$work/typedefs.list"
 
-# Is NAME defined by a typedef in src/: "} NAME;" closing a struct, union or
-# enum, or "typedef ... NAME;" for a plain one.
+# defined_here <name>: "} NAME;" or "typedef ... NAME;" in src/
 defined_here() {
 	grep -q -E "^\}[[:space:]]*$1[[:space:]]*;|^typedef[^;{]*[^[:alnum:]_]$1[[:space:]]*;" \
 		src/*.c src/*.h
 }
 
-# src/typedefs.list against the objects, as PostgreSQL makes its own list:
-# src/tools/find_typedef reads the typedef names from the debugging symbols
-# (pg_config's CFLAGS carry -g).  A typedef defined in src/ that the objects
-# use and the list lacks fails the check, since pgindent would misformat the
-# code that uses it; the objects also name the typedefs of PostgreSQL and
-# the system headers, left out by the core list and by defined_here.  An
-# entry of the list that src/ no longer has is only reported.  find_typedef
-# misses a typedef that declares nothing (see its header), so the reverse
-# check looks at the sources, not the objects.
 check_typedefs() {
 	local find_typedef="$work/postgres/src/tools/find_typedef" found name
 	local status=0 objects=0 obj

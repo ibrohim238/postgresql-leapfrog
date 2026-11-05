@@ -1,10 +1,4 @@
---
--- leapfrog_index_order
---
--- DESC and NULLS FIRST index columns: every stream scans in the direction that
--- gives the query's order in its own index, so the streams of one node may
--- run in opposite directions.
---
+-- leapfrog_index_order: DESC and NULLS FIRST index columns; streams may scan in opposite directions.
 SET max_parallel_workers_per_gather = 0;
 
 -- A NOT NULL column: the position of NULLs does not matter, any index will do.
@@ -51,8 +45,7 @@ ORDER BY 1, 2, 3;
 SELECT ord, lf_check(format('SELECT id FROM lf_ord WHERE a = 3 AND b = 2 ORDER BY %s, id', ord))
 FROM unnest(ARRAY['txt', 'txt DESC']) ord ORDER BY 1;
 
--- A stream ahead by far skips with the bound of the query's direction, which
--- nbtree applies to a DESC column by itself.
+-- A stream far ahead skips with the query direction's bound; nbtree flips it for a DESC column.
 CREATE TABLE lf_ord_skip (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val bigint NOT NULL)
 	WITH (autovacuum_enabled = false);
 INSERT INTO lf_ord_skip
@@ -75,15 +68,13 @@ SELECT lf_check($$ SELECT p.o, q.id FROM (VALUES (3), (4), (5)) p(o)
 	ORDER BY 1, 2 $$);
 DROP TABLE lf_ord;
 
--- A nullable column: an index serves an order when its NULLs lie at the right
--- end in the direction that gives the values' order.
+-- A nullable column: an index serves an order when its NULLs lie at the right end.
 CREATE TABLE lf_ord_null (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val bigint)
 	WITH (autovacuum_enabled = false);
 INSERT INTO lf_ord_null
 SELECT g, abs(hashint8(g * 3)) % 10, abs(hashint8(g * 5)) % 10,
 	CASE WHEN g % 5 = 0 THEN NULL ELSE abs(hashint8(g * 7)) % 2000 END
 FROM generate_series(1, 20000) g;
--- ASC NULLS LAST and its mirror, DESC NULLS FIRST: both read one query order
 CREATE INDEX lf_ord_null_a ON lf_ord_null (a, val);
 CREATE INDEX lf_ord_null_b ON lf_ord_null (b, val DESC);
 ANALYZE lf_ord_null;

@@ -1,7 +1,4 @@
-# Concurrent DELETE and the equality column moving to another owner.  Dead
-# index entries remain in both indexes until VACUUM; a reader with an older
-# snapshot still sees the rows, a newer one does not, and nothing is
-# returned twice or lost after VACUUM.
+# Concurrent DELETE and owner changes: dead entries until VACUUM, nothing returned twice or lost.
 
 setup
 {
@@ -58,12 +55,10 @@ step s2_std	{
 }
 step s2_commit	{ COMMIT; }
 
-# Rows deleted under an older snapshot stay visible to it; a new snapshot
-# does not see them, before and after VACUUM.
+# Rows deleted under an older snapshot stay visible to it, before and after VACUUM.
 permutation s2_begin_rr s2_count s2_first s1_begin s1_delete s1_commit s2_count s2_count_desc s2_first s2_std s2_commit s2_count s2_first s2_std s1_vacuum s2_count s2_count_desc s2_first s2_std
 
-# Rows leaving and joining the owner: the old entries are dead in the
-# outer index for the new snapshot, the new entries invisible to the old.
+# Rows leaving and joining the owner
 permutation s2_begin_rr s2_count s1_begin s1_move_owner s1_adopt s1_commit s2_count s2_first s2_std s2_commit s2_count s2_count_desc s2_first s2_std s1_vacuum s2_count s2_first s2_std
 
 # All three changes at once

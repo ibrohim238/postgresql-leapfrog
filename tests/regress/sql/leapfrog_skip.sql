@@ -1,13 +1,4 @@
---
--- leapfrog_skip
---
--- Skip-ahead: a scan that lags behind the other side for leapfrog.skip_after
--- (64 to start, adaptive) entries descends its B-tree again straight to the other side's value
--- (sortcol >= value forward, <= value backward).  The entries in between
--- cannot match; entries equal to the value must not be skipped, which
--- matters when the sort column is not unique.  Results are compared with the
--- standard plans in both directions, with LIMIT and across rescans.
---
+-- leapfrog_skip: a lagging scan re-descends to the other side's value; equal entries are not skipped.
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 
@@ -17,12 +8,8 @@ CREATE TABLE lf_skip (
 	grp bigint NOT NULL,
 	deleted_at timestamptz
 );
--- Owner 1 has every other row; deleted rows come in clusters of 50 ids
--- every 10,000 ids, plus one dense block of 20,000 deleted ids.  Between two
--- clusters owner 1 has about 5,000 entries, more than the threshold, so
--- the owner side skips across every gap.  Owner 2 has rows only
--- every 5,000th id, so inside the dense block the deleted side lags by
--- 5,000 entries and skips.  grp repeats every value 3 times.
+-- Owner 1: every other row, about 5,000 entries between deleted clusters, so it skips every gap.
+-- Owner 2: a row every 5,000 ids, so the deleted side lags in its dense block. grp repeats 3 times.
 INSERT INTO lf_skip
 SELECT g, CASE WHEN g % 2 = 0 THEN 1 WHEN g % 5000 = 25 THEN 2 ELSE 3 END, g / 3,
 	CASE WHEN g % 10000 < 50 OR g BETWEEN 100001 AND 120000
@@ -34,7 +21,6 @@ CREATE INDEX lf_skip_owner_grp ON lf_skip (owner_id, grp);
 CREATE INDEX lf_skip_deleted_grp ON lf_skip (grp) WHERE deleted_at IS NOT NULL;
 ANALYZE lf_skip;
 
--- both directions, with and without LIMIT
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$);
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id DESC $$);
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id LIMIT 30 $$);
@@ -71,8 +57,7 @@ FROM (VALUES (1::bigint), (2), (1)) v (o),
 			 WHERE owner_id = v.o AND deleted_at IS NOT NULL
 			 ORDER BY id DESC LIMIT 40) s $$);
 
--- leapfrog.skip_after: 0 turns skipping off, 1 re-descends after every
--- entry a scan lags by; the answers stay the same
+-- skip_after = 0 turns skipping off, 1 re-descends after every entry; the answers stay the same
 SET leapfrog.skip_after = 0;
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$);
 SELECT * FROM lf_counters($$
@@ -85,10 +70,7 @@ SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NO
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY grp DESC $$, false);
 RESET leapfrog.skip_after;
 
--- Adaptive threshold: matches every 100th id, 50 owner-1 entries apart,
--- inside one leaf page.  Starting at 8 the first skips land on the page they
--- left or the next one (Short Skips), the threshold doubles past the gap and
--- the scan stops skipping: a few skips instead of one per match (2,000).
+-- Adaptive threshold: matches 50 entries apart in one leaf page; short skips raise it, so a few skips, not 2,000.
 CREATE INDEX lf_skip_every100 ON lf_skip (id) WHERE id % 100 = 8;
 SET leapfrog.skip_after = 8;
 SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND id % 100 = 8 ORDER BY id $$);
@@ -99,8 +81,7 @@ SELECT lf_check($$ SELECT * FROM lf_skip WHERE owner_id = 1 AND id % 100 = 8 ORD
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_skip WHERE owner_id = 1 AND id % 100 = 8 ORDER BY id DESC $$)
 WHERE counter IN ('Matched TIDs', 'Skips', 'Short Skips');
--- long gaps keep the threshold low: every gap of owner 1 between the deleted
--- clusters is skipped, none of the skips is short
+-- long gaps keep the threshold low: none of the skips is short
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_skip WHERE owner_id = 1 AND deleted_at IS NOT NULL ORDER BY id $$)
 WHERE counter IN ('Matched TIDs', 'Skips', 'Short Skips');

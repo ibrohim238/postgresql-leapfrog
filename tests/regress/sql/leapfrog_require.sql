@@ -1,11 +1,4 @@
---
--- leapfrog_require
---
--- leapfrog.require_node: a query errors at plan time when its plan has no
--- Index Merge Intersect node under "require", or has one under "forbid".
--- The tests use it so that a query meant for the node cannot pass through a
--- stock plan unnoticed.
---
+-- leapfrog_require: leapfrog.require_node errors when a plan lacks the node (require) or has it (forbid)
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 
@@ -22,12 +15,10 @@ CREATE INDEX lf_req_customer_id ON lf_req (customer_id, id);
 CREATE INDEX lf_req_live_id ON lf_req (id) WHERE deleted_at IS NULL;
 VACUUM ANALYZE lf_req;
 
--- The default checks nothing.
 SHOW leapfrog.require_node;
 
 SET leapfrog.force = on;
 
--- allow: the plans are what they are without the setting.
 SET leapfrog.require_node = allow;
 EXPLAIN (COSTS OFF)
 SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
@@ -55,7 +46,6 @@ SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
 EXPLAIN (COSTS OFF)
 SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
 SELECT 1 AS one;
--- the node switched off
 SET leapfrog.enabled = off;
 SELECT id FROM lf_req WHERE customer_id = 2 AND deleted_at IS NULL
 ORDER BY id LIMIT 3;
@@ -75,8 +65,7 @@ ORDER BY id LIMIT 3;
 RESET leapfrog.enabled;
 SELECT id FROM lf_req WHERE customer_id = 2 ORDER BY id LIMIT 3;
 
--- A prepared statement is checked whenever it is planned: here every
--- execution, with custom plans.
+-- A prepared statement is checked whenever it is planned.
 SET plan_cache_mode = force_custom_plan;
 SET leapfrog.require_node = require;
 PREPARE lf_req_q(bigint) AS
@@ -88,8 +77,7 @@ EXECUTE lf_req_q(2);
 DEALLOCATE lf_req_q;
 RESET plan_cache_mode;
 
--- The queries of a plpgsql function or a DO block are checked when they are
--- planned.  The outer SELECT has no node of its own, so it passes "forbid".
+-- plpgsql queries are checked when planned; the outer SELECT has no node, so it passes "forbid".
 CREATE FUNCTION lf_req_first(c bigint) RETURNS bigint
 LANGUAGE plpgsql AS $$
 BEGIN

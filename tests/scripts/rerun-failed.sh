@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# Rerun the tests the last "make installcheck" failed ("make
-# installcheck-rerun"), after TimescaleDB's test/ci_rerun.sh: the "not ok"
-# names of tests/regress/regression.out and tests/isolation/regression.out,
-# each with run-one.sh.  For a local look at a failure only: CI does not
-# retry, a failing test stays red.
-#
-# Usage: rerun-failed.sh [-r N]   (passed on to run-one.sh)
+# Rerun the tests the last "make installcheck" failed.
+# Usage: rerun-failed.sh [-r N]
+# See docs/testing.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# the names of the failed tests in a pg_regress output file
 failed_in() {
 	[ -f "$1" ] || return 0
 	sed -nE 's/^not ok +[0-9]+ +[-+] +([A-Za-z0-9_]+).*/\1/p' "$1"

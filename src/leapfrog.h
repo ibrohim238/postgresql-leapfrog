@@ -2,14 +2,7 @@
  *
  * leapfrog.h
  *	  Declarations shared by the parts of the Index Merge Intersect custom
- *	  scan:
- *
- *	  compat.h		shims for the PostgreSQL major versions
- *	  leapfrog.c	module entry point, settings, SQL-callable functions
- *	  planner.c		planner hook: index streams, paths, plans
- *	  costsize.c	cost model
- *	  indexstream.c	reading one index as a sorted stream of (sortcol, TID)
- *	  executor.c	the merge, TID groups, skip-ahead, EvalPlanQual, EXPLAIN
+ *	  scan.
  *
  * IDENTIFICATION
  *	  src/leapfrog.h
@@ -31,19 +24,11 @@
 
 #define INTERSECT_NAME "Index Merge Intersect"
 
-/* The most indexes one node may combine (leapfrog.max_indexes). */
 #define INTERSECT_MAX_STREAMS 16
 
 /*
- * What the plan of one set of streams carries from the planner to the
- * executor.  The path keeps it as a struct (IntersectPath in planner.c),
- * except keys and pred, which it keeps in custom_private for
- * reparameterize_path_by_child until intersect_plan_path.  form_plan_info
- * turns it into the plan's custom_private and custom_exprs and
- * lf_deform_plan_info back, and no other code knows the list layout.
- * The expression lists go into custom_exprs, where createplan.c turns
- * outer-relation Vars into nestloop params and setrefs.c fixes up the rest.
- * Stream 0 is the outer index, whose entries are fetched from the heap.
+ * What the plan carries; only form_plan_info and lf_deform_plan_info know
+ * its list layout.  Stream 0 is the outer index.
  */
 typedef struct IntersectStreamInfo
 {
@@ -76,12 +61,8 @@ typedef struct IntersectPlanInfo
 	 (nstreams) * sizeof(IntersectStreamInfo))
 
 /*
- * The equality conditions on the leading columns of one index.  attnos are
- * the heap columns, for the EvalPlanQual recheck and the overflow fallback;
- * operators are of the column's btree family, with the column on the left.
- * The values may be of any type.  The bound on the sort column compares in
- * the type and collation the query sorts in, with the operator of the
- * pathkey's direction: nbtree applies it to a DESC index column itself.
+ * The equalities on the leading columns of one index.  The sortcol bound is
+ * in the pathkey's direction: nbtree applies it to a DESC column itself.
  */
 typedef struct EqualityKeys
 {
@@ -110,11 +91,7 @@ typedef enum SortBound
 	SORT_BOUND_NULL,			/* NULLs only */
 } SortBound;
 
-/*
- * Instrumentation of one index stream under EXPLAIN ANALYZE: the time and
- * buffers of its descents and of the reads that step to another leaf page,
- * where the page reads happen.  Clocked only there, not on every entry.
- */
+/* EXPLAIN ANALYZE of one stream, clocked on descents and leaf page steps. */
 typedef struct StreamInstr
 {
 	bool		timer;
@@ -148,11 +125,7 @@ lf_instr_stop(StreamInstr *instr, const StreamClock *clock)
 
 		INSTR_TIME_SET_CURRENT(now);
 
-		/*
-		 * lf_instr_start set clock->start under the same instr->timer, which
-		 * nothing changes after the scan begins; clang-tidy's analyzer
-		 * assumes the calls between the two may.
-		 */
+		/* clock->start is set: instr->timer does not change during a scan */
 		/* NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult) */
 		INSTR_TIME_ACCUM_DIFF(instr->time, now, clock->start);
 	}
@@ -160,11 +133,7 @@ lf_instr_stop(StreamInstr *instr, const StreamClock *clock)
 		BufferUsageAccumDiff(&instr->buffers, &pgBufferUsage, &clock->buffers);
 }
 
-/*
- * The statistics of the sort column, read once per relation and planning:
- * each scalarineqsel would read and detoast them anew.  usable is false when
- * they cannot answer in the query's order; the selectivity functions do then.
- */
+/* The sort column's statistics, read and detoasted once per planning. */
 typedef struct SortStats
 {
 	bool		usable;
@@ -180,12 +149,7 @@ typedef struct SortStats
 	double		hist_frac;		/* share of the rows the histogram stands for */
 } SortStats;
 
-/*
- * The column the query sorts by, as the planner found it.  type is the input
- * type of the operator class (text for a varchar column, anyarray for an
- * array).  range_ssup compares in ascending order for the cost model's range
- * probes, prepared on first use.
- */
+/* The column the query sorts by; type is the opclass input type. */
 typedef struct SortColumn
 {
 	AttrNumber	attno;
@@ -203,12 +167,8 @@ typedef struct SortColumn
 } SortColumn;
 
 /*
- * Index candidate for a stream of the intersection, built once per index and
- * shared by every stream set it takes part in: equality clauses of the columns
- * before sortcol, the value expressions compared against, the outer rels they
- * refer to, and sortcol's position among the key columns.  heapkeyspace is
- * looked up on first use (-1 until then) because it opens the index; so is
- * the range of sortcol values (probe_range).
+ * Index candidate for a stream, shared by every set.  What opens the index
+ * is looked up on first use.
  */
 typedef struct IndexCandidate
 {

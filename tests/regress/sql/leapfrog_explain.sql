@@ -1,9 +1,4 @@
---
--- leapfrog_explain
---
--- EXPLAIN output of the node in every format and the instrumentation of
--- EXPLAIN ANALYZE.
---
+-- leapfrog_explain: EXPLAIN output in every format, the counters, the cost model components
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
 -- heap prefetch depends on it, in the counters below
@@ -30,9 +25,7 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
 EXPLAIN (COSTS OFF, VERBOSE)
 SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
 
--- Every stream is a block of its own, in the manner of a child node: its
--- index, the equalities as an Index Cond, the predicate of a partial index,
--- the entries read as its rows, and its counters.
+-- Every stream is a block of its own, like a child node.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
 -- In the structured formats the streams are an array
@@ -54,8 +47,7 @@ SELECT s ->> 'Role' AS role, s ->> 'Index Name' AS index, s ->> 'Index Cond' AS 
 	s ->> 'Index Pred' AS pred, s ? 'Entries Read' AS counted
 FROM lf_plan_streams($$
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$) s;
--- leapfrog.prefetch asks for the next leaf page of every stream ahead of
--- time, counted per stream; the result does not depend on it.
+-- leapfrog.prefetch: leaf pages prefetched per stream; the result does not depend on it.
 SHOW leapfrog.prefetch;
 SELECT s ->> 'Role' AS role, (s ->> 'Prefetches')::int > 0 AS prefetched
 FROM lf_plan_streams($$
@@ -68,8 +60,7 @@ SELECT lf_check($$ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS
 RESET leapfrog.prefetch;
 DROP FUNCTION lf_plan_streams(text);
 
--- VERBOSE with costs adds the entries the cost model expects each side to
--- read, to set against the ANALYZE counters (numbers masked).
+-- VERBOSE with costs: the entries the cost model expects each side to read.
 CREATE FUNCTION lf_plan_verbose(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -90,17 +81,11 @@ SELECT id FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id 
 WHERE lf_plan_costs ~ 'Estimated';
 DROP FUNCTION lf_plan_verbose(text);
 
--- Costs are present without force (numbers masked).  Here the standard
--- plan is cheaper: half of the rows are live and every fourth belongs to
--- the owner, a plain index scan finds a match every few rows.
+-- Costs without force; the standard plan is cheaper here (a match every few rows).
 SELECT * FROM lf_plan_costs($$
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
 
--- The owner holds 2% of the rows and 2% of the rows are deleted, and the
--- rows are wide enough that every fetched row costs a heap page.  Here the
--- node and the stock Index Scan on the partial index are estimated within
--- about 1 % of each other, so which one the planner picks is not checked;
--- the choice by cost is checked on stable data in leapfrog_example.
+-- The node and the stock plan are estimated within 1 %: the planner's pick is not checked.
 CREATE TABLE lf_explain_cost (
 	id bigint PRIMARY KEY,
 	owner_id bigint NOT NULL,
@@ -115,24 +100,16 @@ CREATE INDEX lf_explain_cost_deleted_id ON lf_explain_cost (id) WHERE deleted_at
 VACUUM ANALYZE lf_explain_cost;
 SET leapfrog.force = off;
 SELECT lf_check($$ SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10 $$);
--- Without LIMIT the whole result is needed and BitmapAnd is competitive;
--- whichever wins, the result is the same.
+-- Without LIMIT BitmapAnd is competitive; the result is the same either way.
 SELECT lf_check($$ SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id $$);
--- With leapfrog disabled the standard plan is back.
 SET leapfrog.enabled = off;
 EXPLAIN (COSTS OFF)
 SELECT * FROM lf_explain_cost WHERE owner_id = 7 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 10;
 RESET leapfrog.enabled;
 DROP TABLE lf_explain_cost;
 
---
--- Cost model components.  Each check compares the node's estimated total
--- cost in two situations that differ in one input of the model only; the
--- numbers themselves are not pinned, only the direction.
---
--- lf_node_cost(query): total cost of the Index Merge Intersect node in the
--- plan, with every competing scan disabled so that the node is planned
--- without leapfrog.force (which would zero its cost).
+-- Cost model components: two estimates that differ in one input; only the direction is checked.
+-- lf_node_cost: competing scans disabled instead of leapfrog.force, which zeroes the cost.
 CREATE FUNCTION lf_node_cost(query text) RETURNS float8
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -168,11 +145,8 @@ INSERT INTO lf_cost_shuffled SELECT * FROM lf_cost_sorted ORDER BY (id * 7919) %
 VACUUM ANALYZE lf_cost_sorted;
 VACUUM ANALYZE lf_cost_shuffled;
 
--- Heap fetches are charged as for an Index Scan on the outer index, by the
--- correlation of its leading column (owner_id): a heap in that order is
--- cheaper.  Only the correlation statistic changes between the two
--- estimates, on the same table (pg_restore_attribute_stats), so that the
--- index sizes and row estimates are identical.
+-- Heap fetches are charged by the correlation of owner_id; only that statistic
+-- changes (pg_restore_attribute_stats), so sizes and row estimates are identical.
 SELECT pg_restore_attribute_stats('schemaname', 'public', 'relname', 'lf_cost_sorted',
 	'attname', 'owner_id', 'inherited', false, 'correlation', 1.0::real);
 SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$)
@@ -190,16 +164,8 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND delet
 	 > lf_node_cost($$ SELECT * FROM lf_cost_sorted WHERE owner_id = 7 AND deleted_at IS NULL ORDER BY id $$) + 1000
 	AS filter_cost_is_counted;
 
--- Page costs come from the tablespace of the table and the indexes.  The
--- table lives in a tablespace of the test's own (in place, under pg_tblspc),
--- so that the setting changed is not one that other databases of the
--- cluster use, as pg_default's would be.  The tablespace is named after the
--- database, so that runs in other databases of one cluster do not share it.
--- One owned by this user and carrying the comment of this test was left by
--- an interrupted run and is dropped first, with the table that may still be
--- in it.  One of that name without both is someone else's: the script stops
--- before touching it (psql would go on past a failed CREATE TABLESPACE), and
--- the test fails.
+-- Page costs come from the tablespace: one of the test's own, named after the database.
+-- One left by an interrupted run (owner and comment) is dropped; any other stops the test.
 SELECT s.name AS lf_space,
 	coalesce(t.mine, false) AS lf_space_left,
 	NOT coalesce(t.mine, true) AS lf_space_taken
@@ -232,12 +198,8 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_spaced WHERE owner_id = 7 AND delet
 DROP TABLE lf_cost_spaced;
 DROP TABLESPACE :"lf_space";
 
--- A path parameterized by a join column is rescanned once per outer row;
--- the same index and heap pages are read again and stay cached, so the
--- per-loop cost falls with the loop count.  (A LATERAL subquery with its
--- own LIMIT gets an outer-level Param instead and is not parameterized.)
--- OFFSET 0 keeps the outer side a subquery, so its row estimate is the
--- loop count.
+-- A parameterized rescan rereads cached pages: cheaper per loop.
+-- OFFSET 0 makes the outer row estimate the loop count.
 SELECT lf_node_cost($$
 SELECT v.o, s.id
 FROM (SELECT g::bigint AS o FROM generate_series(1, 5000) g OFFSET 0) v
@@ -250,11 +212,8 @@ FROM (SELECT 7::bigint AS o OFFSET 0) v
 ORDER BY s.id $$)
 	AS repeated_scans_are_cheaper_per_loop;
 
--- The actual sortcol range of each stream, probed at plan time when the
--- equality values are constants: owner 3 has rows among ids 1-50,000 only,
--- archived rows are ids above 60,000, so the streams cannot meet and the
--- node costs next to nothing.  A generic plan (a parameter instead of the
--- constant) cannot probe and is costed for the whole streams.
+-- Stream ranges probed at plan time: owner 3 (ids <= 50,000) cannot meet the
+-- archived ids (> 60,000). A generic plan cannot probe.
 CREATE TABLE lf_cost_range (
 	id bigint PRIMARY KEY,
 	owner_id bigint NOT NULL,
@@ -280,11 +239,7 @@ SELECT lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 99 AND archi
 SELECT lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 13 AND archived ORDER BY id $$)
 	 > lf_node_cost($$ SELECT * FROM lf_cost_range WHERE owner_id = 3 AND archived ORDER BY id $$) * 10
 	AS overlapping_ranges_are_not_discounted;
--- The node's row estimate is the matches inside the overlap, so that a Limit
--- above takes the right share of it: owner 13 has 4/5 of its rows above id
--- 60,000, where every third row is archived, 1,334 rows (lf_check below);
--- the relation's estimate, with both conditions independent over the whole
--- table, is half that.
+-- The node's rows are the matches inside the overlap (1,334), twice the relation's estimate.
 CREATE FUNCTION lf_node_rows(query text) RETURNS float8
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -307,13 +262,8 @@ DROP FUNCTION lf_node_rows(text);
 RESET plan_cache_mode;
 DEALLOCATE lf_range;
 
--- Two ordinary indexes against BitmapAnd on the same index entries: both
--- plans read the same pages, the node skips the bitmaps and the sort.  The
--- node's TID comparisons are charged at the bitmap's per-TID rate
--- (0.1 * cpu_operator_cost); at a full cpu_operator_cost per comparison the
--- node came out dearer than BitmapAnd here (99 against 96) while running
--- 3 times faster on the benchmark data.  25,000 rows: ANALYZE samples
--- every row, so the estimates do not depend on the sample.
+-- Two ordinary indexes against BitmapAnd: TID comparisons are charged at the bitmap's
+-- per-TID rate. 25,000 rows: ANALYZE samples every row.
 CREATE FUNCTION lf_stock_cost(query text) RETURNS float8
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -362,21 +312,17 @@ SET leapfrog.force = on;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
 
--- Owner 1 has odd ids only, all of them live: LIMIT 10 reads 10 outer
--- entries and about 20 inner ones, matches and fetches 10.
+-- Owner 1: odd ids, all live.
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10 $$);
 
--- Owner 0 has even ids only, none of them live: the whole owner is read,
--- nothing matches, nothing is fetched.
+-- Owner 0: even ids, none live: nothing matches.
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_explain WHERE owner_id = 0 AND deleted_at IS NULL ORDER BY id $$);
 
--- A filter removes rows after the fetch.
 SELECT * FROM lf_counters($$
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL AND payload LIKE '%5' ORDER BY id LIMIT 10 $$);
 
--- JSON, YAML and XML formats carry the same properties.
 EXPLAIN (COSTS OFF, FORMAT JSON)
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
 EXPLAIN (COSTS OFF, FORMAT YAML)
@@ -384,12 +330,10 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id D
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF, FORMAT XML)
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 10;
 
--- EXPLAIN without ANALYZE does not start the scans (EXEC_FLAG_EXPLAIN_ONLY)
--- and reports no counters.
+-- Without ANALYZE the scans do not start: no counters.
 EXPLAIN (COSTS OFF, FORMAT JSON)
 SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL ORDER BY id LIMIT 1;
 
--- EXPLAIN ANALYZE of a query that returns nothing
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT * FROM lf_explain WHERE owner_id = 9 AND deleted_at IS NULL ORDER BY id LIMIT 1;
 

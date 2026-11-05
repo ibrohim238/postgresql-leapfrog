@@ -1,11 +1,5 @@
---
--- Row-level security: a scan key runs on every index entry, also those of the
--- rows the policy hides, so only a clause that is safe before the policy's
--- quals may become a stream's condition, as for an Index Cond.
---
--- All in one transaction: a role belongs to the whole cluster, and rolling it
--- back leaves nothing behind for other databases, even after an interruption.
---
+-- leapfrog_security: under row-level security only a leakproof clause becomes a stream's condition
+-- One transaction: a role is cluster-wide, and the rollback leaves nothing behind.
 BEGIN;
 SET LOCAL enable_seqscan = off;
 CREATE ROLE lf_security_reader;

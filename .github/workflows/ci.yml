@@ -27,8 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # the release tags: installcheck-upgrade takes the earlier install
-          # scripts from them
+          # installcheck-upgrade reads the earlier install scripts from the tags
           fetch-depth: 0
 
       - name: Install PostgreSQL ${{ matrix.pg }} from PGDG

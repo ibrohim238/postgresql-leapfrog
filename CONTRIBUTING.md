@@ -7,55 +7,15 @@ You need PostgreSQL 18 with the server headers. Docker is the easiest way:
 ```bash
 bash tests/run-in-docker.sh                    # all tests, in a Compose project of their own
 make docker-build PG_MAJOR=18                  # the Compose images only
-```
-
-The test image (`Dockerfile`, target `test`) has the build tools but no
-sources: Compose mounts the repository at `/src/leapfrog`, and the entrypoint
-(`tests/scripts/run-tests.sh --build`) runs `make clean`, builds with
-`WERROR=1` and installs before the suites. It runs as a user created with the
-build arguments `UID`/`GID`, which `run-in-docker.sh` and `make docker-build`
-set to yours (`LEAPFROG_UID`/`LEAPFROG_GID` for a plain `docker compose`), so
-what it writes into the tree belongs to you. `PG_MAJOR` picks the PostgreSQL
-major version, `LEAPFROG_TAG` the image tag (default `PG_MAJOR`).
-
-The test servers take their settings from one file,
-`tests/scripts/temp.conf`: `make check` passes it as `--temp-config`, the
-runtime image (the Compose server) appends it to `postgresql.conf.sample`, and
-`tests/scripts/start-cluster.sh` appends it to the cluster it creates.
-`start-cluster.sh` runs `initdb` into `PGDATA`, adds `shared_buffers`
-(`LEAPFROG_SHARED_BUFFERS`, 128MB) and the socket or address from
-`PGHOST`/`PGPORT`, starts the server, passing its arguments to it, and runs
-the smoke check `tests/scripts/smoke.sql`; the cassert image, CI and the test
-image started without `PGHOST` use it:
-
-```bash
-docker build --target test -t leapfrog-test .
-docker run --rm -v "$PWD:/src/leapfrog" leapfrog-test   # a server of its own
-```
-
-The assert-enabled image, `docker/cassert.Dockerfile`, builds PostgreSQL from
-git in a stage `pg` and the extension on top of it; its build arguments:
-
-| Argument | Default | Meaning |
-|---|---|---|
-| `PG_BRANCH` | `REL_18_STABLE` | PostgreSQL branch or tag |
-| `SANITIZE` | empty | a `-fsanitize=` list, e.g. `address,undefined`: PostgreSQL and the extension are built with clang, `-fsanitize=$SANITIZE -fno-omit-frame-pointer -fno-sanitize-recover=all` (`--enable-cassert` stays) |
-| `UID`, `GID` | `1000` | ids of the user running the server and the tests |
-
-```bash
+docker run --rm -v "$PWD:/src/leapfrog" leapfrog-test   # test image, a server of its own
+docker build -f docker/cassert.Dockerfile -t leapfrog-cassert . && docker run --rm leapfrog-cassert
 docker build --build-arg SANITIZE=address,undefined \
-    -f docker/cassert.Dockerfile -t leapfrog-san .
-docker run --rm leapfrog-san
+    -f docker/cassert.Dockerfile -t leapfrog-san .        # with sanitizers
 ```
 
-`tests/scripts/run-cassert.sh` runs the server with `-c max_stack_depth=8MB`
-and the sanitizers with `ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:log_path=/tmp/asan`
-and `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:log_path=/tmp/ubsan`;
-after the suites it prints every `/tmp/asan.*` and `/tmp/ubsan.*` report and
-fails if there is one, as it fails on a `TRAP:` or a crashed backend in the
-server log. Leak detection is off. Under AddressSanitizer the peak RSS check
-of `leapfrog_memory` (growth below 32MB) fails: the shadow memory and the
-quarantine of freed blocks count in the backend's RSS.
+The images, Compose, the mounted sources and the sanitizer build:
+[docs/docker.md](docs/docker.md). Under AddressSanitizer the peak RSS check
+of `leapfrog_memory` fails.
 
 Locally:
 
@@ -87,76 +47,19 @@ make pgindent        # fail with a diff when src/ is not pgindent-clean
 make pgindent-fix    # reformat in place
 ```
 
-The script fetches `pgindent` and `pg_bsd_indent` from `REL_18_STABLE` and
-builds them against the installed server headers. New `typedef`s of the
-extension go into `src/typedefs.list`: after a build (`make`), the script
-also runs PostgreSQL's `src/tools/find_typedef` on `src/*.o` (it reads the
-debugging symbols with `objdump`; `pg_config`'s `CFLAGS` carry `-g`) and
-fails when a typedef defined in `src/` that the objects use is missing from
-the list, the way pgindent would misformat it. An entry that `src/` no
-longer defines is reported as a warning. Without objects or `objdump` the
-check is skipped with a notice.
+New `typedef`s of the extension go into `src/typedefs.list`; after a build
+(`make`), `make pgindent` fails when one is missing. Details:
+[docs/tooling.md](docs/tooling.md#make-pgindent).
 
 ### Lint
 
 `make lint` (`tests/scripts/lint.sh`) runs the checks that neither the
-compiler nor `pgindent` make, after those of Citus (`ci/`) and TimescaleDB
-(its code style workflow). Each failing check prints its findings and one
-line with the reason, and the script goes on with the next one:
-
-- banned C functions in `src/`: `strcpy`, `strcat`, `sprintf`, `vsprintf`,
-  `strncpy`, `strncat`, `gets`, `alloca` (use `strlcpy`, `snprintf`,
-  `psprintf`, a `StringInfo`); a line that must keep one carries an
-  `IGNORE-BANNED` comment with the reason;
-- no `TODO`, `FIXME` or `XXX` notes in `src/` and `tests/`: planned work goes
-  into `docs/roadmap.md`;
-- no trailing whitespace and a final newline in every tracked text file, as
-  `.editorconfig` says; expected test output (`tests/**/expected/*.out`) is
-  exempt;
-- `#include` order in `src/*.c`: `"postgres.h"`, then `<system>` headers,
-  then PostgreSQL headers, then the extension's own (`"leapfrog.h"`), each
-  group sorted;
-- the `DefineCustom*Variable` calls in alphabetical order of the GUC names,
-  as in the Settings table of the README;
-- `CHANGELOG.md` lines of at most 100 characters;
-- every `tests/scripts/*.sh` is run from the Makefile, a workflow, a
-  Dockerfile, a compose file or another script. A helper the scripts share
-  is a file of functions they source: `makevars.sh` (`make_var`, the words of
-  a Makefile variable, for `check-tests.sh` and `check-version.sh`) and
-  `scratch_db.sh` (a database of a script's own, created with a comment that
-  marks it, dropped only when it carries the mark, and never touched when a
-  database of that name lacks it: `run-one.sh`, `upgrade-check.sh`,
-  `bench-smoke.sh` and `tests/performance/bench_db.sh`). The scratch
-  databases are created and dropped from `SCRATCH_ADMIN_DB` (default
-  `BENCH_ADMIN_DB`, then `postgres`).
-
-`make lint-fix` (`lint.sh --fix`) first removes trailing whitespace, adds the
-final newline and wraps long `CHANGELOG.md` lines; the other findings are
-fixed by hand.
-
-Then the external tools, as in TimescaleDB's workflows:
-
-- `shellcheck -S warning -x` on every `*.sh`: errors and warnings, not
-  style. A `# shellcheck disable=SCxxxx` goes on the line before the one it
-  covers, with the reason in a comment next to it;
-- `actionlint` on `.github/workflows/*.yml`, with the shell of the `run:`
-  blocks checked at the same severity;
-- `yamllint` on every `*.yml` and `*.yaml` (`.yamllint`: no `---` required,
-  lines over 120 characters are reported as warnings, `on:` is a key);
-- `codespell` on `src/`, `tests/`, `docs/` and the Markdown files
-  (`.codespellrc`; expected output is skipped). A PostgreSQL or code term it
-  takes for a misspelling goes into `ignore-words-list` there;
-- `clang-tidy` on `src/*.c` against the headers of the server `pg_config`
-  names (`PG_CONFIG`, `CLANG_TIDY` pick others), with `.clang-tidy`:
-  `bugprone-*` and the static analyzer, every warning an error. The checks
-  left out only flag PostgreSQL idioms; `.clang-tidy` names each with the
-  reason. A false positive gets a `NOLINTNEXTLINE(<check>)` comment with a
-  comment saying why above it, as in `lf_instr_stop`.
-
-A tool that is not installed is skipped with a notice; `LINT_STRICT=1 make
-lint` fails instead, as CI should. On Debian or Ubuntu:
-`apt-get install shellcheck yamllint codespell clang-tidy`; `actionlint` is a single
-binary from its [releases](https://github.com/rhysd/actionlint/releases).
+compiler nor `pgindent` make: banned C functions, `TODO` notes, whitespace,
+include order, GUC order, `CHANGELOG.md` line length, scripts nothing runs,
+and `shellcheck`, `actionlint`, `yamllint`, `codespell` and `clang-tidy` when
+they are installed (`LINT_STRICT=1` fails without them). `make lint-fix`
+repairs whitespace and long `CHANGELOG.md` lines. Every check and its rules:
+[docs/tooling.md](docs/tooling.md#make-lint).
 
 ## Tests
 
@@ -176,37 +79,21 @@ Every behaviour change comes with a test.
   fix reverted and check that the new test catches it.
 - Benchmark harness changes — `make bench-smoke`.
 - SQL objects, update scripts and releases — `make installcheck-upgrade`
-  (after `make install`, against a server on this machine, as a superuser).
-  It takes `leapfrog--X.sql` of every earlier release from its tag `vX`
-  (`git show`; a shallow clone needs `git fetch --tags`), creates it with
-  `CREATE EXTENSION leapfrog VERSION 'X'` in a scratch database, runs
-  `ALTER EXTENSION leapfrog UPDATE`, and checks that the result is
-  `EXTVERSION`, has the same objects as a fresh `CREATE EXTENSION` and passes
-  `leapfrog_setup`. The scripts are read from a scratch directory through
-  `extension_control_path`, so nothing is installed. By default it updates
-  from the newest tag and every older one that still has an update script;
-  `UPGRADE_FROM="0.0.3 0.0.4"` picks the versions. A new SQL object goes into
-  both `leapfrog--X.sql` and the update script, or this test fails.
-- Version numbers — `make check-version` (no server needed): `EXTVERSION`
-  equals `default_version` in `leapfrog.control`; `leapfrog--EXTVERSION.sql`
-  and the update script from the newest release tag below it exist and are in
-  `DATA`, as is every `leapfrog--*.sql`; `leapfrog_setup.out` shows
-  `EXTVERSION`; `CHANGELOG.md` has `## [Unreleased]`, entries there or a
-  `## [EXTVERSION]` section once `EXTVERSION` is newer than the newest tag,
-  and a link for every released section. Without tags (a shallow clone) the
-  tag checks are skipped with a notice. `make check-version RELEASE=1` checks
-  a release before its tag is pushed: `Unreleased` is empty,
-  `## [EXTVERSION] — YYYY-MM-DD` exists, and `vEXTVERSION` is an annotated tag
-  on `HEAD` with the message `leapfrog EXTVERSION`.
+  (after `make install`, against a server on this machine, as a superuser;
+  `UPGRADE_FROM="0.0.3 0.0.4"` picks the versions). A new SQL object goes
+  into both `leapfrog--X.sql` and the update script, or this test fails.
+- Version numbers — `make check-version` (no server needed);
+  `make check-version RELEASE=1` before a release tag is pushed. Rules:
+  [docs/tooling.md](docs/tooling.md).
 - Concurrent scenarios — `tests/isolation/specs/<name>.spec` +
   `tests/isolation/expected/<name>.out`, and the name goes into `ISOLATION`.
   Every permutation must check the **result**, not just the absence of a
   crash; for EvalPlanQual scenarios add a permutation with the stock plan
   under the same interleaving.
-- Test lists and expected files — `make check-tests` (no server needed): every `.sql` is in `REGRESS` and every `.spec` in `ISOLATION`, every
-  listed name has its file and `<name>.out`, every expected file belongs to a
-  test, and every alternative output is explained (below) and differs from
-  `<name>.out`.
+- Test lists and expected files — `make check-tests` (no server needed).
+
+The scripts, the scratch databases and the test servers:
+[docs/testing.md](docs/testing.md).
 
 Updating expected output after an intended change:
 
@@ -224,18 +111,9 @@ same test under another server; `pg_regress` accepts whichever file matches.
 without ICU, and the isolation test `leapfrog_outer_partial` for PostgreSQL 19,
 which makes the other index the outer stream. A change to such a test changes
 every file. Add an alternative only when the output cannot be made the same on
-both servers, and say in the header comment of the test (the comment and blank
-lines at the top of the `.sql` or `.spec`), on one line, why it exists and when
-it can be removed, after the rule of Citus:
-
-```
--- alternative output <name>_N.out: <why>; remove when <condition>
-```
-
-with `#` in place of `--` in a `.spec`. `make check-tests` fails without that
-line, for a line naming a file that does not exist, and for an alternative
-identical to `<name>.out`. In a `.sql` the line is echoed into every expected
-file of the test.
+both servers, and say in the header comment of the test, on one line, why it
+exists and when it can be removed
+([format](docs/testing.md#alternative-outputs); `make check-tests` checks it).
 
 ### One test, repeated
 
@@ -246,15 +124,9 @@ make test-one TEST=leapfrog_delete KIND=isolation    # an isolation spec
 make installcheck-rerun                              # what the last installcheck failed
 ```
 
-`tests/scripts/run-one.sh <name> [-r N] [--isolation]` (what `test-one` runs) uses
-the server of `PGHOST`/`PGPORT`/`PGUSER`, as `make installcheck` does, and a scratch
-database per run, `lf_one_<name>_<pid>`, created as pg_regress creates its own and
-dropped after the run (only when it carries the script's comment). A regression test
-runs after `leapfrog_setup` in that database, which creates `lf_check` and the other
-helpers; `leapfrog_setup`'s own output is checked too. On a failure it prints the diff
-and how many runs passed, and keeps the output directory.
-`make installcheck-rerun` takes the `not ok` names from `tests/regress/regression.out`
-and `tests/isolation/regression.out` and runs each with `run-one.sh`.
+Against the server of `PGHOST`/`PGPORT`/`PGUSER`, in a scratch database per run;
+on a failure it prints the diff and keeps the output
+([docs/testing.md](docs/testing.md#run-onesh-and-rerun-failedsh)).
 
 ### Flaky tests
 
@@ -282,7 +154,7 @@ look only: a failing test stays red.
 | File | Contents |
 |---|---|
 | `src/leapfrog.h` | structures shared between the files, the plan info (`IntersectPlanInfo`), settings, prototypes |
-| `src/compat.h` | every PostgreSQL version conditional: shims for the differences between major versions; the `.c` files test no `PG_VERSION_NUM` |
+| `src/compat.h` | every PostgreSQL version conditional: shims for the differences between major versions ([docs/compat.md](docs/compat.md)); the `.c` files test no `PG_VERSION_NUM` |
 | `src/leapfrog.c` | `_PG_init`, settings, SQL-callable functions |
 | `src/planner.c` | planner hook: index candidates and pairs, the path, the plan and its `Filter` |
 | `src/costsize.c` | cost model, including the range probe |
@@ -293,6 +165,10 @@ Functions shared between files are prefixed `lf_` and declared in
 `leapfrog.h`; everything else is `static`. The library exports only
 `_PG_init` and the SQL-callable functions (PGXS builds with hidden
 visibility).
+
+Design notes and the reasons behind the code are in
+[docs/design.md](docs/design.md); source comments keep only the
+non-obvious point.
 
 ## What to check when changing the planner part
 

@@ -1,24 +1,17 @@
 #!/usr/bin/env bash
-# Entry point of docker/cassert.Dockerfile: start an assert-enabled server
-# with the library preloaded (tests/scripts/start-cluster.sh), run the
-# regression and isolation suites, and fail if the server log has an
-# assertion failure or a crashed backend, or if a sanitizer (the image built
-# with SANITIZE=...) reported anything.
+# Entry point of docker/cassert.Dockerfile: start a server, run the suites,
+# fail on an assertion, a crash or a sanitizer report.  See docs/docker.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# Sanitizer reports go to /tmp/asan.<pid> and /tmp/ubsan.<pid>, one file per
-# process, server and clients alike; the first error stops the process.
-# Leak detection is off: the server leaves allocations to process exit.
+# one report file per process; leaks are off: the server frees at exit
 export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:quarantine_size_mb=4:log_path=/tmp/asan
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:log_path=/tmp/ubsan
 rm -f /tmp/asan.* /tmp/ubsan.*
 
-# Instrumented frames are larger; max_stack_depth must stay below the stack
-# limit, so raise the soft limit first where the hard one allows it, and ask
-# for the larger depth only then: the server refuses a depth the limit cannot
-# hold.
+# instrumented frames are larger: raise max_stack_depth only where the
+# stack limit can be raised to hold it
 stack_opts=()
 if ulimit -s 16384 2>/dev/null || ulimit -s unlimited 2>/dev/null; then
 	stack_opts=(-c max_stack_depth=8MB)
