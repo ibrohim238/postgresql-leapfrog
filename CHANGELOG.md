@@ -32,6 +32,12 @@ versions: [SemVer](https://semver.org/).
   fetching 20,012 rows for 11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm,
   no change (BENCHMARKS.md, "Heap prefetch").
 
+- `make installcheck-upgrade`: creates every earlier release still on an update path
+  (its install script taken from the release tag) and runs `ALTER EXTENSION leapfrog
+  UPDATE`; the result must be the current version, with the objects of a fresh
+  `CREATE EXTENSION`, and pass `leapfrog_setup`. Run in CI on PostgreSQL 18; see
+  CONTRIBUTING.md.
+
 ### Fixed
 
 - Cost model: the rows fetched from the heap and the entries of a partial index ignored

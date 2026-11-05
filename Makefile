@@ -7,6 +7,10 @@
 #                       running server (PGHOST/PGPORT/PGUSER are honoured)
 #   make check      run the same tests against a temporary installation
 #                   (requires a source-tree build of PostgreSQL)
+#   make installcheck-upgrade   create the previous releases (install
+#                   scripts from their git tags) and ALTER EXTENSION ...
+#                   UPDATE them on a running server on this machine;
+#                   UPGRADE_FROM="0.0.4" picks the versions
 
 MODULE_big = leapfrog
 OBJS = \
@@ -103,7 +107,7 @@ endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation bench bench-smoke docker-test pgindent pgindent-fix
+.PHONY: test test-regress test-isolation installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix
 
 test: installcheck
 
@@ -112,6 +116,14 @@ test-regress:
 
 test-isolation:
 	$(pg_isolation_regress_installcheck) $(ISOLATION_OPTS) $(ISOLATION)
+
+# A release renames the install script, so the earlier ones exist only at
+# their tags; see tests/scripts/upgrade-check.sh.
+installcheck-upgrade:
+	EXTVERSION='$(EXTVERSION)' UPGRADE_FROM='$(UPGRADE_FROM)' \
+		PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' \
+		PG_BINDIR='$(bindir)' \
+		bash tests/scripts/upgrade-check.sh
 
 bench:
 	bash tests/performance/list_bench.sh

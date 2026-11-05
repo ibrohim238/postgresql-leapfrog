@@ -60,6 +60,18 @@ Every behaviour change comes with a test.
 - A fix is not done until a test fails without it: build the code with the
   fix reverted and check that the new test catches it.
 - Benchmark harness changes — `make bench-smoke`.
+- SQL objects, update scripts and releases — `make installcheck-upgrade`
+  (after `make install`, against a server on this machine, as a superuser).
+  It takes `leapfrog--X.sql` of every earlier release from its tag `vX`
+  (`git show`; a shallow clone needs `git fetch --tags`), creates it with
+  `CREATE EXTENSION leapfrog VERSION 'X'` in a scratch database, runs
+  `ALTER EXTENSION leapfrog UPDATE`, and checks that the result is
+  `EXTVERSION`, has the same objects as a fresh `CREATE EXTENSION` and passes
+  `leapfrog_setup`. The scripts are read from a scratch directory through
+  `extension_control_path`, so nothing is installed. By default it updates
+  from the newest tag and every older one that still has an update script;
+  `UPGRADE_FROM="0.0.3 0.0.4"` picks the versions. A new SQL object goes into
+  both `leapfrog--X.sql` and the update script, or this test fails.
 - Concurrent scenarios — `tests/isolation/specs/<name>.spec` +
   `tests/isolation/expected/<name>.out`, and the name goes into `ISOLATION`.
   Every permutation must check the **result**, not just the absence of a

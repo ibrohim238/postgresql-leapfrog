@@ -26,6 +26,10 @@ jobs:
       CC: ${{ matrix.cc }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the release tags: installcheck-upgrade takes the earlier install
+          # scripts from them
+          fetch-depth: 0
 
       - name: Install PostgreSQL ${{ matrix.pg }} from PGDG
         run: |
@@ -89,6 +93,10 @@ jobs:
 
       - name: Regression and isolation tests (make installcheck)
         run: make installcheck
+
+      - name: Update from the earlier releases (make installcheck-upgrade)
+        if: matrix.cc == 'gcc'
+        run: make installcheck-upgrade
 
       - name: Benchmark harness smoke test
         if: matrix.cc == 'gcc'
