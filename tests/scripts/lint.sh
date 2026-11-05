@@ -6,6 +6,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+. tests/scripts/makevars.sh
 
 fix=0
 case "${1:-}" in
@@ -323,7 +324,7 @@ check_clang_tidy() {
 		missing_tool "$pg_config (for clang-tidy)"
 		return
 	}
-	version=$(sed -n -E 's/^EXTVERSION[[:space:]]*=[[:space:]]*//p' Makefile)
+	version=$(make_var EXTVERSION)
 	cppflags=$("$pg_config" --cppflags)
 	# shellcheck disable=SC2086 # pg_config --cppflags is a list of options
 	out=$("$tool" --quiet src/*.c -- \
