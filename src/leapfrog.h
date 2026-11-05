@@ -4,6 +4,7 @@
  *	  Declarations shared by the parts of the Index Merge Intersect custom
  *	  scan:
  *
+ *	  compat.h		shims for the PostgreSQL major versions
  *	  leapfrog.c	module entry point, settings, SQL-callable functions
  *	  planner.c		planner hook: index streams, paths, plans
  *	  costsize.c	cost model
@@ -26,16 +27,9 @@
 #include "nodes/pathnodes.h"
 #include "utils/sortsupport.h"
 
-#define INTERSECT_NAME "Index Merge Intersect"
+#include "compat.h"
 
-/* PostgreSQL 19 passes table AM scan options to index_beginscan. */
-#if PG_VERSION_NUM >= 190000
-#define lf_index_beginscan(heap, index, snapshot, nkeys) \
-	index_beginscan(heap, index, snapshot, NULL, nkeys, 0, SO_NONE)
-#else
-#define lf_index_beginscan(heap, index, snapshot, nkeys) \
-	index_beginscan(heap, index, snapshot, NULL, nkeys, 0)
-#endif
+#define INTERSECT_NAME "Index Merge Intersect"
 
 /* The most indexes one node may combine (leapfrog.max_indexes). */
 #define INTERSECT_MAX_STREAMS 16

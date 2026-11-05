@@ -45,6 +45,10 @@ versions: [SemVer](https://semver.org/).
   `make bench` run it at 20M rows (below that `LIMIT 100` cannot stop early, which a
   warning says), the manual CI job at 1M to check the harness, and `bench-smoke` checks
   it too.
+- Source: every PostgreSQL version conditional is in `src/compat.h` (after PG-Strom's
+  `pg_compat.h` and Citus's `pg_version_constants.h`): `lf_index_beginscan`, the
+  node instrumentation accessors and `LF_DATUM_IS_64BIT`; a build against a server
+  older than PostgreSQL 18 stops with an error. No change in behaviour.
 
 ### Removed
 

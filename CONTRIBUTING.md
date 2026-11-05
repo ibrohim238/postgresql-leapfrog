@@ -85,6 +85,7 @@ without ICU collations. A change to such a test changes both files.
 | File | Contents |
 |---|---|
 | `src/leapfrog.h` | structures shared between the files, `custom_private` layout, settings, prototypes |
+| `src/compat.h` | every PostgreSQL version conditional: shims for the differences between major versions; the `.c` files test no `PG_VERSION_NUM` |
 | `src/leapfrog.c` | `_PG_init`, settings, SQL-callable functions |
 | `src/planner.c` | planner hook: index candidates and pairs, the path, the plan and its `Filter` |
 | `src/costsize.c` | cost model, including the range probe |

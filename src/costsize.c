@@ -707,7 +707,7 @@ sort_stats(PlannerInfo *root, Index rti, SortColumn *sort)
 
 			/* the comparators that compare plain integers */
 			range_compare(sort, stats->hist[0], stats->hist[0]);
-#if PG_VERSION_NUM >= 190000 || SIZEOF_DATUM >= 8
+#if LF_DATUM_IS_64BIT
 			if (sort->range_ssup.comparator == ssup_datum_signed_cmp)
 			{
 				stats->interpolate = true;
