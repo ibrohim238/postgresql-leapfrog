@@ -102,7 +102,7 @@ _PG_init(void)
 							 NULL);
 
 	DefineCustomBoolVariable("leapfrog.prefetch",
-							 "Prefetches the next leaf page of every index stream.",
+							 "Prefetches the next leaf page of every index stream, and heap pages of rows ahead where the Filter drops most of them.",
 							 NULL,
 							 &intersect_prefetch,
 							 true,

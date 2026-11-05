@@ -131,7 +131,7 @@ jobs:
         run: docker run --rm leapfrog-cassert
 
   bench:
-    name: Benchmark (manual, 1M rows)
+    name: Benchmark (manual, 1M rows, checks the harness only)
     if: github.event_name == 'workflow_dispatch' && inputs.bench
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -139,8 +139,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run the benchmark profile
         env:
-          BENCH_SIZES: "100000 1000000"
-          BENCH_REPEATS: "5"
+          SIZE: "1000000"
+          REPEATS: "3"
         run: |
           docker compose up -d --build --wait postgres
           docker compose --profile bench run --rm --build bench

@@ -1,16 +1,19 @@
 # Benchmark results
 
-Three harnesses, all reproducible from the repository:
+Scripts in `tests/performance/`:
 
-- [`tests/performance/write_bench.sh`](tests/performance/write_bench.sh) —
-  storage, writes and a read mix for a table with 12 filter columns, comparing
-  a specialised index set with a general one;
-- [`tests/performance/run.sh`](tests/performance/run.sh) — reads only, one
-  filter column plus soft deletes, three index strategies over a matrix of
-  distributions, deleted shares, customers and limits;
-- [`tests/performance/bitmap_bench.sh`](tests/performance/bitmap_bench.sh) —
-  the node against `BitmapAnd`, an Index Scan and an exact index at 100k to
-  100M rows.
+- [`list_bench.sh`](tests/performance/list_bench.sh) — the list query with rare, scattered
+  matches, each scenario separately, against stock plans and an exact index;
+- [`write_bench.sh`](tests/performance/write_bench.sh) — storage, writes and a read
+  mix for a table with 12 filter columns, a specialised index set against a general one;
+- [`uniform_bench.sh`](tests/performance/uniform_bench.sh) — uniform data
+  (`bitmap_bench.sh` before): the node against `BitmapAnd`, an Index Scan and an exact
+  index at 100k to 100M rows;
+- [`planning_bench.sh`](tests/performance/planning_bench.sh) and
+  [`cost_bench.sh`](tests/performance/cost_bench.sh) — for work on the planner.
+
+Older sections name scripts removed after `396a078` (`run.sh`, `types_bench.sh`,
+`types_compare.sh`, `skip_bench.sh`, `choices.sql`); they are in the git history.
 
 The list-query data sets of the section "100M rows: the list query, needles and the
 middle" are [`tests/performance/list_bench.sh`](tests/performance/list_bench.sh)
@@ -252,7 +255,7 @@ agree within the noise below.
 
 ### Three runs at 1M, 10M and 50M rows, `work_mem` 256MB (the README's table)
 
-`bitmap_bench.sh` on the C code of commit `daf9ece`,
+`uniform_bench.sh` on the C code of commit `daf9ece`,
 `SIZES="1000000 10000000 50000000" WORK_MEM=256MB WARMUP=5`, run three
 times, each on a freshly loaded table, the four plans in ABBA order;
 the Compose server (`shared_buffers` 512MB, `random_page_cost` 4), one
@@ -325,7 +328,7 @@ Median (90th percentile) of 33 runs:
 
 ### Deleted rows in batches, three runs at 1M, 10M and 50M rows
 
-`bitmap_bench.sh DELETED=batches` on the same server and settings
+`uniform_bench.sh DELETED=batches` on the same server and settings
 (`WORK_MEM=256MB WARMUP=5`, `shared_buffers` 512MB), three runs at 1M and
 10M rows and three at 50M, each on a freshly loaded table. The id range is
 cut into 64 blocks; a customer's rows in a block are deleted all or none,
@@ -429,7 +432,7 @@ its times within the usual spread.
 
 ### Earlier runs: 100k to 10M rows, `work_mem` 4MB and 64MB
 
-`bitmap_bench.sh` at commit `d2ea3d4`, same container and laptop as above
+`uniform_bench.sh` at commit `d2ea3d4`, same container and laptop as above
 (`shared_buffers` 512MB here, `random_page_cost` 4). Table: `customer_id`
 100 values, `product_id` 50 values, 10 % of the rows deleted, all hashed;
 indexes `(customer_id, id)`, `(product_id, id)` and `(id) WHERE deleted_at
@@ -719,7 +722,7 @@ to look up.
 ## 10M to 100M rows, reads and writes (`fed2cfb`)
 
 One laptop (14 GB of memory, 16 threads), `shared_buffers` 512MB, other containers idle.
-`bitmap_bench.sh`, `WARMUP=5`, `WORK_MEM=256MB` (512MB at 100M), median of 11, ms. Every
+`uniform_bench.sh`, `WARMUP=5`, `WORK_MEM=256MB` (512MB at 100M), median of 11, ms. Every
 bitmap exact (no lossy heap blocks). Pages outside `shared_buffers` come from the OS page
 cache or the disk, which the script does not tell apart; that matters from 50M on.
 
@@ -1090,6 +1093,109 @@ there (3,000,491 entries, 20,012 heap fetches, 11 rows kept), as in the load wit
 the prefetch; the estimate of the third stream sits close to the line and the sample
 statistics of each load decide. Either way the node is ahead of stock's `BitmapAnd`.
 
+### The same on 0.0.5 (`396a078`)
+
+`list_bench.sh`, the same load (`SIZE=100000000 WORK_MEM=512MB`, rows in random order),
+3 measured runs in ABBA order, ms, median with the slowest run in brackets. Pages and
+index entries as above; the times are lower than above with the same work, the OS page
+cache differing from run to run:
+
+| Query | exact | node | auto | stock | indexscan | bitmap |
+|---|---:|---:|---:|---:|---:|---:|
+| customer 5 (5M rows) | 0.20 (0.25) | 115 (122) | 105 (268) | Index Scan 95,379 (95,680) | 96,075 (96,272) | 2,716 (2,833) |
+| customer 4 (1M rows) | 0.19 (0.19) | 44 (44) | 56 (79) | Index Scan 776 (1,102) | 768 (2,719) | 772 (919) |
+| customer 4 and product 120 | 0.08 (0.09) | 212 (219) | 206 (213) | `BitmapAnd` 1,085 (1,689) | 87,363 (87,857) | 1,682 (1,683) |
+
+`write_bench.sh` on the same commit, `BASE_ROWS=20000000 STRATEGIES="M G"`, one run: index
+size M 11.2 GB, G 8.0 GB; WAL within 0.2 % of the earlier run for every operation (`INSERT`
+3,600 and 166 MB, `UPDATE` of a filter column 1,004 and 70 MB, of `deleted_at` 46 and
+77 MB, `DELETE` 18 MB each); `INSERT` 935 and 11,526 rows per second.
+
+### Heap prefetch, the third query from disk
+
+The third query fetches 20,012 heap rows and keeps 11. One load of the same data, 100M
+rows in random order, on the working tree after `396a078`; ad hoc script, not in the
+repository. Heap prefetch on and off in ABBA order, off being `effective_io_concurrency = 1`,
+which leaves the leaf page prefetch as it is. Before each cold run the large customer's
+Index Scan evicted the caches: 30,743 pages read from outside `shared_buffers` in each. One
+run per line, ms:
+
+| Plan | Cold, each run | Cold, median | Warm, median of 4 |
+|---|---|---:|---:|
+| Node, heap prefetch on | 1,287 1,291 1,230 | **1,287** | 164 |
+| Node, heap prefetch off | 2,425 2,406 2,355 | 2,406 | 162 |
+| `BitmapAnd` | 1,549 1,488 1,480 | 1,488 | |
+
+From disk the prefetch takes the node from 1.6× slower than `BitmapAnd` to 13 % faster;
+warm the cost is within the spread of the runs. In a separate load through `list_bench.sh`
+(`SCENARIOS=two_filters`): exact 0.03, node 258 and the planner's node 252, stock's
+`BitmapAnd` 746, forced `BitmapAnd` 1,132, warm medians of 3. Warm times differ between
+loads with the same work (164 against 252 here, 206 above), so they compare within one
+load only.
+
+### The index pairs of the third query, and extended statistics
+
+Three ad hoc runs after `396a078`, scripts kept outside the repository, each one load of
+`list_bench.sh`'s data (100M rows, random order, `shared_buffers` 512MB, `work_mem` 512MB),
+cold runs after an Index Scan of another customer evicted the caches, ms.
+
+**Which pair.** The third query's sets forced one at a time, ABBA, 3 cold and 4 warm runs,
+medians:
+
+| Streams | Cold | Warm | Heap rows | Entries |
+|---|---:|---:|---:|---:|
+| `(product_id, id)` + `(customer_id, id)`, the planner's usual choice | **1,254** | **165** | 20,012 | 3.0M |
+| `(customer_id, id)` + `(id) WHERE deleted_at IS NULL` | 1,476 | 244 | 500 | 5.7M |
+| all three | 1,615 | 321 | 11 | 7.7M |
+
+The pair with the live-rows index fetches 40× fewer heap rows and is still slower: the
+live-rows index holds 5M entries, one in 20 ids, 980 ms of the 1,476 cold. It would win
+where the live rows are rare in the table as a whole, which they are not here.
+
+**Extended statistics, one deletion date** (the data above: every deleted row has the same
+`deleted_at`). `CREATE STATISTICS (mcv) ON customer_id, deleted_at`, `ANALYZE` at
+`SET STATISTICS` 100 (1 s), 1,000 (10 s) and 10,000 (16 s); one cold run per cell and 3 warm:
+
+| Target | leapfrog, third query | stock, third query | stock, customer 5M (cold) | stock, customer 1M (cold / warm) |
+|---|---|---|---|---|
+| none | pair, 1,248 cold / 166 warm | `BitmapAnd` 1,554–2,190 / 532 | Index Scan 81 s | Index Scan 15 s / 1.0–4.0 s |
+| 100 | three streams, 1,300 / 314 | `BitmapAnd` 787 / 568 | Index Scan 12 s | Index Scan 14 s / 0.9–2.1 s |
+| 1,000 | customer + live, 1,448 / 237 | `BitmapAnd` 1,692 / 503 | **`BitmapAnd` 2.0 s** | **`BitmapAnd` 1.1 s / 0.74–0.76 s** |
+| 10,000 | customer + live, 1,418 / 228 | `BitmapAnd` 1,241 / 466 | `BitmapAnd` 1.7 s | `BitmapAnd` 1.0 s / 0.65 s |
+
+leapfrog's plans for the first two queries stayed the same (0.53 s and 0.12–0.14 s cold,
+0.05 s warm for the second). The MCV list has no entry for the customers' live rows at any
+target; what it holds is "customer 4, this date" at 1 % and "customer 5, this date" at 5 %,
+and the planner derives the rest. The statistics on the expression `(deleted_at IS NULL)` are
+not applied to the clause `deleted_at IS NULL` at all (estimate 10,038 for 400 rows on a
+200,000-row copy of the shape); the columns are what works. With them stock PostgreSQL leaves
+the Index Scan of the first two queries for `BitmapAnd`: 3–4× the node on the large customer
+from disk, 8–14× on the small one, instead of 100× and more. The third query's choice between
+two and three streams, and the pair under statistics, is the planner pricing the pairs of the
+first stream (CHANGELOG, Unreleased).
+
+**Extended statistics, 730 deletion dates** (the same load with `deleted_at` spread over two
+years, as a real table has). The MCV list holds 4, 234 and 10,000 pairs at the three targets
+and none for customers 4 or 5: their 1M rows split over 730 dates, each pair too rare to be
+listed. Stock PostgreSQL keeps the Index Scan for the first two queries at every target
+(cold 3.9–41 s and 3.5–15 s, these evictions incomplete for the plan's own pages; warm
+1.0–3.4 s for the small customer), `BitmapAnd` for the third (cold 1,262–2,184, warm
+550–1,244). leapfrog: first query cold 590–768, second cold 67–157 and warm 70–178, third
+as the table below. `ANALYZE` at target 10,000 took 26 s.
+
+| Target | leapfrog, third query | Cold | Warm |
+|---|---|---:|---:|
+| none | three streams | 2,092–2,153 | 309–465 |
+| 100 | pair | 914 | 409–441 |
+| 1,000 | three streams | 2,074 | 401–750 |
+| 10,000 | pair | 1,503 | 168–170 |
+
+The estimates of the pair and of the three streams lie within a few percent of each other,
+so the sample decides; since the heap prefetch the pair is the better plan from disk and
+warm, and the cost model does not know the heap pages are asked for ahead (docs/roadmap.md).
+Warm times of this run are noisier than the others (other work on the machine); the order of
+the plans does not change.
+
 ### Two filters, 100 matches spread one per million ids
 
 Customers with 10k, 100k and 1M rows, products with 1M and 10M rows (`h1 =
@@ -1191,17 +1297,79 @@ descents and the reads that step to another leaf page costs nothing measurable (
 against 48.0 ms) and reports 12.5 and 11.2 ms for the two streams, the rest being
 the merge itself.
 
+## Moved from the README
+
+Older measurements on 1M rows, kept here when the README was narrowed to the
+list query with rare, scattered matches and the write comparison.
+
+The README's example, all four plans (warm cache; the counters are exact, the
+timings are from a laptop and vary up to 2× between runs):
+
+| Plan | Time | Buffers | Heap rows fetched | Sort |
+|---|---|---|---|---|
+| **Index Merge Intersect** (planner's choice at both page costs) | **1.9 ms** | **166** | **100** | no |
+| Index Scan on `(id) WHERE deleted_at IS NOT NULL` + filter (the stock choice) | 4.3–8.1 ms | 1,957 | 20,304 | no |
+| Index Scan on `(customer_id, id)` + filter | 2.5 ms | 3,133 | 3,554 | no |
+| BitmapAnd + Bitmap Heap Scan | 10.8 ms | 621 | 393 | top-N |
+
+The planner's estimate there at `random_page_cost = 4`: 798 against 933.
+
+A self join by hand, after `VACUUM`, with indexes `(customer_id, id)` and
+`(product_id, id)` and 62 matching rows: the node 0.75 ms, the self join 3.02 ms
+(`enable_self_join_elimination = off`). With a sparse index next to a very dense
+one the self join took 13.6 ms against the node's 24.7.
+
+Both conditions dense, data in memory, `LIMIT 100`: the planner can pick the node
+at 0.26 ms over an Index Scan at 0.07 ms.
+
+The 1M-row matrix (192 queries, `tests/performance/choices.sql`): the planner
+picks the node 2 times at `random_page_cost = 4` and 5 times at 1.1; clearly slower
+only in `LIMIT 1` queries (by 0.02–0.09 ms, 1 and 4 cases). It misses the node in
+27 and 21 queries where the node is more than 15 % faster than both the planner's
+choice and the stock plan on `(customer_id, id)`, most of them deleted rows (1 %
+uniform: 0.5 ms against 0.7–1.7 ms; skewed, `LIMIT 1000`: 1.1 ms against 2–8 ms). A
+partial index scan filtering the customer is estimated at 4 for 2 ms of work.
+
+Misses of the cost model after probing the stream ranges: on `cost_bench.sh` (24
+queries, skewed and correlated data) from 18 to 11 at `random_page_cost = 4` and
+from 16 to 9 at 1.1; on the 1M-row matrix from 32 to 27 and from 21 to 21. After
+charging TID comparisons at the bitmap's rate, on 32 queries with pairs of ordinary
+indexes: from 14 to 10 and from 17 to 6. On two ordinary indexes (15,000 entries,
+118 buffers, the same as `BitmapAnd`) the node runs 3× faster than `BitmapAnd`, and a
+full `cpu_operator_cost` per comparison had made it the dearer plan by 4 %.
+
+Skip-ahead thresholds on 1M rows, 16–2048 (`skip_bench.sh`), buffers:
+
+| Gaps between matches | No skipping | Fixed 1,024 (0.0.1) | Fixed 128 | Adaptive from 64 |
+|---|---:|---:|---:|---:|
+| even, ~50 entries | 5,562 | 5,562 | 7,702 | 5,571 |
+| clusters every 1,000 entries | 2,518 | 2,592 | 2,361 | 2,245 |
+| clusters every 10,000 entries | 1,975 | 410 | 236 | 221 |
+| clusters every 100,000 entries | 1,922 | 44 | 26 | 24 |
+| same, `LIMIT 100` | 438 | 94 | 57 | 54 |
+
+With shared buffers emptied before every run (`COLD_CMD` running
+`pg_buffercache_evict_all()`; the OS cache stays warm), blocks read into
+shared buffers:
+
+| Gaps between matches | No skipping | Fixed 1,024 | Adaptive from 64 |
+|---|---:|---:|---:|
+| even, ~50 entries | 5,555 | 5,555 | 5,555 |
+| clusters every 1,000 entries | 2,511 | 2,511 | 1,246 |
+| clusters every 10,000 entries | 1,968 | 311 | 122 |
+| clusters every 100,000 entries | 1,917 | 33 | 13 |
+| same, `LIMIT 100` | 433 | 69 | 29 |
+
 ## Not done
 
-- 10M and 100M rows for `run.sh` (`BENCH_SIZES="10000000" bash tests/performance/run.sh`).
 - 50M and 100M rows for `write_bench.sh`: they need more disk than was free here.
 - The needle, middle and spread data sets of 100M rows as scripts in
-  `tests/performance/` (the list query is `list_bench.sh`). The `bitmap_bench.sh` rerun
+  `tests/performance/` (the list query is `list_bench.sh`). The `uniform_bench.sh` rerun
   with the `indexscan` mode was stopped after 10M and 20M (no change against the run
   above; the forced Index Scan equals stock's choice where that is an Index Scan).
 - Why the planner takes two streams and 20,012 heap fetches for the three-filter
   query on the random-order table, where the ordered one got three streams.
-- Write cost of the exact indexes of `bitmap_bench.sh`; only the S, M and G sets of
+- Write cost of the exact indexes of `uniform_bench.sh`; only the S, M and G sets of
   `write_bench.sh` were measured.
 - OS-cold runs: everything above is with data in the OS page cache.
 - Real-world data: synthetic data only.

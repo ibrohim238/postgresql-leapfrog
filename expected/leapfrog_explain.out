@@ -6,6 +6,8 @@
 --
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
+-- heap prefetch depends on it, in the counters below
+SET effective_io_concurrency = 16;
 CREATE TABLE lf_explain (
 	id bigint PRIMARY KEY,
 	owner_id bigint NOT NULL,
@@ -579,15 +581,16 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL AND payload L
 ------------------------+-----------------------
  Outer Index            | "lf_explain_owner_id"
  Inner Index            | "lf_explain_live_id"
- Outer Entries Read     | 47
- Inner Entries Read     | 94
- Matched TIDs           | 47
+ Outer Entries Read     | 48
+ Inner Entries Read     | 96
+ Matched TIDs           | 48
  Heap Fetches           | 47
+ Heap Prefetches        | 2
  Peak Group Memory      | 96
  Actual Rows            | 10.00
  Actual Loops           | 1
  Rows Removed by Filter | 37
-(10 rows)
+(11 rows)
 
 -- JSON, YAML and XML formats carry the same properties.
 EXPLAIN (COSTS OFF, FORMAT JSON)

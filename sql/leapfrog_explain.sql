@@ -6,6 +6,8 @@
 --
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
+-- heap prefetch depends on it, in the counters below
+SET effective_io_concurrency = 16;
 
 CREATE TABLE lf_explain (
 	id bigint PRIMARY KEY,

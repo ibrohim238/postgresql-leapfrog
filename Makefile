@@ -51,7 +51,8 @@ REGRESS = \
 	leapfrog_index_order \
 	leapfrog_merge_order \
 	leapfrog_planner \
-	leapfrog_first_group
+	leapfrog_first_group \
+	leapfrog_heap_prefetch
 
 ISOLATION = \
 	leapfrog_concurrent_update \
@@ -113,7 +114,7 @@ test-isolation:
 	$(pg_isolation_regress_installcheck) $(ISOLATION_OPTS) $(ISOLATION)
 
 bench:
-	bash tests/performance/run.sh
+	bash tests/performance/list_bench.sh
 
 bench-smoke:
 	bash tests/scripts/bench-smoke.sh

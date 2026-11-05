@@ -3,6 +3,55 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versions: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Planner: with an MCV list or dependencies covering two columns of the conditions, the
+  first stream is priced in a pair with every other index, not only the next by size. The pass by size adds a large index
+  to the smaller ones only, so `(customer_id, id)` with `(id) WHERE deleted_at IS NULL`
+  was never priced where a `(product_id, id)` was smaller. No change without such
+  statistics, where the correlation is unknown, so no more range probes either; test in
+  `leapfrog_planner`.
+
+- Heap prefetch: where the node's `Filter` drops more rows than it passes, matches are
+  gathered ahead, doubling up to the tablespace's `effective_io_concurrency` and at most 32,
+  their heap pages asked for and the rows fetched in the same order; heap tables only.
+  Found rows wait for no long stretch: the queue is fetched after 4,096 entries without a
+  match. A node without a `Filter`, or whose `Filter`
+  passes most rows, still fetches one match at a time, so that a `LIMIT` reads no further
+  in the indexes. MVCC snapshots only; under `leapfrog.prefetch`. `EXPLAIN ANALYZE` counts
+  the pages as `Heap Prefetches`; test in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query
+  fetching 20,012 rows for 11 went from 2.4 s to 1.3 s, ahead of `BitmapAnd`'s 1.5 s; warm,
+  no change (BENCHMARKS.md, "Heap prefetch").
+
+### Fixed
+
+- Cost model: the rows fetched from the heap and the entries of a partial index ignored
+  extended statistics, as predicates reached `clauselist_selectivity` without a
+  `RestrictInfo` and entries took the predicate as independent of the equalities. Tests in
+  `leapfrog_planner`. A statistics object must cover plain columns:
+  `(deleted_at IS NULL)` as an expression does not match a clause on `deleted_at`.
+
+### Changed
+
+- README shows two measurements only: the list query with rare, scattered matches
+  at 100M rows, with the plans, and the write comparison; the rest is in
+  BENCHMARKS.md.
+- `bitmap_bench.sh` is `uniform_bench.sh`, named after its data.
+- `list_bench.sh` runs each scenario separately, with its own exact index and results
+  directory; `SCENARIOS` picks them, in place of `QUERIES`, checked before the load, and
+  the results are written as each scenario ends. The Compose `bench` profile and
+  `make bench` run it at 20M rows (below that `LIMIT 100` cannot stop early, which a
+  warning says), the manual CI job at 1M to check the harness, and `bench-smoke` checks
+  it too.
+
+### Removed
+
+- `run.sh` with `bench.sql`, `schema.sql`, `summarize.sh` and `choices.sql`,
+  `types_bench.sh`, `types_compare.sh`, `skip_bench.sh`; the regression test
+  `leapfrog_skip` checks the skip-ahead counters.
+
 ## [0.0.5] — 2026-11-04
 
 ### Added

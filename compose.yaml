@@ -78,9 +78,9 @@ services:
       PGUSER: postgres
       PGPASSWORD: ${POSTGRES_PASSWORD:-leapfrog}
       PGDATABASE: leapfrog
-      BENCH_SIZES: ${BENCH_SIZES:-100000 1000000}
-      BENCH_REPEATS: ${BENCH_REPEATS:-5}
-    entrypoint: ["bash", "tests/performance/run.sh"]
+      SIZE: ${SIZE:-20000000}
+      REPEATS: ${REPEATS:-3}
+    entrypoint: ["bash", "tests/performance/list_bench.sh"]
     volumes:
       - ./tests/performance/results:/src/leapfrog/tests/performance/results
 

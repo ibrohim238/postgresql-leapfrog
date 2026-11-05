@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Uniform data: filter values spread evenly over the table.
 # Index Merge Intersect against BitmapAnd and an exact index as the table grows.
 #
 # Table: customer_id (100 values), product_id (50), deleted_at, with indexes
@@ -20,7 +21,7 @@
 # Environment: PGHOST/PGPORT/PGUSER; BENCH_DB (see bench_db.sh); SIZES ("100000
 # 1000000 10000000"), REPEATS (11), WARMUP (2), DELETED ("hashed batches"),
 # WORK_MEM (server's), EXACT (1), BENCH_OUT (must not exist).
-# Output in results/bitmap-<timestamp>/: runs.csv, summary.csv (median, p90),
+# Output in results/uniform-<timestamp>/: runs.csv, summary.csv (median, p90),
 # sizes.csv (table and indexes), server.txt.
 set -euo pipefail
 
@@ -39,10 +40,10 @@ bench_db_use
 trap 'psql -X -q -c "DROP TABLE IF EXISTS lf_bitmap" >/dev/null 2>&1 || true; bench_db_unlock' EXIT
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-out=${BENCH_OUT:-"results/bitmap-$stamp"}
+out=${BENCH_OUT:-"results/uniform-$stamp"}
 mkdir -p "$(dirname "$out")"
 if ! mkdir "$out"; then
-	echo "bitmap_bench.sh: output directory $out exists, refusing to mix two runs" >&2
+	echo "uniform_bench.sh: output directory $out exists, refusing to mix two runs" >&2
 	exit 1
 fi
 export PGOPTIONS="-c client_min_messages=warning"
@@ -110,7 +111,7 @@ deleted_expr() {
 	case $1 in
 		hashed) echo "abs(hashint8(g * 4 + 3)) % 10 = 0" ;;
 		batches) echo "((g - 1)::bigint * 64 / $2 + abs(hashint8(g * 4 + 1)) % 100) % 8 = 0" ;;
-		*) echo "bitmap_bench.sh: unknown DELETED value $1" >&2; return 1 ;;
+		*) echo "uniform_bench.sh: unknown DELETED value $1" >&2; return 1 ;;
 	esac
 }
 
@@ -214,4 +215,4 @@ $PSQL -c "\\copy (SELECT size, deleted, query, mode, mode() WITHIN GROUP (ORDER 
 $PSQL -c "\\copy (SELECT * FROM lf_bitmap_sizes ORDER BY 1, 2, 3) TO '$out/sizes.csv' CSV HEADER"
 
 column -s, -t < "$out/summary.csv" 2>/dev/null || cat "$out/summary.csv"
-echo "bitmap_bench: results in $out"
+echo "uniform_bench: results in $out"

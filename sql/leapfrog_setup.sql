@@ -144,7 +144,7 @@ BEGIN
 			ORDER BY k.ord, s.i;
 		RETURN QUERY
 			SELECT key, node->key FROM unnest(ARRAY[
-				'Matched TIDs', 'Heap Fetches', 'Skips', 'Short Skips',
+				'Matched TIDs', 'Heap Fetches', 'Heap Prefetches', 'Skips', 'Short Skips',
 				'Rows Checked by Predicate', 'Group Overflows',
 				'Peak Group Memory', 'Actual Rows', 'Actual Loops',
 				'Rows Removed by Filter']) AS key

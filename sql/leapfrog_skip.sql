@@ -2,7 +2,7 @@
 -- leapfrog_skip
 --
 -- Skip-ahead: a scan that lags behind the other side for leapfrog.skip_after
--- (1024) entries descends its B-tree again straight to the other side's value
+-- (64 to start, adaptive) entries descends its B-tree again straight to the other side's value
 -- (sortcol >= value forward, <= value backward).  The entries in between
 -- cannot match; entries equal to the value must not be skipped, which
 -- matters when the sort column is not unique.  Results are compared with the
