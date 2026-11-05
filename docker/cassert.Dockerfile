@@ -7,6 +7,8 @@
 #
 # Build arguments:
 #   PG_BRANCH   PostgreSQL git branch or tag (REL_18_STABLE)
+#   UID, GID    ids of the user running the server and the tests (1000),
+#               the host user's when the sources are mounted over the copy
 
 FROM debian:bookworm-slim
 ARG PG_BRANCH=REL_18_STABLE
@@ -32,7 +34,10 @@ ENV PATH=/usr/local/pgsql/bin:$PATH \
     PGHOST=/tmp \
     PGUSER=postgres
 
-RUN useradd -m postgres \
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -o -g "${GID}" postgres \
+    && useradd -o -m -u "${UID}" -g "${GID}" postgres \
     && mkdir -p /var/lib/postgresql /src/leapfrog \
     && chown -R postgres /var/lib/postgresql /src/leapfrog
 

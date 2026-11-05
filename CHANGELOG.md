@@ -99,6 +99,12 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- Docker: the test image no longer copies the sources; Compose and `tests/run-in-docker.sh`
+  mount the repository at `/src/leapfrog`, and the entrypoint runs `make clean`, builds with
+  `WERROR=1` and installs before the suites, as a user with the host's UID/GID (build
+  arguments `UID`, `GID`, also in the cassert image), so files written into the tree are no
+  longer owned by root. `PG_MAJOR` is a Compose variable (`image: leapfrog:${PG_MAJOR:-18}`)
+  and `make docker-build PG_MAJOR=18` / `make docker-test` wrap Compose.
 - The regression tests live in `tests/regress/` (`sql/`, `expected/`, and `results/` when
   run), next to the isolation and performance tests, instead of the repository root.
 - Planner: the plan's `custom_private` is written and read in one place each,

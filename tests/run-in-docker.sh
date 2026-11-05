@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Build the images, start PostgreSQL 18 with leapfrog preloaded and run the
-# regression and isolation suites inside the test container.
+# regression and isolation suites inside the test container, which mounts
+# this repository, builds and installs the extension from it and runs as a
+# user with the ids of the one running this script.  PG_MAJOR picks the
+# PostgreSQL major version (18).
 #
 # Everything runs in a Compose project of its own, leapfrog-test-<pid>-<random>
 # (or COMPOSE_TEST_PROJECT), not in the default project leapfrog: the
@@ -52,7 +55,11 @@ if [ "$keep" -eq 0 ]; then
 	trap 'compose down -v' EXIT
 fi
 
-mkdir -p results tests/isolation/results
+# The test container mounts the repository and writes into it as a user with
+# these ids (Dockerfile, build arguments UID and GID).
+LEAPFROG_UID=$(id -u)
+LEAPFROG_GID=$(id -g)
+export LEAPFROG_UID LEAPFROG_GID
 
 compose up -d --build --wait postgres
 status=0

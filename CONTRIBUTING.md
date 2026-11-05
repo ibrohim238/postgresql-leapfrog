@@ -5,9 +5,18 @@
 You need PostgreSQL 18 with the server headers. Docker is the easiest way:
 
 ```bash
-docker compose up -d --build --wait            # server with the library preloaded
-docker compose --profile test run --rm test    # all tests
+bash tests/run-in-docker.sh                    # all tests, in a Compose project of their own
+make docker-build PG_MAJOR=18                  # the Compose images only
 ```
+
+The test image (`Dockerfile`, target `test`) has the build tools but no
+sources: Compose mounts the repository at `/src/leapfrog`, and the entrypoint
+(`tests/scripts/run-tests.sh --build`) runs `make clean`, builds with
+`WERROR=1` and installs before the suites. It runs as a user created with the
+build arguments `UID`/`GID`, which `run-in-docker.sh` and `make docker-build`
+set to yours (`LEAPFROG_UID`/`LEAPFROG_GID` for a plain `docker compose`), so
+what it writes into the tree belongs to you. `PG_MAJOR` picks the PostgreSQL
+major version, `LEAPFROG_TAG` the image tag (default `PG_MAJOR`).
 
 Locally:
 

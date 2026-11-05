@@ -22,10 +22,15 @@ changes a step.
 There is no PostgreSQL on a typical host; use Docker.
 
 ```bash
-docker compose --profile test run --rm test         # build + all tests
+bash tests/run-in-docker.sh                         # build + all tests
 docker build -f docker/cassert.Dockerfile -t leapfrog-cassert . \
   && docker run --rm leapfrog-cassert               # assert-enabled server
 ```
+
+The test image has no sources: it mounts the repository at `/src/leapfrog`
+and builds it there (`make clean` first) as a user with your UID/GID
+(`run-in-docker.sh` and `make docker-build` pass them), so objects and
+`tests/regress/results` on the host are yours.
 
 Inside a container with the server headers (repository mounted at `/work`):
 
@@ -51,7 +56,6 @@ make lint                          # must be clean; see CONTRIBUTING.md, "Lint"
   database after `leapfrog_setup`. `make installcheck-rerun` reruns what the
   last `installcheck` failed. Both are for reproducing a failure locally; a
   flaky test is fixed (CONTRIBUTING.md, "Flaky tests"), never retried in CI.
-- Files written by the container are owned by root; `chown` them back.
 
 ## Rules
 

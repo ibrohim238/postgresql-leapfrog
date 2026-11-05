@@ -584,7 +584,10 @@ bash tests/run-in-docker.sh --keep   # keep the server running
 
 `run-in-docker.sh` needs Docker Compose 2.24.4 or later, for `!override` in
 `tests/compose.test.yaml`. `COMPOSE_TEST_PROJECT` sets the project name; a
-project that already has containers or volumes is refused.
+project that already has containers or volumes is refused. The test container
+mounts the repository, builds the extension from it and runs as a user with
+your UID and GID, so its output (`tests/regress/results`, the objects) is
+yours.
 
 Benchmarks (`bench` profile: `list_bench.sh`, 20M rows by default; below that the customers have too few live rows for `LIMIT 100` to stop early):
 
@@ -618,7 +621,9 @@ password is well known; `0.0.0.0` publishes it on every interface, for a
 client on another machine or a remote `DOCKER_HOST`; connect to `127.0.0.1`
 rather than `localhost`, which may resolve to `::1` first),
 `POSTGRES_PASSWORD` (`leapfrog`), `LEAPFROG_SHARED_BUFFERS` (512MB),
-`SIZE`, `REPEATS`.
+`SIZE`, `REPEATS`, `PG_MAJOR` (18), `LEAPFROG_TAG` (the image tag, `PG_MAJOR`),
+`LEAPFROG_UID`/`LEAPFROG_GID` (the ids of the test and bench containers' user,
+1000; `run-in-docker.sh` and `make docker-build` set yours).
 
 ## Loading the library
 

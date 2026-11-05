@@ -7,6 +7,8 @@
 #                       running server (PGHOST/PGPORT/PGUSER are honoured)
 #   make check      run the same tests against a temporary installation
 #                   (requires a source-tree build of PostgreSQL)
+#   make docker-build PG_MAJOR=18   build the compose images
+#   make docker-test PG_MAJOR=18    the suites in Docker (tests/run-in-docker.sh)
 #   make installcheck-upgrade   create the previous releases (install
 #                   scripts from their git tags) and ALTER EXTENSION ...
 #                   UPDATE them on a running server on this machine;
@@ -118,7 +120,7 @@ endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version lint lint-fix
+.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version lint lint-fix docker-build
 
 test: installcheck
 
@@ -169,8 +171,16 @@ bench:
 bench-smoke:
 	bash tests/scripts/bench-smoke.sh
 
+# Docker (compose.yaml): the images for PostgreSQL PG_MAJOR, the test image
+# with a user of the caller's ids, since it writes into the mounted sources.
+PG_MAJOR ?= 18
+DOCKER_ENV = PG_MAJOR='$(PG_MAJOR)' LEAPFROG_UID="$$(id -u)" LEAPFROG_GID="$$(id -g)"
+
+docker-build:
+	$(DOCKER_ENV) docker compose --profile test build
+
 docker-test:
-	bash tests/run-in-docker.sh
+	$(DOCKER_ENV) bash tests/run-in-docker.sh
 
 pgindent:
 	bash tests/scripts/pgindent.sh
