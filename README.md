@@ -574,7 +574,7 @@ bash tests/run-in-docker.sh --keep   # keep the server running
 `tests/compose.test.yaml`. `COMPOSE_TEST_PROJECT` sets the project name; a
 project that already has containers or volumes is refused.
 
-Benchmarks (`bench` profile: `list_bench.sh`, 1M rows by default):
+Benchmarks (`bench` profile: `list_bench.sh`, 20M rows by default; below that the customers have too few live rows for `LIMIT 100` to stop early):
 
 ```bash
 docker compose up -d --build --wait

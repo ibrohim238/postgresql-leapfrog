@@ -76,7 +76,6 @@ $PSQL -tAc "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('share
 echo "size=$SIZE order=$ORDER; queries run with work_mem=${WORK_MEM:-server setting}" >> "$out/server.txt"
 settings="LOAD 'leapfrog'; SET max_parallel_workers_per_gather = 0;"
 [ -n "$WORK_MEM" ] && settings="$settings SELECT set_config('work_mem', :'work_mem', false);"
-modes_reversed=$(echo $MODES | tr ' ' '\n' | tac | tr '\n' ' ')
 
 $PSQL <<-'SQL'
 	DROP VIEW IF EXISTS lf_list_metrics;

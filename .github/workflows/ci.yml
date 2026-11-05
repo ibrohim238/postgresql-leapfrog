@@ -131,7 +131,7 @@ jobs:
         run: docker run --rm leapfrog-cassert
 
   bench:
-    name: Benchmark (manual, 1M rows)
+    name: Benchmark (manual, 1M rows, checks the harness only)
     if: github.event_name == 'workflow_dispatch' && inputs.bench
     runs-on: ubuntu-24.04
     timeout-minutes: 120

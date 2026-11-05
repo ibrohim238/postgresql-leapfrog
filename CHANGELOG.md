@@ -23,9 +23,11 @@ versions: [SemVer](https://semver.org/).
   BENCHMARKS.md.
 - `bitmap_bench.sh` is `uniform_bench.sh`, named after its data.
 - `list_bench.sh` runs each scenario separately, with its own exact index and results
-  directory; `SCENARIOS` picks them, in place of `QUERIES`. The Compose `bench` profile,
-  `make bench` and the manual CI job run it, and `bench-smoke` checks the harness
-  through it.
+  directory; `SCENARIOS` picks them, in place of `QUERIES`, checked before the load, and
+  the results are written as each scenario ends. The Compose `bench` profile and
+  `make bench` run it at 20M rows (below that `LIMIT 100` cannot stop early, which a
+  warning says), the manual CI job at 1M to check the harness, and `bench-smoke` checks
+  it too.
 
 ### Removed
 
