@@ -1035,13 +1035,13 @@ form_plan_info(IntersectPlanInfo *info, CustomScan *cscan)
 	List	   *private = NIL;
 	List	   *exprs = NIL;
 
+	private = lappend(private, make_int4_const(info->nstreams));
 	private = lappend(private, makeBoolConst(info->descending, false));
 	private = lappend(private, make_oid_const(info->sort_type));
 	private = lappend(private, make_oid_const(info->sort_opfamily));
 	private = lappend(private, make_oid_const(info->sort_collation));
 	private = lappend(private, makeBoolConst(info->nulls_first, false));
 	private = lappend(private, makeBoolConst(info->notnull, false));
-	private = lappend(private, make_int4_const(info->nstreams));
 	for (int i = 0; i < info->nstreams; i++)
 	{
 		IntersectStreamInfo *stream = &info->streams[i];
@@ -1093,32 +1093,19 @@ lf_deform_plan_info(CustomScan *cscan)
 	List	   *private = cscan->custom_private;
 	List	   *exprs = cscan->custom_exprs;
 	IntersectPlanInfo *info;
-	bool		descending;
-	Oid			sort_type;
-	Oid			sort_opfamily;
-	Oid			sort_collation;
-	bool		nulls_first;
-	bool		notnull;
 	int			nstreams;
 	int			pos = 0;
 	int			epos = 0;
 
-	descending = DatumGetBool(next_datum(private, &pos));
-	sort_type = DatumGetObjectId(next_datum(private, &pos));
-	sort_opfamily = DatumGetObjectId(next_datum(private, &pos));
-	sort_collation = DatumGetObjectId(next_datum(private, &pos));
-	nulls_first = DatumGetBool(next_datum(private, &pos));
-	notnull = DatumGetBool(next_datum(private, &pos));
 	nstreams = DatumGetInt32(next_datum(private, &pos));
-
 	info = palloc0(IntersectPlanInfoSize(nstreams));
-	info->descending = descending;
-	info->sort_type = sort_type;
-	info->sort_opfamily = sort_opfamily;
-	info->sort_collation = sort_collation;
-	info->nulls_first = nulls_first;
-	info->notnull = notnull;
 	info->nstreams = nstreams;
+	info->descending = DatumGetBool(next_datum(private, &pos));
+	info->sort_type = DatumGetObjectId(next_datum(private, &pos));
+	info->sort_opfamily = DatumGetObjectId(next_datum(private, &pos));
+	info->sort_collation = DatumGetObjectId(next_datum(private, &pos));
+	info->nulls_first = DatumGetBool(next_datum(private, &pos));
+	info->notnull = DatumGetBool(next_datum(private, &pos));
 	for (int i = 0; i < nstreams; i++)
 	{
 		IntersectStreamInfo *stream = &info->streams[i];
