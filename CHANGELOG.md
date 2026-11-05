@@ -8,8 +8,10 @@ versions: [SemVer](https://semver.org/).
 ### Added
 
 - Heap prefetch: where the node's `Filter` drops more rows than it passes, matches are
-  gathered ahead, doubling up to `effective_io_concurrency`, their heap pages asked for
-  and the rows fetched in the same order. A node without a `Filter`, or whose `Filter`
+  gathered ahead, doubling up to the tablespace's `effective_io_concurrency` and at most 32,
+  their heap pages asked for and the rows fetched in the same order; heap tables only.
+  Found rows wait for no long stretch: the queue is fetched after 4,096 entries without a
+  match. A node without a `Filter`, or whose `Filter`
   passes most rows, still fetches one match at a time, so that a `LIMIT` reads no further
   in the indexes. MVCC snapshots only; under `leapfrog.prefetch`. `EXPLAIN ANALYZE` counts
   the pages as `Heap Prefetches`; test in `leapfrog_heap_prefetch`. At 100M rows, from disk, a query

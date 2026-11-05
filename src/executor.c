@@ -16,6 +16,7 @@
 
 #include "access/relscan.h"
 #include "access/stratnum.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_attribute.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
@@ -38,6 +39,10 @@
 #define HEAP_QUEUE_MAX 32
 /* Entries passed without a match before fetching what is queued. */
 #define HEAP_QUEUE_MAX_WALK 4096
+/* What a skip counts for: its descent reads a few pages. */
+#define HEAP_QUEUE_SKIP_WALK 256
+/* Fetches to see before changing the target. */
+#define HEAP_QUEUE_WINDOW 16
 
 /*
  * Skip-ahead state of one stream.  A skip that lands on the leaf page it
@@ -392,16 +397,17 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 		}
 	}
 
+	/*
+	 * Asking for a TID's block as a page of the main fork takes a table whose
+	 * TIDs are that: the heap, not any table access method.
+	 */
 	state->heap_queue_limit = 1;
 	if (intersect_prefetch && node->ss.ps.qual != NULL &&
-		IsMVCCSnapshot(estate->es_snapshot))
-	{
-		Relation	rel = node->ss.ss_currentRelation;
-
+		IsMVCCSnapshot(estate->es_snapshot) &&
+		node->ss.ss_currentRelation->rd_rel->relam == HEAP_TABLE_AM_OID)
 		state->heap_queue_limit =
-			Max(Min(get_tablespace_io_concurrency(rel->rd_rel->reltablespace),
+			Max(Min(get_tablespace_io_concurrency(node->ss.ss_currentRelation->rd_rel->reltablespace),
 					HEAP_QUEUE_MAX), 1);
-	}
 
 	intersect_rescan(node);
 }
@@ -779,7 +785,9 @@ group_contains(IndexStream *stream, ItemPointer tid)
 /*
  * find_common_value
  *		Advance the streams until all of them stand on one value, and keep a
- *		copy of it as the group value.  Returns false when a stream runs out.
+ *		copy of it as the group value.  Returns false when a stream runs out,
+ *		or to fetch what is queued (heap_queue_drain) before going on from
+ *		where every stream stands.
  *
  * One stream holds the candidate and the others catch up with it in turn.  A
  * stream that reaches it confirms it; one that passes it holds the new
@@ -843,19 +851,21 @@ find_common_value(IntersectScanState *state)
 
 			/*
 			 * Rows found already wait for the next match: fetch them before a
-			 * long stretch, which a LIMIT may never need.  The merge goes on
-			 * from here, every stream where it stands.
+			 * long stretch, which a LIMIT may never need.
 			 */
 			if (state->heap_queue_len > 0 &&
-				(++state->heap_queue_walked >= HEAP_QUEUE_MAX_WALK ||
-				 stream->skip.behind + 1 >= stream->skip.threshold))
+				++state->heap_queue_walked >= HEAP_QUEUE_MAX_WALK)
 			{
 				state->heap_queue_drain = true;
 				return false;
 			}
 
 			if (++stream->skip.behind >= stream->skip.threshold)
+			{
+				if (state->heap_queue_len > 0)
+					state->heap_queue_walked += HEAP_QUEUE_SKIP_WALK;
 				skip_ahead(state, stream, candidate->value, candidate->isnull);
+			}
 		}
 
 		stream->skip.behind = 0;
@@ -893,6 +903,9 @@ heap_queue_adjust(IntersectScanState *state)
 {
 	int64		wasted = state->rows_fetched - state->rows_emitted;
 
+	if (state->rows_fetched < HEAP_QUEUE_WINDOW)
+		return;
+
 	if (wasted > state->rows_emitted)
 		state->heap_queue_target = Min(state->heap_queue_target * 2,
 									   state->heap_queue_limit);
@@ -924,6 +937,21 @@ heap_queue_add(IntersectScanState *state, ItemPointer tid)
 	}
 	if (state->heap_queue_len >= state->heap_queue_target)
 		state->heap_queue_drain = true;
+}
+
+/*
+ * heap_queue_end_merge
+ *		The merge has no more matches.  Returns false when the queue still
+ *		holds some, to be fetched before the merge ends.
+ */
+static bool
+heap_queue_end_merge(IntersectScanState *state)
+{
+	if (state->heap_queue_len == 0)
+		return true;
+	state->merge_ended = true;
+	state->heap_queue_drain = true;
+	return false;
 }
 
 /*
@@ -1023,13 +1051,9 @@ intersect_next(ScanState *ss)
 			read_stream_entry(state, outer);
 			if (outer->eof)
 			{
-				if (state->heap_queue_len > 0)
-				{
-					state->merge_ended = true;
-					state->heap_queue_drain = true;
-					continue;
-				}
-				break;
+				if (heap_queue_end_merge(state))
+					break;
+				continue;
 			}
 		}
 
@@ -1071,6 +1095,9 @@ intersect_next(ScanState *ss)
 				state->fetching_match = true;
 				state->match_by_pred = by_pred;
 			}
+			else if (state->heap_queue_len > 0 &&
+					 ++state->heap_queue_walked >= HEAP_QUEUE_MAX_WALK)
+				state->heap_queue_drain = true;
 
 			continue;
 		}
@@ -1079,13 +1106,9 @@ intersect_next(ScanState *ss)
 		{
 			if (state->heap_queue_drain)
 				continue;
-			if (state->heap_queue_len > 0)
-			{
-				state->merge_ended = true;
-				state->heap_queue_drain = true;
-				continue;
-			}
-			break;
+			if (heap_queue_end_merge(state))
+				break;
+			continue;
 		}
 
 		state->in_group = true;
@@ -1098,8 +1121,13 @@ intersect_next(ScanState *ss)
 			 * of this group, which a queue would outlive: fetch what is
 			 * queued first, then these entries one by one.
 			 */
-			if (state->streams[i].group_overflow && state->heap_queue_len > 0)
-				state->heap_queue_drain = true;
+			if (state->heap_queue_len > 0)
+			{
+				state->heap_queue_walked += state->streams[i].group_count;
+				if (state->streams[i].group_overflow ||
+					state->heap_queue_walked >= HEAP_QUEUE_MAX_WALK)
+					state->heap_queue_drain = true;
+			}
 		}
 	}
 

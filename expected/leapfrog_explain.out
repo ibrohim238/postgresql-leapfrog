@@ -581,9 +581,9 @@ SELECT * FROM lf_explain WHERE owner_id = 1 AND deleted_at IS NULL AND payload L
 ------------------------+-----------------------
  Outer Index            | "lf_explain_owner_id"
  Inner Index            | "lf_explain_live_id"
- Outer Entries Read     | 49
- Inner Entries Read     | 98
- Matched TIDs           | 49
+ Outer Entries Read     | 48
+ Inner Entries Read     | 96
+ Matched TIDs           | 48
  Heap Fetches           | 47
  Heap Prefetches        | 2
  Peak Group Memory      | 96

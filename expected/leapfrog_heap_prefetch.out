@@ -356,6 +356,103 @@ RESET enable_indexonlyscan;
 RESET enable_bitmapscan;
 RESET leapfrog.enabled;
 DROP TABLE lf_hp_kill;
+-- a Filter that drops few rows does not grow the target: one row in ten
+CREATE TABLE lf_hp_few (id bigint PRIMARY KEY, customer_id bigint NOT NULL, product_id bigint NOT NULL);
+INSERT INTO lf_hp_few SELECT g, g % 2, g % 3 FROM generate_series(1, 30000) g;
+CREATE INDEX lf_hp_few_customer ON lf_hp_few (customer_id, id);
+CREATE INDEX lf_hp_few_product ON lf_hp_few (product_id, id);
+VACUUM ANALYZE lf_hp_few;
+SELECT count(*) AS asked FROM lf_counters($$
+	SELECT id FROM lf_hp_few WHERE customer_id = 0 AND product_id = 0 AND id % 10 <> 0 ORDER BY id DESC LIMIT 50 $$)
+WHERE counter = 'Heap Prefetches';
+ asked 
+-------
+     0
+(1 row)
+
+SELECT lf_check($$ SELECT id FROM lf_hp_few WHERE customer_id = 0 AND product_id = 0 AND id % 10 <> 0 ORDER BY id DESC LIMIT 50 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 50/50, missing: 0, extra: 0
+(1 row)
+
+DROP TABLE lf_hp_few;
+-- the same wait within one value of a non-unique sort column: after the rows the
+-- Filter drops and three that pass, a value with 100,000 entries on each side and
+-- no row in common; the outer entries looked up by TID count as a stretch too
+CREATE TABLE lf_hp_group (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	sort_key bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_group
+SELECT g, CASE WHEN g <= 200000 AND g % 2 = 1 THEN 1 ELSE 0 END,
+	CASE WHEN g <= 200000 AND g % 2 = 0 THEN 1 ELSE 0 END,
+	CASE WHEN g <= 200000 THEN 1 ELSE g END,
+	CASE WHEN g > 200003 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 201000) g;
+CREATE INDEX lf_hp_group_customer ON lf_hp_group (customer_id, sort_key);
+CREATE INDEX lf_hp_group_product ON lf_hp_group (product_id, sort_key);
+VACUUM ANALYZE lf_hp_group;
+SELECT lf_check($$ SELECT id FROM lf_hp_group WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id LIMIT 3 $$, false);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 3/3, missing: 0, extra: 0
+(1 row)
+
+-- the group alone counts: fetched before any of its outer entries is looked up
+SELECT counter, (value)::bigint < 3000 AS bounded FROM lf_counters($$
+	SELECT id FROM lf_hp_group WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC LIMIT 3 $$)
+WHERE counter = 'Outer Entries Read';
+      counter       | bounded 
+--------------------+---------
+ Outer Entries Read | t
+(1 row)
+
+DROP TABLE lf_hp_group;
+-- a small inner group, so that the lookups alone count: the customer has 100 rows of
+-- the value, the product 100,000, none of them in common
+CREATE TABLE lf_hp_lookup (
+	id bigint PRIMARY KEY,
+	customer_id bigint NOT NULL,
+	product_id bigint NOT NULL,
+	sort_key bigint NOT NULL,
+	deleted_at timestamptz
+);
+INSERT INTO lf_hp_lookup
+SELECT g, CASE WHEN g <= 100000 THEN 1 ELSE 0 END,
+	CASE WHEN g > 100000 AND g <= 100100 THEN 1 ELSE 0 END,
+	CASE WHEN g <= 100100 THEN 1 ELSE g END,
+	CASE WHEN g > 100103 THEN '2026-01-01'::timestamptz END
+FROM generate_series(1, 101100) g;
+CREATE INDEX lf_hp_lookup_customer ON lf_hp_lookup (customer_id, sort_key);
+CREATE INDEX lf_hp_lookup_product ON lf_hp_lookup (product_id, sort_key);
+VACUUM ANALYZE lf_hp_lookup;
+SELECT lf_check($$ SELECT id FROM lf_hp_lookup WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC, id LIMIT 3 $$, false);
+                    lf_check                     
+-------------------------------------------------
+ custom scan: t, rows: 3/3, missing: 0, extra: 0
+(1 row)
+
+SELECT value AS outer_index FROM lf_counters($$
+	SELECT id FROM lf_hp_lookup WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC LIMIT 3 $$)
+WHERE counter = 'Outer Index';
+      outer_index       
+------------------------
+ "lf_hp_lookup_product"
+(1 row)
+
+SELECT counter, (value)::bigint < 20000 AS bounded FROM lf_counters($$
+	SELECT id FROM lf_hp_lookup WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY sort_key DESC LIMIT 3 $$)
+WHERE counter = 'Outer Entries Read';
+      counter       | bounded 
+--------------------+---------
+ Outer Entries Read | t
+(1 row)
+
+DROP TABLE lf_hp_lookup;
 -- row versions the snapshot does not see are heap reads for nothing as well
 CREATE TABLE lf_hp_dead (
 	id bigint PRIMARY KEY,

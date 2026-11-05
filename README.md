@@ -644,7 +644,7 @@ replaces the file instead of rewriting it.
 | `leapfrog.force` | `off` | `USERSET` | The node is preferred over every other plan whenever a suitable set of indexes exists (the counterpart of MySQL's `INDEX_MERGE` hint); among several sets the cheapest still wins. The plan-time check of the group estimate against `work_mem` is skipped as well. **Diagnostic setting**: it can make a query many times slower. |
 | `leapfrog.max_indexes` | `4` | `USERSET` | The most indexes one node combines (2–16). Streams are added one at a time while each lowers the estimated cost, so the limit only caps the search. |
 | `leapfrog.min_indexes` | `2` | `USERSET` | Developer setting: smaller sets are not offered and the set that reaches the size is offered whatever its cost, so that a larger set can be run against the stock plans (the tests use it). Not in `postgresql.conf.sample`. |
-| `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page; where the node's `Filter` drops more rows than it passes, up to `effective_io_concurrency` matches are gathered ahead and their heap pages asked for. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
+| `leapfrog.prefetch` | `on` | `USERSET` | Every stream asks for its next leaf page as soon as it reaches one, so that the read overlaps the entries of the current page; where the node's `Filter` drops more rows than it passes, matches are gathered ahead and their heap pages asked for, up to the table's tablespace `effective_io_concurrency` and at most 32; not on a table access method other than the heap. On a cold cache it halved the node's time in BENCHMARKS.md, "Leaf page prefetch"; with the pages cached it changes nothing. |
 | `leapfrog.skip_after` | `64` | `USERSET` | Developer setting: the starting skip-ahead threshold, in entries; `0` turns skipping off. Used by the tests; not in `postgresql.conf.sample`. |
 | `leapfrog.trace_planner` | `off` | `USERSET` | Developer setting: a `NOTICE` with what planning did (candidates, sets costed, range scans, statistics reads, fallbacks, correlations, candidates pruned); the tests check the planner by these counts. |
 
@@ -1135,7 +1135,7 @@ sort keys. A range on a leading column breaks the
   already running is not affected.
 - Executor: index scans use the standard `index_beginscan` / `index_rescan` /
   `index_getnext_tid` / `index_fetch_heap` with the query's snapshot;
-  visibility, HOT chains and `kill_prior_tuple` work as for `Index Scan`.
+  visibility and HOT chains work as for `Index Scan`, and so does `kill_prior_tuple` unless matches are fetched from the heap prefetch queue, where only the entry the scan stands on can be marked: dead rows there are revisited until `VACUUM`.
 - Memory: the TID group array grows by doubling up to `work_mem` and never
   beyond; the per-row context is reset after every check in the fallback
   (`leapfrog_memory`). Long merges call `CHECK_FOR_INTERRUPTS()` every 1,024
