@@ -345,22 +345,14 @@ pathkey_is_column(PathKey *pathkey, RelOptInfo *rel, Index rti,
 static bool
 is_notnull_column(RelOptInfo *rel, Index rti, AttrNumber attno)
 {
-	ListCell   *lc;
+	List	   *clauses;
 
 	if (bms_is_member(attno, rel->notnullattnums))
 		return true;
 
-	foreach(lc, rel->baserestrictinfo)
-	{
-		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-
-		if (!rinfo->pseudoconstant &&
-			mbms_is_member(rti, attno - FirstLowInvalidHeapAttributeNumber,
-						   find_nonnullable_vars((Node *) rinfo->clause)))
-			return true;
-	}
-
-	return false;
+	clauses = extract_actual_clauses(rel->baserestrictinfo, false);
+	return mbms_is_member(rti, attno - FirstLowInvalidHeapAttributeNumber,
+						  find_nonnullable_vars((Node *) clauses));
 }
 
 /* Does the btree order duplicate keys by heap TID (version 4 format)? */
