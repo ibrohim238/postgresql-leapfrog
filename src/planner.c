@@ -24,6 +24,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/multibitmapset.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -92,6 +93,14 @@ typedef struct IntersectSearch
  * path node between add_path and PlanCustomPath (reparameterize_path_by_child
  * adjusts a CustomPath in place, reparameterize_path gives up on it), so the
  * fields after cpath survive until intersect_plan_path.
+ *
+ * The expressions are the exception: the keys and predicate of every stream
+ * stay in custom_private, in the layout of the plan's custom_exprs, and the
+ * struct gets them only in intersect_plan_path.  A key may be a Var of
+ * another relation, and when partitionwise join puts the path under a join
+ * of partitions, reparameterize_path_by_child must turn a Var of the other
+ * partitioned table into one of its partition; the core reaches
+ * custom_private only, through intersect_reparameterize.
  */
 typedef struct IntersectPath
 {
@@ -106,10 +115,13 @@ static void intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 static Plan *intersect_plan_path(PlannerInfo *root, RelOptInfo *rel,
 								 CustomPath *best_path, List *tlist,
 								 List *clauses, List *custom_plans);
+static List *intersect_reparameterize(PlannerInfo *root, List *custom_private,
+									  RelOptInfo *child_rel);
 
 static const CustomPathMethods intersect_path_methods = {
 	.CustomName = INTERSECT_NAME,
 	.PlanCustomPath = intersect_plan_path,
+	.ReparameterizeCustomPathByChild = intersect_reparameterize,
 };
 
 static Const *
@@ -632,6 +644,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	IntersectPath *ipath;
 	CustomPath *cpath;
 	IntersectPlanInfo *info;
+	List	   *exprs = NIL;
 	ParamPathInfo *param_info = NULL;
 	Relids		required_outer = NULL;
 	double		group_bytes = 0;
@@ -707,10 +720,12 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 		stream->collations = list_copy(streams[i]->collations);
 		stream->backward = streams[i]->backward;
 		stream->rank = ranks[i];
-		stream->keys = copyObject(streams[i]->exprs);
-		stream->pred = i > 0 ? copyObject(streams[i]->index->indpred) : NIL;
+		exprs = lappend(exprs, copyObject(streams[i]->exprs));
+		exprs = lappend(exprs,
+						i > 0 ? copyObject(streams[i]->index->indpred) : NIL);
 	}
 	ipath->info = info;
+	cpath->custom_private = exprs;
 
 	return cpath;
 }
@@ -1316,6 +1331,13 @@ intersect_plan_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 {
 	CustomScan *cscan = makeNode(CustomScan);
 	IntersectPlanInfo *info = ((IntersectPath *) best_path)->info;
+	List	   *exprs = best_path->custom_private;
+
+	for (int i = 0; i < info->nstreams; i++)
+	{
+		info->streams[i].keys = list_nth(exprs, 2 * i);
+		info->streams[i].pred = list_nth(exprs, 2 * i + 1);
+	}
 
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = intersect_scan_qual(root, rel, info, clauses);
@@ -1326,6 +1348,24 @@ intersect_plan_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	cscan->methods = &lf_scan_methods;
 
 	return &cscan->scan.plan;
+}
+
+/*
+ * intersect_reparameterize
+ *		ReparameterizeCustomPathByChild callback: the path is parameterized by
+ *		a partitioned table and goes under a join of one of its partitions.
+ *		Its outer Vars, in the expressions of custom_private, become those of
+ *		the partition, as reparameterize_path_by_child does for an IndexPath.
+ *		The core translates the restrictions and the target list itself.
+ */
+static List *
+intersect_reparameterize(PlannerInfo *root, List *custom_private,
+						 RelOptInfo *child_rel)
+{
+	return (List *) adjust_appendrel_attrs_multilevel(root,
+													  (Node *) custom_private,
+													  child_rel,
+													  child_rel->top_parent);
 }
 
 void

@@ -305,7 +305,13 @@ visibility).
   `custom_exprs` (outer `Var`s become nestloop parameters in
   `create_customscan_plan`);
 - `planner.c`: what the plan carries to the executor is `IntersectPlanInfo`
-  (`leapfrog.h`), kept as a struct in the path (`IntersectPath`).
+  (`leapfrog.h`), kept as a struct in the path (`IntersectPath`), except the
+  expressions of each stream (`keys`, `pred`): they stay in the path's
+  `custom_private`, in the layout of the plan's `custom_exprs`, so that
+  `intersect_reparameterize` (`ReparameterizeCustomPathByChild`) can turn a
+  `Var` of a partitioned table into one of its partition under
+  partitionwise join; `intersect_plan_path` puts them into the struct. An
+  expression field goes there too, never only into the struct.
   `form_plan_info` writes it into `custom_private` and `custom_exprs`,
   `lf_deform_plan_info` reads it back in `intersect_create_scan_state`; no
   other code knows the list layout. A new field goes into the struct and into

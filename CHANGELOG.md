@@ -98,6 +98,14 @@ versions: [SemVer](https://semver.org/).
 
 ### Fixed
 
+- Planner: under `enable_partitionwise_join` the node on a partition as the inner side of
+  a nested loop over the partitions of another partitioned table kept that table's `Var`
+  in its equality values instead of the partition's (the path is parameterized by the
+  parent and moved to the partition when the plan is made, which went through
+  `custom_private` and no callback): `Index Cond: (t_1.owner_id = o.owner_id)` and a
+  crashed backend. The path keeps the keys and predicates of its streams in
+  `custom_private`, and `ReparameterizeCustomPathByChild` translates them, as the core does
+  for an `IndexPath`. Test in `leapfrog_partition`.
 - Cost model: the rows fetched from the heap and the entries of a partial index ignored
   extended statistics, as predicates reached `clauselist_selectivity` without a
   `RestrictInfo` and entries took the predicate as independent of the equalities. Tests in

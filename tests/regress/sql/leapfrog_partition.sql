@@ -49,6 +49,35 @@ SELECT lf_check($$ SELECT p.owner_id, q.id FROM lf_part_pick p
 	ORDER BY 1, 2 $$);
 DROP TABLE lf_part_pick;
 
+-- Partitionwise join: a join of the partitions, the node the inner side of
+-- its nested loop.  The path of a partition of lf_part is parameterized by
+-- the other partitioned table and is moved to the matching partition when
+-- the plan is made; its equality values must refer to that partition, not
+-- to the parent (whose Var crashed the executor).
+CREATE TABLE lf_part_owners (owner_id bigint NOT NULL, name text NOT NULL)
+	PARTITION BY HASH (owner_id);
+CREATE TABLE lf_part_owners_0 PARTITION OF lf_part_owners FOR VALUES WITH (MODULUS 3, REMAINDER 0);
+CREATE TABLE lf_part_owners_1 PARTITION OF lf_part_owners FOR VALUES WITH (MODULUS 3, REMAINDER 1);
+CREATE TABLE lf_part_owners_2 PARTITION OF lf_part_owners FOR VALUES WITH (MODULUS 3, REMAINDER 2);
+INSERT INTO lf_part_owners SELECT g, 'owner ' || g FROM generate_series(0, 49) g;
+ANALYZE lf_part_owners;
+SET enable_partitionwise_join = on;
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET leapfrog.force = on;
+SET leapfrog.require_node = require;
+EXPLAIN (COSTS OFF)
+SELECT o.owner_id, t.id FROM lf_part_owners o JOIN lf_part t ON t.owner_id = o.owner_id
+WHERE t.kind = 3 AND o.name IN ('owner 5', 'owner 6', 'owner 7') ORDER BY t.id;
+RESET leapfrog.require_node;
+RESET leapfrog.force;
+SELECT lf_check($$ SELECT o.owner_id, t.id FROM lf_part_owners o JOIN lf_part t ON t.owner_id = o.owner_id
+	WHERE t.kind = 3 AND o.name IN ('owner 5', 'owner 6', 'owner 7') ORDER BY t.id $$);
+RESET enable_partitionwise_join;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+DROP TABLE lf_part_owners;
+
 -- FOR UPDATE keeps conditions for EvalPlanQual per partition
 SELECT lf_check($$ SELECT id, owner_id FROM lf_part WHERE kind = 3 AND deleted_at IS NULL ORDER BY id LIMIT 20 FOR UPDATE $$);
 

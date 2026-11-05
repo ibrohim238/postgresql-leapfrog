@@ -36,9 +36,11 @@
 
 /*
  * What the plan of one set of streams carries from the planner to the
- * executor.  The path keeps it as a struct (IntersectPath in planner.c);
- * form_plan_info turns it into the plan's custom_private and custom_exprs
- * and lf_deform_plan_info back, and no other code knows the list layout.
+ * executor.  The path keeps it as a struct (IntersectPath in planner.c),
+ * except keys and pred, which it keeps in custom_private for
+ * reparameterize_path_by_child until intersect_plan_path.  form_plan_info
+ * turns it into the plan's custom_private and custom_exprs and
+ * lf_deform_plan_info back, and no other code knows the list layout.
  * The expression lists go into custom_exprs, where createplan.c turns
  * outer-relation Vars into nestloop params and setrefs.c fixes up the rest.
  * Stream 0 is the outer index, whose entries are fetched from the heap.
