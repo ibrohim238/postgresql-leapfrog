@@ -35,19 +35,8 @@ services:
       - postgres
       - -c
       - shared_preload_libraries=leapfrog
-      - -c
-      - max_parallel_workers_per_gather=0
-      - -c
-      - jit=off
-      # as tests/scripts/temp.conf, the configuration of "make check"
-      - -c
-      - extra_float_digits=0
-      - -c
-      - timezone=UTC
-      - -c
-      - datestyle=ISO, MDY
-      - -c
-      - lc_messages=C
+      # the rest of tests/scripts/temp.conf is in the image's
+      # postgresql.conf.sample, so in every new data directory
       - -c
       - shared_buffers=${LEAPFROG_SHARED_BUFFERS:-512MB}
     ports:
@@ -55,7 +44,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d leapfrog && psql -U postgres -d leapfrog -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'\" | grep -q 1"]
+      # The extension must be installed and the data directory made by this
+      # image: a pgdata volume of an earlier image lacks the test settings
+      # (tests/scripts/temp.conf); recreate it with docker compose down -v.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d leapfrog && psql -U postgres -d leapfrog -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'\" | grep -q 1 && psql -U postgres -d leapfrog -tAc 'SHOW lc_messages' | grep -qx C"]
       interval: 2s
       timeout: 5s
       retries: 30

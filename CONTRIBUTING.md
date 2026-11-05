@@ -18,6 +18,21 @@ set to yours (`LEAPFROG_UID`/`LEAPFROG_GID` for a plain `docker compose`), so
 what it writes into the tree belongs to you. `PG_MAJOR` picks the PostgreSQL
 major version, `LEAPFROG_TAG` the image tag (default `PG_MAJOR`).
 
+The test servers take their settings from one file,
+`tests/scripts/temp.conf`: `make check` passes it as `--temp-config`, the
+runtime image (the Compose server) appends it to `postgresql.conf.sample`, and
+`tests/scripts/start-cluster.sh` appends it to the cluster it creates.
+`start-cluster.sh` runs `initdb` into `PGDATA`, adds `shared_buffers`
+(`LEAPFROG_SHARED_BUFFERS`, 128MB) and the socket or address from
+`PGHOST`/`PGPORT`, starts the server, passing its arguments to it, and runs
+the smoke check `tests/scripts/smoke.sql`; the cassert image, CI and the test
+image started without `PGHOST` use it:
+
+```bash
+docker build --target test -t leapfrog-test .
+docker run --rm -v "$PWD:/src/leapfrog" leapfrog-test   # a server of its own
+```
+
 Locally:
 
 ```bash

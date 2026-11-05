@@ -105,6 +105,13 @@ versions: [SemVer](https://semver.org/).
   arguments `UID`, `GID`, also in the cassert image), so files written into the tree are no
   longer owned by root. `PG_MAJOR` is a Compose variable (`image: leapfrog:${PG_MAJOR:-18}`)
   and `make docker-build PG_MAJOR=18` / `make docker-test` wrap Compose.
+- Test servers: `tests/scripts/temp.conf` is the one source of their settings. The runtime
+  image appends it to `postgresql.conf.sample`, so the Compose server sets only
+  `shared_preload_libraries` and `shared_buffers` on its command line (a `pgdata` volume
+  from an earlier image needs `docker compose down -v`); `tests/scripts/start-cluster.sh`
+  creates and starts a cluster with it and runs the smoke check, now
+  `tests/scripts/smoke.sql`, for the cassert image and for the test image run without
+  `PGHOST`, which then tests against a server of its own.
 - The regression tests live in `tests/regress/` (`sql/`, `expected/`, and `results/` when
   run), next to the isolation and performance tests, instead of the repository root.
 - Planner: the plan's `custom_private` is written and read in one place each,

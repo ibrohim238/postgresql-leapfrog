@@ -30,7 +30,9 @@ docker build -f docker/cassert.Dockerfile -t leapfrog-cassert . \
 The test image has no sources: it mounts the repository at `/src/leapfrog`
 and builds it there (`make clean` first) as a user with your UID/GID
 (`run-in-docker.sh` and `make docker-build` pass them), so objects and
-`tests/regress/results` on the host are yours.
+`tests/regress/results` on the host are yours. Test server settings live in
+`tests/scripts/temp.conf` only; a cluster is started with
+`tests/scripts/start-cluster.sh` (initdb, temp.conf, smoke check).
 
 Inside a container with the server headers (repository mounted at `/work`):
 

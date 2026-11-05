@@ -2,7 +2,10 @@
 # Run the regression and isolation suites against the server described by
 # PGHOST/PGPORT/PGUSER/PGDATABASE.  Used as the entrypoint of the "test"
 # compose service and by the cassert image; works against any reachable
-# PostgreSQL 18 that has the extension installed and preloaded.
+# PostgreSQL 18 that has the extension installed and preloaded.  With
+# --build and no PGHOST (the test image run on its own, "docker run --rm
+# leapfrog-test"), it starts a server of its own first, with
+# tests/scripts/start-cluster.sh, and stops it at the end.
 #
 #   bash tests/scripts/run-tests.sh           run the suites
 #   bash tests/scripts/run-tests.sh --build   first make clean, build with
@@ -34,6 +37,14 @@ if [ "$build" -eq 1 ]; then
 	make clean >/dev/null
 	make with_llvm=no WERROR=1
 	make with_llvm=no install
+
+	if [ -z "${PGHOST:-}" ]; then
+		echo "== no PGHOST: a server of our own"
+		PGDATA=$(mktemp -d)/data
+		export PGDATA PGHOST=/tmp PGUSER=postgres
+		bash tests/scripts/start-cluster.sh
+		trap 'pg_ctl -w stop >/dev/null' EXIT
+	fi
 fi
 
 wait_for_server() {
