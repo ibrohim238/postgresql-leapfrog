@@ -830,7 +830,8 @@ sortcol_range_share(PlannerInfo *root, Index rti, SortColumn *sort, Datum lo,
 /*
  * sortcol_null_frac
  *		Share of the table's rows with a NULL in the sort column, from its
- *		statistics; 0 for a NOT NULL column.
+ *		statistics; 0 when the node leaves the NULLs out (sort->notnull):
+ *		the streams do not read them then.
  */
 static double
 sortcol_null_frac(PlannerInfo *root, Index rti, SortColumn *sort)

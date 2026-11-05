@@ -7,6 +7,13 @@ versions: [SemVer](https://semver.org/).
 
 ### Added
 
+- Planner: a nullable sort column counts as `NOT NULL` when a strict condition of the
+  relation rejects NULL in it (`val > 0`, `val > $1`, `val IS NOT NULL`, `val = ANY (…)`;
+  `find_nonnullable_vars`, after TimescaleDB SkipScan's `check_notnull_skipkey`): no row
+  with a NULL there is in the result, so an index serves the order with its NULLs at either
+  end, and the streams start past their NULLs and stop at them instead of reading them
+  (`IS NOT NULL` scan key). Join clauses do not count. Tests in `leapfrog_nulls`.
+
 - Planner: with an MCV list or dependencies covering two columns of the conditions, the
   first stream is priced in a pair with every other index, not only the next by size. The pass by size adds a large index
   to the smaller ones only, so `(customer_id, id)` with `(id) WHERE deleted_at IS NULL`

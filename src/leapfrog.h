@@ -185,7 +185,8 @@ typedef struct SortColumn
 	Oid			collation;
 	bool		descending;
 	bool		nulls_first;
-	bool		notnull;		/* no NULLs in the live rows */
+	bool		notnull;		/* NULLs left out: none live, or a strict
+								 * restriction drops them */
 	double		null_frac;		/* share of NULLs, -1 until looked up */
 	bool		range_ssup_ready;
 	SortSupportData range_ssup;

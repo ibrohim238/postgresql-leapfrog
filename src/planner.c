@@ -22,7 +22,9 @@
 #include "common/int.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/multibitmapset.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -362,15 +364,38 @@ pathkey_is_column(PathKey *pathkey, RelOptInfo *rel, Index rti,
 
 /*
  * is_notnull_column
- *		Is the sort column free of NULLs in the live rows?  notnullattnums is
- *		the source of truth: a NOT NULL constraint added NOT VALID sets
- *		pg_attribute.attnotnull while NULLs may still be in the column, and
- *		get_relation_info leaves such columns out of the set.
+ *		Can the node leave the NULLs of the sort column out?  Either the
+ *		column holds none in the live rows, or no row with one is in the
+ *		result.  For the first, notnullattnums is the source of truth: a NOT
+ *		NULL constraint added NOT VALID sets pg_attribute.attnotnull while
+ *		NULLs may still be in the column, and get_relation_info leaves such
+ *		columns out of the set.  For the second, a restriction of the relation
+ *		that cannot be true for a NULL in the column, as find_nonnullable_vars
+ *		proves for a strict operator or function of it, IS NOT NULL, or a
+ *		strict ScalarArrayOpExpr (after TimescaleDB's check_notnull_skipkey).
+ *		Every restriction is checked on each row the node returns, so a row
+ *		with a NULL there is never one of them.  Join clauses do not count:
+ *		an unparameterized path is offered too.
  */
 static bool
-is_notnull_column(RelOptInfo *rel, AttrNumber attno)
+is_notnull_column(RelOptInfo *rel, Index rti, AttrNumber attno)
 {
-	return bms_is_member(attno, rel->notnullattnums);
+	ListCell   *lc;
+
+	if (bms_is_member(attno, rel->notnullattnums))
+		return true;
+
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		if (!rinfo->pseudoconstant &&
+			mbms_is_member(rti, attno - FirstLowInvalidHeapAttributeNumber,
+						   find_nonnullable_vars((Node *) rinfo->clause)))
+			return true;
+	}
+
+	return false;
 }
 
 /*
@@ -411,7 +436,8 @@ is_backward_stream(IndexOptInfo *index, int pos, SortColumn *sort)
  *		A btree whose column at pos is sorted in the operator family, input
  *		type and collation of the query's sort key, so that its values compare
  *		alike with the other streams', and which reads the query's order in one
- *		scan direction, the NULLs of a nullable column included.
+ *		scan direction, the NULLs of a nullable column included unless the
+ *		node leaves them out (is_notnull_column).
  *		is_heapkeyspace is checked last, for the sets that pass everything
  *		else: it opens the index.
  */
@@ -984,7 +1010,7 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			search.sort.collation = search.pathkey->pk_eclass->ec_collation;
 			search.sort.descending = search.pathkey->pk_cmptype == COMPARE_GT;
 			search.sort.nulls_first = search.pathkey->pk_nulls_first;
-			search.sort.notnull = is_notnull_column(rel, attno);
+			search.sort.notnull = is_notnull_column(rel, rti, attno);
 			search.sort.null_frac = -1.0;
 			search.sort.range_ssup_ready = false;
 			search.sort.stats = NULL;

@@ -773,7 +773,7 @@ Regression tests (`sql/`):
 | `leapfrog_partition` | hash and range partitions, a partition with other attribute numbers, `Merge Append` and ordered `Append`, run-time pruning, `LATERAL`, `FOR UPDATE`, row-level security, `TABLESAMPLE`, a partition without the indexes, inheritance |
 | `leapfrog_sort_types` | `timestamptz`, `date`, `numeric`, `text` in two collations, `varchar`, `char`, `uuid`, arrays, enums, domains and `real` as sort columns, in both directions; skip-ahead with long text, overflow, generic plans, `LATERAL`; other collations, operator families and input types are no streams |
 | `leapfrog_sort_icu` | a sort column in an ICU collation, deterministic or not; skipped where the database's encoding has none |
-| `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions |
+| `leapfrog_nulls` | a nullable sort column in all four orders, by value and by reference; skip-ahead across the NULL boundary and to the NULL group, NULLs in one stream only, the estimate of the NULL group, row versions; a strict condition on the column leaving the NULLs out (indexes with NULLs at either end, a `LATERAL` parameter, the NULLs not read), non-strict ones falling back |
 | `leapfrog_index_order` | `ASC`, `DESC` and `NULLS FIRST` index columns mixed in one node, skip-ahead in opposite directions, partial indexes, nullable columns: which index pairs serve which order |
 | `leapfrog_merge_order` | a dense stream reads around what the sparser ones agree on; columns after the sort column, two partial indexes; indexes without the sort column stay with `BitmapAnd` |
 | `leapfrog_planner` | by the counts of `leapfrog.trace_planner`: statistics, ranges and correlations read once, a stream that cannot pay for itself pruned; the estimate from the statistics read once, also inside one histogram bin |
@@ -950,9 +950,14 @@ Verified against `src/` and the tests.
   are not supported.
 - A nullable sort column: NULL is a value of the merge, in the query's
   `NULLS FIRST`/`LAST` order, and every stream must have its NULLs at that end
-  in its scan direction. For a column `NOT NULL` according to the planner
-  (`RelOptInfo.notnullattnums`) the position of NULLs does not matter, and dead
-  index entries with NULL are skipped.
+  in its scan direction. The node leaves the NULLs out, and their position does
+  not matter, for a column `NOT NULL` according to the planner
+  (`RelOptInfo.notnullattnums`; dead index entries with NULL are skipped) and
+  for a column that a strict condition of the query rejects NULL in
+  (`val > 0`, `val > $1`, `val IS NOT NULL`, `val = ANY (…)`, as
+  `find_nonnullable_vars` proves it; not `COALESCE(val, 0) > 0` or
+  `val > 0 OR val IS NULL`): the streams start past their NULLs and stop at
+  them. Only a condition on the relation itself counts, not a join clause.
 - Index columns: nbtree v4, `ASC` or `DESC`, `NULLS FIRST` or `LAST`. Every
   stream scans in the direction that gives the query's order in its own
   index, so one node may run them in opposite directions.

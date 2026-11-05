@@ -149,3 +149,41 @@ SELECT lf_check($$ SELECT id, val FROM lf_null_skip WHERE a = 1 AND b = 1 ORDER 
 UPDATE lf_null_skip SET val = NULL WHERE id = 49902;
 SELECT lf_check($$ SELECT id, val FROM lf_null_skip WHERE a = 1 AND b = 1 ORDER BY val, id $$);
 DROP TABLE lf_null_skip;
+
+-- A strict restriction on the sort column leaves its NULLs out: no row with
+-- one is in the result, so an index serves the order with its NULLs at either
+-- end, and the streams do not read them.  The pair below has its NULLs at
+-- opposite ends: no order is served without such a restriction.
+CREATE TABLE lf_null_strict (id bigint PRIMARY KEY, a integer NOT NULL, b integer NOT NULL, val bigint)
+	WITH (autovacuum_enabled = false);
+INSERT INTO lf_null_strict
+SELECT g, g % 7, g % 5, CASE WHEN g % 3 = 0 THEN NULL ELSE g % 1000 END
+FROM generate_series(1, 20000) g;
+CREATE INDEX lf_null_strict_a ON lf_null_strict (a, val);
+CREATE INDEX lf_null_strict_b ON lf_null_strict (b, val NULLS FIRST);
+ANALYZE lf_null_strict;
+SELECT count(*) AS null_rows FROM lf_null_strict WHERE a = 3 AND b = 2 AND val IS NULL;
+SELECT * FROM lf_plan($$ SELECT id FROM lf_null_strict WHERE a = 3 AND b = 2 AND val > 0 ORDER BY val LIMIT 5 $$);
+-- strict: an operator, IS NOT NULL, = ANY, in all four orders
+SELECT cond, ord, lim, lf_check(format(
+	'SELECT id, val FROM lf_null_strict WHERE a = 3 AND b = 2 AND %s ORDER BY val %s, id %s', cond, ord, lim))
+FROM unnest(ARRAY['val > 0', 'val IS NOT NULL', 'val = ANY (ARRAY[1, 52, 502, 997])']) cond,
+	unnest(ARRAY['ASC NULLS LAST', 'ASC NULLS FIRST', 'DESC NULLS LAST', 'DESC NULLS FIRST']) ord,
+	unnest(ARRAY['', 'LIMIT 5']) lim
+ORDER BY cond COLLATE "C", ord, lim;
+-- not strict: a NULL can pass, so the pair is no use
+SELECT cond, lf_check(format(
+	'SELECT id, val FROM lf_null_strict WHERE a = 3 AND b = 2 AND %s ORDER BY val, id LIMIT 5', cond))
+FROM unnest(ARRAY['COALESCE(val, 0) > 0', '(val > 0 OR val IS NULL)']) cond
+ORDER BY cond COLLATE "C";
+-- a parameter: the value comes from the outer row
+SELECT lf_check($$ SELECT p.x, s.id, s.val FROM (VALUES (0), (500), (NULL)) p(x),
+	LATERAL (SELECT id, val FROM lf_null_strict WHERE a = 3 AND b = 2 AND val > p.x
+		ORDER BY val DESC NULLS FIRST, id LIMIT 5) s $$, false);
+-- the NULLs, at the start of one stream in each direction, are not read
+SELECT ord, c.counter, c.value::bigint < 100 AS few_entries
+FROM unnest(ARRAY['ASC', 'DESC']) ord,
+	LATERAL lf_counters(format(
+		'SELECT id FROM lf_null_strict WHERE a = 3 AND b = 2 AND val > 0 ORDER BY val %s LIMIT 5', ord)) c
+WHERE c.counter LIKE '%Entries Read' ORDER BY 1, 2;
+DROP TABLE lf_null_strict;

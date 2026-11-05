@@ -152,7 +152,7 @@ typedef struct IntersectScanState
 	SortCompareKind compare_kind;	/* what compare_values does with them */
 	int16		sort_typlen;
 	bool		sort_typbyval;
-	bool		sort_notnull;	/* NULL entries are dead: skip them */
+	bool		sort_notnull;	/* skip NULL entries: dead or filtered out */
 	bool		nulls_ahead;	/* NULLs come after every value in the merge */
 
 	/* instrumentation, summed over all rescans */
@@ -548,9 +548,16 @@ intersect_start(IntersectScanState *state)
 		stream->instr.bufusage = lf_node_need_bufusage(&state->css.ss.ps);
 		stream->loop_base = stream->instr.time;
 		stream->started = false;
+
+		/*
+		 * NULLs left out by the planner are not read at all: nbtree descends
+		 * past them when they come first and stops at them when they come
+		 * last, as the planner's estimate assumes.
+		 */
 		lf_instr_start(&stream->instr, &clock);
-		lf_rescan_with_keys(stream->scan, &stream->keys, SORT_BOUND_NONE,
-							(Datum) 0);
+		lf_rescan_with_keys(stream->scan, &stream->keys,
+							state->sort_notnull ? SORT_BOUND_NOT_NULL :
+							SORT_BOUND_NONE, (Datum) 0);
 		lf_instr_stop(&stream->instr, &clock);
 		stream->bounded = false;
 		init_skip(&stream->skip);

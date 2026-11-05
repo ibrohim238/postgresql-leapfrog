@@ -133,12 +133,13 @@ lf_init_key_procs(EqualityKeys *keys, Oid sort_type, Oid opfamily,
  *		every entry taken, skipped ones too.  A by-reference value points into
  *		the scan's index tuple: it stays valid until the scan moves on.
  *
- * skip_nulls means the planner found sortcol NOT NULL, but that describes the
- * live rows: an index can hold dead NULL entries until VACUUM, for instance
- * when a NULL was updated away before SET NOT NULL.  They cannot belong to a
- * row the merge returns, since NULL never satisfies the equality the merge is
- * built on, and treated as values they would derail it: a backward scan reads
- * them first.  Otherwise a NULL is a value of the merge like any other.
+ * skip_nulls means the planner leaves the NULLs of sortcol out: the column is
+ * NOT NULL in the live rows, or a strict restriction on it drops every row
+ * with a NULL there.  With NOT NULL an index can still hold dead NULL entries
+ * until VACUUM, for instance when a NULL was updated away before SET NOT NULL.
+ * Neither kind belongs to a row the node returns, and treated as values they
+ * would derail the merge: a backward scan reads them first.  Otherwise a
+ * NULL is a value of the merge like any other.
  */
 /*
  * scan_will_step
