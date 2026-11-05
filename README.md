@@ -81,7 +81,7 @@ live. Indexes `(customer_id, id)`, `(product_id, id)`,
 [`list_bench.sh`](tests/performance/list_bench.sh), which runs each scenario separately. Each table: median of 3 runs,
 the slowest in brackets. Each plan: one run, so not the median; `read=` means pages
 from disk. Exact index: built for the query. Stock: the planner's choice without
-the extension. leapfrog: the planner's choice with it. Other runs:
+the extension. Index Merge Intersect: the planner's choice with it. Other runs:
 [BENCHMARKS.md](BENCHMARKS.md#100m-rows-the-list-query-needles-and-the-middle-fed2cfb).
 
 ### Case 1: a large customer with few live rows
@@ -94,7 +94,7 @@ SELECT * FROM orders WHERE customer_id = $1 AND deleted_at IS NULL
 ORDER BY id DESC LIMIT 100;
 ```
 
-| Exact index | leapfrog | Stock | `BitmapAnd` |
+| Exact index | Index Merge Intersect | Stock | `BitmapAnd` |
 |---:|---:|---:|---:|
 | **0.20 ms** | **105 ms** (268 ms) | Index Scan 95.4 s (95.7 s) | 2.7 s (2.8 s) |
 
@@ -102,7 +102,7 @@ Stock walks the live rows expecting one in 20 to be this customer's, and fetches
 934,625 of them for 100 results. The node reads the two indexes, 1.9M entries and
 6,476 pages, and fetches the 100 rows it returns.
 
-leapfrog, pages from disk:
+Index Merge Intersect, pages from disk:
 
 ```text
  Limit (actual time=4.534..877.096 rows=100.00 loops=1)
@@ -152,14 +152,14 @@ SELECT * FROM orders WHERE customer_id = $1 AND deleted_at IS NULL
 ORDER BY id DESC LIMIT 100;
 ```
 
-| Exact index | leapfrog | Stock | `BitmapAnd` |
+| Exact index | Index Merge Intersect | Stock | `BitmapAnd` |
 |---:|---:|---:|---:|
 | **0.19 ms** | **56 ms** (79 ms) | Index Scan 776 ms (1.1 s) | 772 ms (919 ms) |
 
 Stock walks the customer's rows and fetches 198,190 of them. The node reads 1.1M
 index entries and 3,409 pages, and fetches 100 rows.
 
-leapfrog, pages from disk:
+Index Merge Intersect, pages from disk:
 
 ```text
  Limit (actual time=0.112..83.825 rows=100.00 loops=1)
@@ -213,7 +213,7 @@ SELECT * FROM orders WHERE customer_id = $1 AND product_id = $2 AND deleted_at I
 ORDER BY id DESC LIMIT 100;
 ```
 
-| Exact index | leapfrog | Stock | `BitmapAnd` |
+| Exact index | Index Merge Intersect | Stock | `BitmapAnd` |
 |---:|---:|---:|---:|
 | **0.03 ms** | **252 ms** (1.3 s) | `BitmapAnd` 746 ms (1.5 s) | 1.1 s (1.5 s) |
 
@@ -225,7 +225,7 @@ the 11 live ones. The brackets are from disk, cache evicted before each run. Sin
 pages (`Heap Prefetches`): 1.3 s against 2.4 s without it. This is the edge of what the
 node is for: a frequent query of this shape wants its exact index.
 
-Both plans from disk. leapfrog:
+Both plans from disk. Index Merge Intersect:
 
 ```text
  Limit (actual time=33.289..1287.042 rows=11.00 loops=1)
