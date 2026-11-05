@@ -10,3 +10,4 @@ tests/performance/results
 **/*.o
 **/*.so
 **/*.bc
+.claude
