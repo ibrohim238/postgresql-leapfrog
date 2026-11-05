@@ -69,8 +69,9 @@ fi
 [ -f "$source" ] || { echo "run-one: no $source" >&2; exit 2; }
 [ -x "$runner" ] || { echo "run-one: no $runner (PGXS of $PG_CONFIG)" >&2; exit 2; }
 
-db=lf_one_${name}_$$
-db=${db:0:63}
+# NAMEDATALEN: the pid must survive the cut
+pid=$$
+db="lf_one_${name:0:$((62 - 7 - ${#pid}))}_$pid"
 mark="leapfrog run-one scratch database (pid $$)"
 out=$(mktemp -d "${TMPDIR:-/tmp}/leapfrog-run-one-$name.XXXXXX")
 keep_out=false

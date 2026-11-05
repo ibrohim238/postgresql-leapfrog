@@ -82,6 +82,9 @@ PG_CFLAGS += -Werror
 endif
 
 PG_CONFIG ?= pg_config
+# a failing regress suite stops installcheck before isolation: no stale results
+REGRESS_PREP = clean-results
+
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
@@ -92,7 +95,11 @@ endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version lint lint-fix docker-build
+.PHONY: clean-results test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version lint lint-fix docker-build
+
+clean-results:
+	rm -f tests/regress/regression.out tests/regress/regression.diffs \
+		tests/isolation/regression.out tests/isolation/regression.diffs
 
 test: installcheck
 

@@ -118,6 +118,13 @@ versions: [SemVer](https://semver.org/).
   keeps the cheapest and the quickest set of every parameterization, and prunes against
   the same parameterization's cheapest. `leapfrog.trace_planner` reports the paths
   offered. Test in `leapfrog_planner`: 2 paths before, 5 after.
+- `run-one.sh`: the scratch database's name was cut to `NAMEDATALEN` after the pid was
+  appended, so a long test name lost the pid and two runs of the test shared a database.
+  The name is cut before the pid.
+- `make installcheck-rerun` read `tests/isolation/regression.out` from an earlier run when
+  the last `installcheck` had stopped at a failing regression suite, and reran those old
+  failures as fresh ones. `installcheck` and `check` remove both suites' `regression.out`
+  and `regression.diffs` first (`REGRESS_PREP`).
 
 ### Changed
 
