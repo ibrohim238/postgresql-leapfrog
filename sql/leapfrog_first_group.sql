@@ -48,7 +48,10 @@ CREATE INDEX lf_fg_a ON lf_fg (a, ts);
 CREATE INDEX lf_fg_b ON lf_fg (b, ts);
 CREATE INDEX lf_fg_c ON lf_fg (c, ts);
 CREATE INDEX lf_fg_d ON lf_fg (d, ts);
+-- the whole table in the sample: the choices below do not depend on it
+SET default_statistics_target = 1000;
 ANALYZE lf_fg;
+RESET default_statistics_target;
 
 SET enable_seqscan = off;
 SET enable_indexscan = off;
