@@ -56,6 +56,8 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- The regression tests live in `tests/regress/` (`sql/`, `expected/`, and `results/` when
+  run), next to the isolation and performance tests, instead of the repository root.
 - Planner: the plan's `custom_private` is written and read in one place each,
   `form_plan_info` and `lf_deform_plan_info`, from and into a typed
   `IntersectPlanInfo`; the path keeps the struct (`IntersectPath`) instead of

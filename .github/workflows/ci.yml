@@ -109,7 +109,7 @@ jobs:
       - name: Show diffs on failure
         if: failure()
         run: |
-          cat regression.diffs 2>/dev/null || true
+          cat tests/regress/regression.diffs 2>/dev/null || true
           cat tests/isolation/regression.diffs 2>/dev/null || true
           sudo cat /var/log/postgresql/postgresql-${PGVERSION}-test.log | tail -100 || true
 
@@ -124,8 +124,8 @@ jobs:
       - name: Show diffs on failure
         if: failure()
         run: |
-          cat results/*.diff 2>/dev/null || true
-          cat tests/isolation/results/*.diff 2>/dev/null || true
+          cat tests/regress/regression.diffs 2>/dev/null || true
+          cat tests/isolation/regression.diffs 2>/dev/null || true
 
   cassert:
     name: PostgreSQL ${{ matrix.pg }} with --enable-cassert

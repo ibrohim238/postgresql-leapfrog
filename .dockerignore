@@ -1,8 +1,8 @@
 .git
 .github
-results
-regression.diffs
-regression.out
+tests/regress/results
+tests/regress/regression.diffs
+tests/regress/regression.out
 tests/isolation/results
 tests/isolation/regression.diffs
 tests/isolation/regression.out

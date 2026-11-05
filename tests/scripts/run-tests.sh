@@ -37,7 +37,7 @@ status=0
 echo "== regression tests"
 if ! make test-regress; then
 	status=1
-	[ -f regression.diffs ] && cat regression.diffs
+	[ -f tests/regress/regression.diffs ] && cat tests/regress/regression.diffs
 fi
 
 echo "== isolation tests"

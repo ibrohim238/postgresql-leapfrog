@@ -25,8 +25,6 @@ RUN make with_llvm=no WERROR=1 && make with_llvm=no install
 
 # -- test stage: build tools kept, sources and tests present ----------------
 FROM build AS test
-COPY sql ./sql
-COPY expected ./expected
 COPY tests ./tests
 ENTRYPOINT ["bash", "tests/scripts/run-tests.sh"]
 

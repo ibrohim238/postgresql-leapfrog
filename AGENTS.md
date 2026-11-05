@@ -95,6 +95,6 @@ Versions are `0.0.x` (still experimental). A release commit bumps
 `EXTVERSION` (Makefile) and `default_version` (`leapfrog.control`), renames
 the install script to `leapfrog--X.sql`, adds `leapfrog--PREV--X.sql`
 (empty when the SQL objects did not change), updates
-`expected/leapfrog_setup.out` and turns `Unreleased` into the version in
+`tests/regress/expected/leapfrog_setup.out` and turns `Unreleased` into the version in
 CHANGELOG.md. Tag `vX` (annotated, message `leapfrog X`) only after CI is
 green on that commit, and only when asked.

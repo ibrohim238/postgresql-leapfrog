@@ -729,7 +729,7 @@ Standard PostgreSQL infrastructure: `pg_regress` for SQL tests and
 
 ```bash
 make installcheck          # everything
-make test-regress          # sql/*.sql against expected/*.out only
+make test-regress          # tests/regress/sql/*.sql against tests/regress/expected/*.out only
 make test-isolation        # tests/isolation/specs/*.spec only
 make pgindent              # core code style
 make bench-smoke           # tiny run of the benchmark harness
@@ -751,7 +751,7 @@ in-place tablespace (`allow_in_place_tablespaces`) named after the database,
 never changes `pg_default`; an existing tablespace of that name that is not
 the test's own (owner and comment) stops the test before anything is changed.
 
-Regression tests (`sql/`):
+Regression tests (`tests/regress/sql/`):
 
 | File | What it checks |
 |---|---|

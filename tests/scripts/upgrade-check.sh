@@ -165,7 +165,7 @@ for v in $UPGRADE_FROM; do
 	fi
 
 	mkdir -p "$tmp/regress-$v"
-	if ! "$PG_REGRESS" --inputdir=. --bindir="$PG_BINDIR" --use-existing \
+	if ! "$PG_REGRESS" --inputdir=tests/regress --bindir="$PG_BINDIR" --use-existing \
 		--dbname="$db" --outputdir="$tmp/regress-$v" leapfrog_setup; then
 		cat "$tmp/regress-$v/regression.diffs" 2>/dev/null || true
 		echo "not ok: leapfrog_setup after the update from $v"

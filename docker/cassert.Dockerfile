@@ -41,8 +41,6 @@ COPY --chown=postgres Makefile leapfrog.control leapfrog--*.sql ./
 COPY --chown=postgres src ./src
 RUN make WERROR=1 && make install
 
-COPY --chown=postgres sql ./sql
-COPY --chown=postgres expected ./expected
 COPY --chown=postgres tests ./tests
 
 USER postgres

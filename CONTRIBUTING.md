@@ -47,7 +47,7 @@ extension go into `src/typedefs.list`.
 
 Every behaviour change comes with a test.
 
-- SQL test — `sql/<name>.sql` + `expected/<name>.out`, and the name goes into
+- SQL test — `tests/regress/sql/<name>.sql` + `tests/regress/expected/<name>.out`, and the name goes into
   `REGRESS` in the `Makefile`. Compare results with the stock plan through
   `lf_check(query)` from `leapfrog_setup`: it runs the query with
   `leapfrog.enabled = off` and with `leapfrog.force = on`, compares with
@@ -81,13 +81,13 @@ Every behaviour change comes with a test.
 Updating expected output after an intended change:
 
 ```bash
-make test-regress; cp results/<name>.out expected/
+make test-regress; cp tests/regress/results/<name>.out tests/regress/expected/
 make test-isolation; cp tests/isolation/results/<name>.out tests/isolation/expected/
 ```
 
-Read the diffs in full: `regression.diffs`, `tests/isolation/regression.diffs`.
+Read the diffs in full: `tests/regress/regression.diffs`, `tests/isolation/regression.diffs`.
 
-`expected/<name>_1.out`, where it exists, is the same output under another
+`tests/regress/expected/<name>_1.out`, where it exists, is the same output under another
 server: `leapfrog_basic`, `leapfrog_parameters` and `leapfrog_mvcc` have one for
 the core `EXPLAIN` format of PostgreSQL 19, `leapfrog_sort_icu` for a database
 without ICU collations. A change to such a test changes both files.

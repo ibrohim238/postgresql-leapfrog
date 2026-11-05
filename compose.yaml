@@ -69,7 +69,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:-leapfrog}
       PGDATABASE: leapfrog
     volumes:
-      - ./results:/src/leapfrog/results
+      - ./tests/regress/results:/src/leapfrog/tests/regress/results
       - ./tests/isolation/results:/src/leapfrog/tests/isolation/results
 
   bench:

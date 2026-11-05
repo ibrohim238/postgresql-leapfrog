@@ -76,7 +76,7 @@ ISOLATION = \
 	leapfrog_nulls
 
 ISOLATION_OPTS = --load-extension=leapfrog
-REGRESS_OPTS = --load-extension=leapfrog
+REGRESS_OPTS = --load-extension=leapfrog --inputdir=tests/regress --outputdir=tests/regress
 
 # Isolation specs live in tests/isolation/specs with their expected output in
 # tests/isolation/expected, following the layout of src/test/isolation.
