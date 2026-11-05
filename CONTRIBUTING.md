@@ -33,6 +33,30 @@ docker build --target test -t leapfrog-test .
 docker run --rm -v "$PWD:/src/leapfrog" leapfrog-test   # a server of its own
 ```
 
+The assert-enabled image, `docker/cassert.Dockerfile`, builds PostgreSQL from
+git in a stage `pg` and the extension on top of it; its build arguments:
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `PG_BRANCH` | `REL_18_STABLE` | PostgreSQL branch or tag |
+| `SANITIZE` | empty | a `-fsanitize=` list, e.g. `address,undefined`: PostgreSQL and the extension are built with clang, `-fsanitize=$SANITIZE -fno-omit-frame-pointer -fno-sanitize-recover=all` (`--enable-cassert` stays) |
+| `UID`, `GID` | `1000` | ids of the user running the server and the tests |
+
+```bash
+docker build --build-arg SANITIZE=address,undefined \
+    -f docker/cassert.Dockerfile -t leapfrog-san .
+docker run --rm leapfrog-san
+```
+
+`tests/scripts/run-cassert.sh` runs the server with `-c max_stack_depth=8MB`
+and the sanitizers with `ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:log_path=/tmp/asan`
+and `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:log_path=/tmp/ubsan`;
+after the suites it prints every `/tmp/asan.*` and `/tmp/ubsan.*` report and
+fails if there is one, as it fails on a `TRAP:` or a crashed backend in the
+server log. Leak detection is off. Under AddressSanitizer the peak RSS check
+of `leapfrog_memory` (growth below 32MB) fails: the shadow memory and the
+quarantine of freed blocks count in the backend's RSS.
+
 Locally:
 
 ```bash

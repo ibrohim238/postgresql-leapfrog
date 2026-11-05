@@ -25,7 +25,15 @@ There is no PostgreSQL on a typical host; use Docker.
 bash tests/run-in-docker.sh                         # build + all tests
 docker build -f docker/cassert.Dockerfile -t leapfrog-cassert . \
   && docker run --rm leapfrog-cassert               # assert-enabled server
+docker build --build-arg SANITIZE=address,undefined \
+  -f docker/cassert.Dockerfile -t leapfrog-san . \
+  && docker run --rm leapfrog-san                   # + ASAN/UBSAN (clang)
 ```
+
+`docker/cassert.Dockerfile` arguments: `PG_BRANCH` (`REL_18_STABLE`),
+`SANITIZE` (empty, or a `-fsanitize=` list: clang, server and extension
+instrumented, any report in `/tmp/asan.*`/`/tmp/ubsan.*` fails the run),
+`UID`/`GID`. Its `pg` stage is PostgreSQL alone (`--target pg`).
 
 The test image has no sources: it mounts the repository at `/src/leapfrog`
 and builds it there (`make clean` first) as a user with your UID/GID

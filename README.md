@@ -757,6 +757,10 @@ docker build -f docker/cassert.Dockerfile -t leapfrog-cassert .
 docker run --rm leapfrog-cassert
 ```
 
+`--build-arg SANITIZE=address,undefined` builds the server and the extension
+with clang and AddressSanitizer and UndefinedBehaviorSanitizer; any report
+fails the run (see CONTRIBUTING.md).
+
 The regression tests need a superuser (as `pg_regress` normally runs):
 `leapfrog_memory` reads `/proc/self/status` and `leapfrog_explain` creates an
 in-place tablespace (`allow_in_place_tablespaces`) named after the database,

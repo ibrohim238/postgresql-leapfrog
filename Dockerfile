@@ -38,7 +38,7 @@ FROM tools AS build
 WORKDIR /src/leapfrog
 COPY Makefile leapfrog.control leapfrog--*.sql ./
 COPY src ./src
-RUN make with_llvm=no WERROR=1 && make with_llvm=no install
+RUN make clean && make with_llvm=no WERROR=1 && make with_llvm=no install
 
 # -- test stage: build tools, a user with the host's ids, sources mounted ----
 FROM tools AS test
