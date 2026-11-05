@@ -63,6 +63,10 @@ jobs:
           shared_preload_libraries = 'leapfrog'
           max_parallel_workers_per_gather = 0
           jit = off
+          extra_float_digits = 0
+          timezone = 'UTC'
+          datestyle = 'ISO, MDY'
+          lc_messages = 'C'
           EOF
           sudo pg_ctlcluster ${PGVERSION} test start
           sudo -u postgres psql -c "CREATE ROLE runner SUPERUSER LOGIN" || true

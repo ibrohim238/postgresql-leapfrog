@@ -54,6 +54,10 @@ versions: [SemVer](https://semver.org/).
   the lists, and the positional `PRIVATE_*` / `STREAM_*` offsets are gone. No
   change in plans or results.
 
+- Test servers: `tests/scripts/temp.conf` (`make check`, the cassert image), the Compose
+  server and the CI cluster also set `extra_float_digits = 0`, `timezone = 'UTC'`,
+  `datestyle = 'ISO, MDY'` and `lc_messages = 'C'`, so that output does not depend on the
+  machine's locale or time zone. No expected output changed.
 - README shows two measurements only: the list query with rare, scattered matches
   at 100M rows, with the plans, and the write comparison; the rest is in
   BENCHMARKS.md.

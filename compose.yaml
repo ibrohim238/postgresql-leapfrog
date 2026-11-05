@@ -31,6 +31,15 @@ services:
       - max_parallel_workers_per_gather=0
       - -c
       - jit=off
+      # as tests/scripts/temp.conf, the configuration of "make check"
+      - -c
+      - extra_float_digits=0
+      - -c
+      - timezone=UTC
+      - -c
+      - datestyle=ISO, MDY
+      - -c
+      - lc_messages=C
       - -c
       - shared_buffers=${LEAPFROG_SHARED_BUFFERS:-512MB}
     ports:
