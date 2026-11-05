@@ -41,7 +41,13 @@ make pgindent-fix    # reformat in place
 
 The script fetches `pgindent` and `pg_bsd_indent` from `REL_18_STABLE` and
 builds them against the installed server headers. New `typedef`s of the
-extension go into `src/typedefs.list`.
+extension go into `src/typedefs.list`: after a build (`make`), the script
+also runs PostgreSQL's `src/tools/find_typedef` on `src/*.o` (it reads the
+debugging symbols with `objdump`; `pg_config`'s `CFLAGS` carry `-g`) and
+fails when a typedef defined in `src/` that the objects use is missing from
+the list, the way pgindent would misformat it. An entry that `src/` no
+longer defines is reported as a warning. Without objects or `objdump` the
+check is skipped with a notice.
 
 ### Lint
 

@@ -61,6 +61,10 @@ versions: [SemVer](https://semver.org/).
   each named with the reason). Its one finding, uninitialised `clock->start` in
   `lf_instr_stop`, is a false positive (the same `instr->timer` guards both ends) and
   carries a `NOLINTNEXTLINE`.
+- `make pgindent` checks `src/typedefs.list` against the built objects with PostgreSQL's
+  `src/tools/find_typedef`, as pg_stat_monitor's `dump-typedefs.sh` makes its list: a
+  typedef of `src/` that the objects use and the list lacks fails the check, an entry
+  that `src/` no longer defines is a warning.
 
 - `make installcheck-upgrade`: creates every earlier release still on an update path
   (its install script taken from the release tag) and runs `ALTER EXTENSION leapfrog
