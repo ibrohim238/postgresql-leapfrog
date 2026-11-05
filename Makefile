@@ -166,7 +166,7 @@ installcheck-upgrade:
 		bash tests/scripts/upgrade-check.sh
 
 bench:
-	bash tests/performance/list_bench.sh
+	SIZE=$${SIZE:-20000000} bash tests/performance/list_bench.sh
 
 bench-smoke:
 	bash tests/scripts/bench-smoke.sh
