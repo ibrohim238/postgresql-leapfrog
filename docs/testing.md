@@ -134,8 +134,8 @@ first query):
 `shared_preload_libraries = 'leapfrog'`, `max_parallel_workers_per_gather = 0`,
 `jit = off`, and for machine-independent output `extra_float_digits = 0`,
 `timezone = 'UTC'`, `datestyle = 'ISO, MDY'`, `lc_messages = 'C'`. Used by
-`make check` (`--temp-config`), `start-cluster.sh`, and the runtime image,
-which appends it to `postgresql.conf.sample` (the Compose server). The tests
+`make check` (`--temp-config`), `start-cluster.sh`, and the `postgres` service
+of `compose.yaml`, which passes it on the command line. The tests
 also `SET max_parallel_workers_per_gather = 0` themselves, for installcheck
 against any server.
 
@@ -160,8 +160,11 @@ the node under `leapfrog.force` and without it under `leapfrog.enabled = off`.
 `run-tests.sh [--build]` runs both suites against the server of
 `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`, waiting up to 60 s for it, and prints
 the diffs; it warns when `shared_preload_libraries` lacks `leapfrog` (the
-tests `LOAD` it per session). `--build` is for the test image: see
-[docker.md](docker.md).
+tests `LOAD` it per session) and stops when `jit`,
+`max_parallel_workers_per_gather` or `extra_float_digits` differ from
+`temp.conf`, naming the setting; the other settings there (time zone, date
+style, messages) pg_regress sets per session itself. `--build` is for the test
+image: see [docker.md](docker.md).
 
 ## What the tests cover
 

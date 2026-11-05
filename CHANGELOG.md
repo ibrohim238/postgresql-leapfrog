@@ -121,10 +121,23 @@ versions: [SemVer](https://semver.org/).
 - `run-one.sh`: the scratch database's name was cut to `NAMEDATALEN` after the pid was
   appended, so a long test name lost the pid and two runs of the test shared a database.
   The name is cut before the pid.
+- Docker: the runtime image appended `tests/scripts/temp.conf` to
+  `postgresql.conf.sample`, so a server built on the image ran without JIT and parallel
+  query, and a `pgdata` volume from an earlier image lacked the settings while the
+  healthcheck, which required `lc_messages = C`, stayed unhealthy with nothing said. The
+  image has stock settings; the `postgres` service of `compose.yaml` passes `temp.conf` on
+  the command line; the healthcheck checks readiness and the extension; `run-tests.sh`
+  stops naming the setting when `jit`, `max_parallel_workers_per_gather` or
+  `extra_float_digits` differ from `temp.conf` (the rest pg_regress sets per session).
 - `make installcheck-rerun` read `tests/isolation/regression.out` from an earlier run when
   the last `installcheck` had stopped at a failing regression suite, and reran those old
   failures as fresh ones. `installcheck` and `check` remove both suites' `regression.out`
   and `regression.diffs` first (`REGRESS_PREP`).
+- CI: `make lint`, `make check-tests` and `make check-version` ran in no job, although
+  the documentation said they did; a test missing from `REGRESS` or an orphan expected
+  file passed CI. A `checks` job runs them with every tool installed (`LINT_STRICT=1`),
+  and the PGDG jobs start their cluster with `tests/scripts/start-cluster.sh`, so the
+  settings come from `temp.conf` instead of a copy in the workflow.
 
 ### Changed
 
@@ -143,10 +156,8 @@ versions: [SemVer](https://semver.org/).
   arguments `UID`, `GID`, also in the cassert image), so files written into the tree are no
   longer owned by root. `PG_MAJOR` is a Compose variable (`image: leapfrog:${PG_MAJOR:-18}`)
   and `make docker-build PG_MAJOR=18` / `make docker-test` wrap Compose.
-- Test servers: `tests/scripts/temp.conf` is the one source of their settings. The runtime
-  image appends it to `postgresql.conf.sample`, so the Compose server sets only
-  `shared_preload_libraries` and `shared_buffers` on its command line (a `pgdata` volume
-  from an earlier image needs `docker compose down -v`); `tests/scripts/start-cluster.sh`
+- Test servers: `tests/scripts/temp.conf` is the one source of their settings. The
+  Compose server passes them on its command line; `tests/scripts/start-cluster.sh`
   creates and starts a cluster with it and runs the smoke check, now
   `tests/scripts/smoke.sql`, for the cassert image and for the test image run without
   `PGHOST`, which then tests against a server of its own.

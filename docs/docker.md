@@ -16,7 +16,7 @@ Three images and a Compose file. The test scripts they run:
 | `tools` | `PG_IMAGE` | `gcc`, `make`, `postgresql-server-dev-$PG_MAJOR`, `libipc-run-perl` |
 | `build` | `tools` | copies `Makefile`, the control and SQL files, `src/`; `make clean`, build with `WERROR=1`, install |
 | `test` | `tools` | `git` and certificates (for `make pgindent`), a user `leapfrog` with `UID`/`GID`, entrypoint `docker/test-entrypoint.sh` |
-| `runtime` | `PG_IMAGE` | the library and SQL files from `build`, `docker/initdb.d`, `temp.conf` appended to `postgresql.conf.sample`; `CMD postgres -c shared_preload_libraries=leapfrog` |
+| `runtime` | `PG_IMAGE` | the library and SQL files from `build`, `docker/initdb.d`; stock settings, `CMD postgres -c shared_preload_libraries=leapfrog` |
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -47,7 +47,7 @@ docker run --rm -v "$PWD:/src/leapfrog" leapfrog-test   # a server of its own
 
 | Service | Image | Does |
 |---|---|---|
-| `postgres` | runtime | the server; `shared_buffers=$LEAPFROG_SHARED_BUFFERS` (512MB), volume `pgdata`; healthy once the extension exists and `lc_messages` is `C` (an older `pgdata` volume lacks the test settings: `docker compose down -v`) |
+| `postgres` | runtime | the server with `tests/scripts/temp.conf` on its command line, `shared_buffers=$LEAPFROG_SHARED_BUFFERS` (512MB), volume `pgdata`; healthy once the extension exists |
 | `test` (profile `test`) | test | the suites against `postgres`, repository mounted |
 | `bench` (profile `bench`) | test | `tests/performance/list_bench.sh` (`SIZE`, `REPEATS`), in its own database |
 

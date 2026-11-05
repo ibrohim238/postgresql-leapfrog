@@ -14,20 +14,31 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-leapfrog}
       POSTGRES_DB: leapfrog
+    # tests/scripts/temp.conf, which run-tests.sh checks
     command:
       - postgres
       - -c
       - shared_preload_libraries=leapfrog
-      # the rest of tests/scripts/temp.conf is in postgresql.conf.sample
       - -c
       - shared_buffers=${LEAPFROG_SHARED_BUFFERS:-512MB}
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - jit=off
+      - -c
+      - extra_float_digits=0
+      - -c
+      - timezone=UTC
+      - -c
+      - datestyle=ISO, MDY
+      - -c
+      - lc_messages=C
     ports:
       - "${LEAPFROG_BIND:-127.0.0.1}:${LEAPFROG_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
-      # an older pgdata volume lacks the test settings: docker compose down -v
-      test: ["CMD-SHELL", "pg_isready -U postgres -d leapfrog && psql -U postgres -d leapfrog -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'\" | grep -q 1 && psql -U postgres -d leapfrog -tAc 'SHOW lc_messages' | grep -qx C"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d leapfrog && psql -U postgres -d leapfrog -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'leapfrog'\" | grep -q 1"]
       interval: 2s
       timeout: 5s
       retries: 30

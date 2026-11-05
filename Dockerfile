@@ -53,10 +53,5 @@ COPY --from=build /usr/share/postgresql/${PG_MAJOR}/extension/leapfrog* \
     /usr/share/postgresql/${PG_MAJOR}/extension/
 COPY docker/initdb.d /docker-entrypoint-initdb.d
 
-COPY tests/scripts/temp.conf /tmp/leapfrog-temp.conf
-RUN { echo; echo '# leapfrog: tests/scripts/temp.conf'; cat /tmp/leapfrog-temp.conf; } \
-        >>/usr/share/postgresql/postgresql.conf.sample \
-    && rm /tmp/leapfrog-temp.conf
-
 # The planner hook needs the library in every backend.
 CMD ["postgres", "-c", "shared_preload_libraries=leapfrog"]

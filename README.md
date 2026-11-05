@@ -625,10 +625,11 @@ rather than `localhost`, which may resolve to `::1` first),
 `LEAPFROG_UID`/`LEAPFROG_GID` (the ids of the test and bench containers' user,
 1000; `run-in-docker.sh` and `make docker-build` set yours).
 
-The image's `initdb` writes the settings of the test servers,
-`tests/scripts/temp.conf` (no parallel gather, `jit = off`, `timezone = 'UTC'`,
-…), into a new data directory; a `pgdata` volume created by an earlier image
-lacks them until it is recreated (`docker compose down -v`).
+The `postgres` service starts the server with the settings of the test
+servers, `tests/scripts/temp.conf` (no parallel gather, `jit = off`,
+`timezone = 'UTC'`, …), on its command line; the image itself has stock
+settings. A test run against a server without them stops with a message
+naming the setting.
 
 ## Loading the library
 

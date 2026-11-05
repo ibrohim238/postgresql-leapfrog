@@ -54,6 +54,17 @@ case ",$preload," in
 	*) echo "warning: shared_preload_libraries does not list leapfrog ($preload); the tests LOAD it per session" >&2 ;;
 esac
 
+# the settings of temp.conf that pg_regress does not set per session
+for name in jit max_parallel_workers_per_gather extra_float_digits; do
+	want=$(sed -nE "s/^$name *= *'?([^'#]*[^'# ])'? *(#.*)?$/\1/p" tests/scripts/temp.conf)
+	have=$(env -u PGTZ -u PGDATESTYLE -u PGOPTIONS psql -tAc "SHOW $name")
+	if [ "$have" != "$want" ]; then
+		echo "run-tests: $name is '$have', tests/scripts/temp.conf wants '$want':" \
+			"start the server with temp.conf (start-cluster.sh, compose.yaml)" >&2
+		exit 1
+	fi
+done
+
 status=0
 
 echo "== regression tests"
