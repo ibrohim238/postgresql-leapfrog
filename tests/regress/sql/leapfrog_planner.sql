@@ -225,3 +225,40 @@ SELECT lf_pl_entries($$ SELECT id FROM lf_pl_corr WHERE customer_id = 0 AND prod
 SELECT lf_check($$ SELECT id FROM lf_pl_corr WHERE customer_id = 0 AND product_id = 0 AND deleted_at IS NULL ORDER BY id DESC $$);
 DROP FUNCTION lf_pl_entries(text, text);
 DROP TABLE lf_pl_corr;
+
+-- One set per parameterization (the paths in the NOTICE): the sets parameterized by
+-- a alone, by a and b, and by a, b and c serve different join orders, so each one's
+-- cheapest and quickest set is offered, not only the two cheapest and quickest overall.
+CREATE TABLE lf_pl_param (id bigint PRIMARY KEY, a_id bigint NOT NULL, b_id bigint NOT NULL, c_id bigint NOT NULL,
+	d int NOT NULL, flag boolean NOT NULL);
+INSERT INTO lf_pl_param SELECT g, g % 1000, (g / 1000) % 100, (g / 1000 + 40) % 100, g % 20, g % 7 = 0
+FROM generate_series(1, 200000) g;
+CREATE INDEX lf_pl_param_a ON lf_pl_param (a_id, id);
+CREATE INDEX lf_pl_param_b ON lf_pl_param (b_id, id);
+CREATE INDEX lf_pl_param_c ON lf_pl_param (c_id, id);
+CREATE INDEX lf_pl_param_d ON lf_pl_param (d, id);
+CREATE INDEX lf_pl_param_flag ON lf_pl_param (id) WHERE flag;
+CREATE STATISTICS lf_pl_param_stats (mcv) ON d, flag FROM lf_pl_param;
+CREATE TABLE lf_pl_dim_a (id bigint PRIMARY KEY, grp int NOT NULL);
+INSERT INTO lf_pl_dim_a SELECT g, g % 100 FROM generate_series(0, 999) g;
+CREATE TABLE lf_pl_dim_b (id bigint PRIMARY KEY, grp int NOT NULL);
+INSERT INTO lf_pl_dim_b SELECT g, g % 10 FROM generate_series(0, 99) g;
+CREATE TABLE lf_pl_dim_c (id bigint PRIMARY KEY, grp int NOT NULL);
+INSERT INTO lf_pl_dim_c SELECT g, g % 10 FROM generate_series(0, 99) g;
+VACUUM ANALYZE lf_pl_param, lf_pl_dim_a, lf_pl_dim_b, lf_pl_dim_c;
+BEGIN;
+SET LOCAL join_collapse_limit = 1;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL leapfrog.force = on;
+SET LOCAL leapfrog.trace_planner = on;
+EXPLAIN (COSTS OFF)
+SELECT t.id FROM lf_pl_dim_a a CROSS JOIN lf_pl_dim_c c
+JOIN lf_pl_param t ON t.a_id = a.id AND t.c_id = c.id JOIN lf_pl_dim_b b ON t.b_id = b.id
+WHERE a.grp = 3 AND b.grp = 3 AND c.grp = 3 AND t.d = 3 AND t.flag ORDER BY t.id LIMIT 10;
+SET LOCAL leapfrog.trace_planner = off;
+SELECT lf_check($$ SELECT t.id FROM lf_pl_dim_a a CROSS JOIN lf_pl_dim_c c
+JOIN lf_pl_param t ON t.a_id = a.id AND t.c_id = c.id JOIN lf_pl_dim_b b ON t.b_id = b.id
+WHERE a.grp = 3 AND b.grp = 3 AND c.grp = 3 AND t.d = 3 AND t.flag ORDER BY t.id LIMIT 10 $$);
+ROLLBACK;
+DROP TABLE lf_pl_param, lf_pl_dim_a, lf_pl_dim_b, lf_pl_dim_c;

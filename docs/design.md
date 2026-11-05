@@ -46,11 +46,15 @@ them (`bounded`, `nulls_ahead`).
 
 - Both the cheapest set and the one quickest to its first row are offered: a
   stream that lowers the total can add a first group that a `LIMIT` pays for.
+  Per parameterization (`SetChoice`): a set parameterized by one join serves
+  other join orders than one parameterized by another, and `add_path` keeps
+  them apart, so neither may push the other out.
 - Below `leapfrog.min_indexes` nothing is offered, and the first set to reach
   it is kept whatever its cost, so tests can run a larger set.
 - Pruning: a stream saves at most the set's heap fetches (`fetch_cost`) and
   adds at least a descent and a leaf page (`lf_stream_min_cost`); when that
-  cannot beat the cheapest set it is neither costed nor probed. This ignores
+  cannot beat the cheapest set of the same parameterization it is neither
+  costed nor probed. This ignores
   what a narrower range overlap could save on the other streams.
 - Pairs with the first stream are tried only when an MCV or dependencies
   object covers two condition columns: only then can an estimate depart from

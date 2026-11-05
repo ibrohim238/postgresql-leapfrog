@@ -73,6 +73,14 @@ typedef struct IntersectSearch
 	bool		statistics_apply;	/* extended statistics on the conditions */
 } IntersectSearch;
 
+/* The cheapest and the quickest set seen with one parameterization. */
+typedef struct SetChoice
+{
+	Relids		required_outer;
+	CustomPath *best;
+	CustomPath *quickest;
+} SetChoice;
+
 /*
  * The path of one set of streams.  The keys and predicates stay in
  * custom_private, the only part reparameterize_path_by_child can translate.
@@ -548,6 +556,21 @@ is_inner_candidate(IndexCandidate **streams, int nstreams,
 	return true;
 }
 
+/* Relids a set of these streams, and extra when not NULL, would require. */
+static Relids
+set_required_outer(IntersectSearch *search, IndexCandidate **streams,
+				   int nstreams, IndexCandidate *extra)
+{
+	Relids		required_outer = NULL;
+
+	for (int i = 0; i < nstreams; i++)
+		required_outer = bms_add_members(required_outer,
+										 streams[i]->required_outer);
+	if (extra != NULL)
+		required_outer = bms_add_members(required_outer, extra->required_outer);
+	return bms_add_members(required_outer, search->rel->lateral_relids);
+}
+
 /*
  * build_intersect_path
  *		Build and cost the path for one set of streams, streams[0] the outer
@@ -564,7 +587,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	IntersectPlanInfo *info;
 	List	   *exprs = NIL;
 	ParamPathInfo *param_info = NULL;
-	Relids		required_outer = NULL;
+	Relids		required_outer;
 	double		group_bytes = 0;
 	double		reads[INTERSECT_MAX_STREAMS];
 	int			ranks[INTERSECT_MAX_STREAMS];
@@ -587,10 +610,7 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 			return NULL;
 	}
 
-	for (int i = 0; i < nstreams; i++)
-		required_outer = bms_add_members(required_outer,
-										 streams[i]->required_outer);
-	required_outer = bms_add_members(required_outer, rel->lateral_relids);
+	required_outer = set_required_outer(search, streams, nstreams, NULL);
 	if (!bms_is_empty(required_outer))
 		param_info = get_baserel_parampathinfo(root, rel, required_outer);
 
@@ -653,6 +673,7 @@ add_intersect_path(RelOptInfo *rel, CustomPath *cpath)
 		cpath->path.total_cost *= INTERSECT_FORCE_SCALE;
 	}
 
+	lf_trace.paths++;
 	add_path(rel, &cpath->path);
 }
 
@@ -740,18 +761,44 @@ statistics_cover_conditions(IntersectSearch *search)
 	return false;
 }
 
-static void
-consider_set(CustomPath *cpath, CustomPath **best, Cost *best_cost,
-			 CustomPath **quickest)
+static SetChoice *
+find_choice(List *choices, Relids required_outer)
 {
-	if (*best == NULL || cpath->path.total_cost < *best_cost)
+	ListCell   *lc;
+
+	foreach(lc, choices)
 	{
-		*best = cpath;
-		*best_cost = cpath->path.total_cost;
+		SetChoice  *choice = lfirst(lc);
+
+		if (bms_equal(choice->required_outer, required_outer))
+			return choice;
 	}
-	if (*quickest == NULL ||
-		cpath->path.startup_cost < (*quickest)->path.startup_cost)
-		*quickest = cpath;
+	return NULL;
+}
+
+/*
+ * consider_set
+ *		Keep the cheapest and the quickest set of each parameterization:
+ *		add_path keeps paths of different parameterizations side by side.
+ */
+static void
+consider_set(List **choices, CustomPath *cpath)
+{
+	Relids		required_outer = PATH_REQ_OUTER(&cpath->path);
+	SetChoice  *choice = find_choice(*choices, required_outer);
+
+	if (choice == NULL)
+	{
+		choice = palloc0(sizeof(SetChoice));
+		choice->required_outer = required_outer;
+		*choices = lappend(*choices, choice);
+	}
+	if (choice->best == NULL ||
+		cpath->path.total_cost < choice->best->path.total_cost)
+		choice->best = cpath;
+	if (choice->quickest == NULL ||
+		cpath->path.startup_cost < choice->quickest->path.startup_cost)
+		choice->quickest = cpath;
 }
 
 /*
@@ -765,17 +812,17 @@ search_intersection(IntersectSearch *search, bool plain_only)
 {
 	IndexCandidate *streams[INTERSECT_MAX_STREAMS];
 	int			nstreams = 0;
-	CustomPath *best = NULL;
-	CustomPath *quickest = NULL;
-	Cost		best_cost = 0;
+	List	   *choices = NIL;
 	Cost		fetch_cost = 0;
 	Cost		last_cost = 0;
+	ListCell   *lc;
 
 	for (int j = 0; j < search->ncandidates &&
 		 nstreams < intersect_max_streams; j++)
 	{
 		IndexCandidate *candidate = &search->candidates[j];
 		CustomPath *cpath;
+		SetChoice  *choice;
 
 		if (plain_only && !bms_is_empty(candidate->required_outer))
 			continue;
@@ -788,9 +835,11 @@ search_intersection(IntersectSearch *search, bool plain_only)
 			continue;
 
 		/* a stream saves at most the heap fetches: prune without probing */
-		if (best != NULL &&
+		choice = find_choice(choices, set_required_outer(search, streams,
+														 nstreams, candidate));
+		if (choice != NULL &&
 			last_cost - fetch_cost + lf_stream_min_cost(candidate->index) >=
-			best_cost)
+			choice->best->path.total_cost)
 		{
 			lf_trace.pruned++;
 			continue;
@@ -804,7 +853,7 @@ search_intersection(IntersectSearch *search, bool plain_only)
 		last_cost = cpath->path.total_cost;
 
 		if (nstreams >= intersect_min_streams)
-			consider_set(cpath, &best, &best_cost, &quickest);
+			consider_set(&choices, cpath);
 	}
 
 	/* correlated conditions: also pair the first stream with each other */
@@ -830,14 +879,19 @@ search_intersection(IntersectSearch *search, bool plain_only)
 			pair[1] = candidate;
 			cpath = build_set_path(search, pair, 2, &pair_fetch_cost);
 			if (cpath != NULL)
-				consider_set(cpath, &best, &best_cost, &quickest);
+				consider_set(&choices, cpath);
 		}
 	}
 
-	if (quickest != NULL && quickest != best)
-		add_intersect_path(search->rel, quickest);
-	if (best != NULL)
-		add_intersect_path(search->rel, best);
+	foreach(lc, choices)
+	{
+		SetChoice  *choice = lfirst(lc);
+
+		if (choice->quickest != choice->best)
+			add_intersect_path(search->rel, choice->quickest);
+		add_intersect_path(search->rel, choice->best);
+	}
+	list_free_deep(choices);
 }
 
 /*
@@ -933,10 +987,10 @@ intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	lf_trace.candidates = search.ncandidates;
 	if (intersect_trace_planner)
 		elog(NOTICE,
-			 "leapfrog planner: %d candidates, %d sets, %d range scans, %d statistics reads, %d range fallbacks, %d correlations, %d pruned",
+			 "leapfrog planner: %d candidates, %d sets, %d range scans, %d statistics reads, %d range fallbacks, %d correlations, %d pruned, %d paths",
 			 lf_trace.candidates, lf_trace.sets, lf_trace.range_scans,
 			 lf_trace.stat_loads, lf_trace.range_fallbacks,
-			 lf_trace.correlations, lf_trace.pruned);
+			 lf_trace.correlations, lf_trace.pruned, lf_trace.paths);
 
 	pfree(search.candidates);
 }

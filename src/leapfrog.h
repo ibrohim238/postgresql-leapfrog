@@ -207,6 +207,7 @@ typedef struct PlannerTrace
 	int			correlations;	/* correlations looked up */
 	int			pruned;			/* candidates that could not pay for
 								 * themselves */
+	int			paths;			/* paths offered to add_path */
 } PlannerTrace;
 
 /* leapfrog.c: settings */

@@ -111,6 +111,13 @@ versions: [SemVer](https://semver.org/).
   `RestrictInfo` and entries took the predicate as independent of the equalities. Tests in
   `leapfrog_planner`. A statistics object must cover plain columns:
   `(deleted_at IS NULL)` as an expression does not match a clause on `deleted_at`.
+- Planner: the sets of streams competed on cost across parameterizations, so a set
+  parameterized by one join could lose to a cheaper set parameterized by another and never
+  be offered, although `add_path` keeps paths of different parameterizations side by side;
+  a join order that needed the lost set then got no Index Merge Intersect node. The search
+  keeps the cheapest and the quickest set of every parameterization, and prunes against
+  the same parameterization's cheapest. `leapfrog.trace_planner` reports the paths
+  offered. Test in `leapfrog_planner`: 2 paths before, 5 after.
 
 ### Changed
 

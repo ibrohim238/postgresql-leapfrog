@@ -22,7 +22,7 @@ RESET default_statistics_target;
 SET leapfrog.trace_planner = on;
 -- A pair: one range probe per stream, statistics and correlation once.
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl WHERE f1 = 1 AND f2 = 2 ORDER BY id LIMIT 10;
-NOTICE:  leapfrog planner: 3 candidates, 1 sets, 2 range scans, 1 statistics reads, 0 range fallbacks, 1 correlations, 0 pruned
+NOTICE:  leapfrog planner: 3 candidates, 1 sets, 2 range scans, 1 statistics reads, 0 range fallbacks, 1 correlations, 0 pruned, 1 paths
                      QUERY PLAN                     
 ----------------------------------------------------
  Limit
@@ -36,7 +36,7 @@ NOTICE:  leapfrog planner: 3 candidates, 1 sets, 2 range scans, 1 statistics rea
 -- Six equalities: what is left to fetch cannot pay for a fourth stream, so no range probe for it.
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl
 WHERE f1 = 1 AND f2 = 2 AND f3 = 3 AND f4 = 4 AND f5 = 5 AND f6 = 6 ORDER BY id LIMIT 10;
-NOTICE:  leapfrog planner: 7 candidates, 2 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 2 correlations, 3 pruned
+NOTICE:  leapfrog planner: 7 candidates, 2 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 2 correlations, 3 pruned, 1 paths
                             QUERY PLAN                             
 -------------------------------------------------------------------
  Limit
@@ -52,7 +52,7 @@ NOTICE:  leapfrog planner: 7 candidates, 2 sets, 3 range scans, 1 statistics rea
 SET leapfrog.min_indexes = 4;
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl
 WHERE f1 = 1 AND f2 = 2 AND f3 = 3 AND f4 = 4 AND f5 = 5 AND f6 = 6 ORDER BY id LIMIT 10;
-NOTICE:  leapfrog planner: 7 candidates, 3 sets, 4 range scans, 1 statistics reads, 0 range fallbacks, 3 correlations, 0 pruned
+NOTICE:  leapfrog planner: 7 candidates, 3 sets, 4 range scans, 1 statistics reads, 0 range fallbacks, 3 correlations, 0 pruned, 1 paths
                                QUERY PLAN                                
 -------------------------------------------------------------------------
  Limit
@@ -73,7 +73,7 @@ RESET leapfrog.min_indexes;
 CREATE INDEX lf_pl_any ON lf_pl (id) WHERE f6 >= 0;
 SET leapfrog.min_indexes = 3;
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl WHERE f1 = 1 AND f2 = 2 AND f6 >= 0 ORDER BY id LIMIT 10;
-NOTICE:  leapfrog planner: 4 candidates, 2 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 1 correlations, 0 pruned
+NOTICE:  leapfrog planner: 4 candidates, 2 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 1 correlations, 0 pruned, 1 paths
                       QUERY PLAN                       
 -------------------------------------------------------
  Limit
@@ -96,7 +96,7 @@ CREATE INDEX lf_pl_f1_val ON lf_pl (f1, val text_pattern_ops);
 CREATE INDEX lf_pl_f2_val ON lf_pl (f2, val text_pattern_ops);
 SET leapfrog.force = on;
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl WHERE f1 = 1 AND f2 = 2 ORDER BY val USING ~<~ LIMIT 10;
-NOTICE:  leapfrog planner: 2 candidates, 1 sets, 2 range scans, 1 statistics reads, 2 range fallbacks, 1 correlations, 0 pruned
+NOTICE:  leapfrog planner: 2 candidates, 1 sets, 2 range scans, 1 statistics reads, 2 range fallbacks, 1 correlations, 0 pruned, 1 paths
                      QUERY PLAN                     
 ----------------------------------------------------
  Limit
@@ -324,7 +324,7 @@ VACUUM ANALYZE lf_pl_gate;
 SET leapfrog.trace_planner = on;
 SET leapfrog.force = on;
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl_gate WHERE a = 1 AND b = 1 AND e = 1 ORDER BY id;
-NOTICE:  leapfrog planner: 4 candidates, 2 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 2 correlations, 0 pruned
+NOTICE:  leapfrog planner: 4 candidates, 2 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 2 correlations, 0 pruned, 1 paths
                     QUERY PLAN                     
 ---------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_pl_gate
@@ -339,7 +339,7 @@ NOTICE:  leapfrog planner: 4 candidates, 2 sets, 3 range scans, 1 statistics rea
 CREATE STATISTICS lf_pl_gate_cover (mcv) ON a, e FROM lf_pl_gate;
 ANALYZE lf_pl_gate;
 EXPLAIN (COSTS OFF) SELECT id FROM lf_pl_gate WHERE a = 1 AND b = 1 AND e = 1 ORDER BY id;
-NOTICE:  leapfrog planner: 4 candidates, 3 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 2 correlations, 0 pruned
+NOTICE:  leapfrog planner: 4 candidates, 3 sets, 3 range scans, 1 statistics reads, 0 range fallbacks, 2 correlations, 0 pruned, 1 paths
                     QUERY PLAN                     
 ---------------------------------------------------
  Custom Scan (Index Merge Intersect) on lf_pl_gate
@@ -393,3 +393,69 @@ SELECT lf_check($$ SELECT id FROM lf_pl_corr WHERE customer_id = 0 AND product_i
 
 DROP FUNCTION lf_pl_entries(text, text);
 DROP TABLE lf_pl_corr;
+-- One set per parameterization (the paths in the NOTICE): the sets parameterized by
+-- a alone, by a and b, and by a, b and c serve different join orders, so each one's
+-- cheapest and quickest set is offered, not only the two cheapest and quickest overall.
+CREATE TABLE lf_pl_param (id bigint PRIMARY KEY, a_id bigint NOT NULL, b_id bigint NOT NULL, c_id bigint NOT NULL,
+	d int NOT NULL, flag boolean NOT NULL);
+INSERT INTO lf_pl_param SELECT g, g % 1000, (g / 1000) % 100, (g / 1000 + 40) % 100, g % 20, g % 7 = 0
+FROM generate_series(1, 200000) g;
+CREATE INDEX lf_pl_param_a ON lf_pl_param (a_id, id);
+CREATE INDEX lf_pl_param_b ON lf_pl_param (b_id, id);
+CREATE INDEX lf_pl_param_c ON lf_pl_param (c_id, id);
+CREATE INDEX lf_pl_param_d ON lf_pl_param (d, id);
+CREATE INDEX lf_pl_param_flag ON lf_pl_param (id) WHERE flag;
+CREATE STATISTICS lf_pl_param_stats (mcv) ON d, flag FROM lf_pl_param;
+CREATE TABLE lf_pl_dim_a (id bigint PRIMARY KEY, grp int NOT NULL);
+INSERT INTO lf_pl_dim_a SELECT g, g % 100 FROM generate_series(0, 999) g;
+CREATE TABLE lf_pl_dim_b (id bigint PRIMARY KEY, grp int NOT NULL);
+INSERT INTO lf_pl_dim_b SELECT g, g % 10 FROM generate_series(0, 99) g;
+CREATE TABLE lf_pl_dim_c (id bigint PRIMARY KEY, grp int NOT NULL);
+INSERT INTO lf_pl_dim_c SELECT g, g % 10 FROM generate_series(0, 99) g;
+VACUUM ANALYZE lf_pl_param, lf_pl_dim_a, lf_pl_dim_b, lf_pl_dim_c;
+BEGIN;
+SET LOCAL join_collapse_limit = 1;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL leapfrog.force = on;
+SET LOCAL leapfrog.trace_planner = on;
+EXPLAIN (COSTS OFF)
+SELECT t.id FROM lf_pl_dim_a a CROSS JOIN lf_pl_dim_c c
+JOIN lf_pl_param t ON t.a_id = a.id AND t.c_id = c.id JOIN lf_pl_dim_b b ON t.b_id = b.id
+WHERE a.grp = 3 AND b.grp = 3 AND c.grp = 3 AND t.d = 3 AND t.flag ORDER BY t.id LIMIT 10;
+NOTICE:  leapfrog planner: 6 candidates, 6 sets, 2 range scans, 1 statistics reads, 0 range fallbacks, 4 correlations, 2 pruned, 5 paths
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: t.id
+         ->  Nested Loop
+               ->  Nested Loop
+                     ->  Nested Loop
+                           ->  Seq Scan on lf_pl_dim_a a
+                                 Filter: (grp = 3)
+                           ->  Materialize
+                                 ->  Seq Scan on lf_pl_dim_c c
+                                       Filter: (grp = 3)
+                     ->  Custom Scan (Index Merge Intersect) on lf_pl_param t
+                           Filter: (flag AND (d = 3))
+                           ->  Outer Stream on lf_pl_param_c
+                                 Index Cond: (t.c_id = c.id)
+                           ->  Inner Stream on lf_pl_param_a
+                                 Index Cond: (t.a_id = a.id)
+               ->  Index Scan using lf_pl_dim_b_pkey on lf_pl_dim_b b
+                     Index Cond: (id = t.b_id)
+                     Filter: (grp = 3)
+(20 rows)
+
+SET LOCAL leapfrog.trace_planner = off;
+SELECT lf_check($$ SELECT t.id FROM lf_pl_dim_a a CROSS JOIN lf_pl_dim_c c
+JOIN lf_pl_param t ON t.a_id = a.id AND t.c_id = c.id JOIN lf_pl_dim_b b ON t.b_id = b.id
+WHERE a.grp = 3 AND b.grp = 3 AND c.grp = 3 AND t.d = 3 AND t.flag ORDER BY t.id LIMIT 10 $$);
+                     lf_check                      
+---------------------------------------------------
+ custom scan: t, rows: 10/10, missing: 0, extra: 0
+(1 row)
+
+ROLLBACK;
+DROP TABLE lf_pl_param, lf_pl_dim_a, lf_pl_dim_b, lf_pl_dim_c;

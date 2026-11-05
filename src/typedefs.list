@@ -12,6 +12,7 @@ IntersectStreamInfo
 McvOrderArg
 PlannerTrace
 RequireNode
+SetChoice
 SkipAhead
 SortBound
 SortColumn
