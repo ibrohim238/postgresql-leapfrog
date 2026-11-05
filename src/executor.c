@@ -114,6 +114,7 @@ typedef enum SortCompareKind
 typedef struct IntersectScanState
 {
 	CustomScanState css;
+	IntersectPlanInfo *info;	/* what the planner left in the plan */
 	int			nstreams;
 	IndexStream *streams;
 	IndexStream **merge_order;	/* the streams, sparsest first */
@@ -193,6 +194,7 @@ intersect_create_scan_state(CustomScan *cscan)
 	state = (IntersectScanState *) newNode(sizeof(IntersectScanState),
 										   T_CustomScanState);
 	state->css.methods = &intersect_exec_methods;
+	state->info = lf_deform_plan_info(cscan);
 	/* index_fetch_heap stores a buffer-pinned heap tuple */
 	state->css.slotOps = &TTSOpsBufferHeapTuple;
 
@@ -230,76 +232,37 @@ init_equality_keys(EqualityKeys *keys, List *exprs, List *operators,
 					  descending);
 }
 
-static Datum
-private_datum(List *private, int pos)
-{
-	return list_nth_node(Const, private, pos)->constvalue;
-}
-
-static Datum
-stream_datum(List *private, int stream, int pos)
-{
-	return private_datum(private,
-						 PRIVATE_COUNT + stream * STREAM_PRIVATE_COUNT + pos);
-}
-
-static List *
-stream_oids(List *private, int stream, int pos)
-{
-	List	   *oids = list_nth(private,
-								PRIVATE_COUNT + stream * STREAM_PRIVATE_COUNT + pos);
-
-	Assert(oids == NIL || IsA(oids, OidList));
-	return oids;
-}
-
 static void
 intersect_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	IntersectScanState *state = (IntersectScanState *) node;
-	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	heap = node->ss.ss_currentRelation;
-	List	   *private = cscan->custom_private;
-	Oid			sort_type = DatumGetObjectId(private_datum(private,
-														   PRIVATE_SORT_TYPE));
-	Oid			sort_opfamily = DatumGetObjectId(private_datum(private,
-															   PRIVATE_SORT_OPFAMILY));
-	Oid			sort_collation = DatumGetObjectId(private_datum(private,
-																PRIVATE_SORT_COLLATION));
+	IntersectPlanInfo *info = state->info;
+	Oid			sort_type = info->sort_type;
+	Oid			sort_opfamily = info->sort_opfamily;
+	Oid			sort_collation = info->sort_collation;
 
-	state->descending =
-		DatumGetBool(private_datum(private, PRIVATE_DESCENDING));
-	state->nstreams = DatumGetInt32(private_datum(private, PRIVATE_NSTREAMS));
+	state->descending = info->descending;
+	state->nstreams = info->nstreams;
 	state->streams = palloc0(state->nstreams * sizeof(IndexStream));
 	state->merge_order = palloc(state->nstreams * sizeof(IndexStream *));
 
 	for (int i = 0; i < state->nstreams; i++)
 	{
 		IndexStream *stream = &state->streams[i];
-		List	   *keys = list_nth_node(List, cscan->custom_exprs,
-										 i * STREAM_EXPRS_COUNT + STREAM_EXPRS_KEYS);
-		List	   *pred = list_nth_node(List, cscan->custom_exprs,
-										 i * STREAM_EXPRS_COUNT + STREAM_EXPRS_PRED);
+		IntersectStreamInfo *sinfo = &info->streams[i];
 
-		stream->index =
-			index_open(DatumGetObjectId(stream_datum(private, i,
-													 STREAM_PRIVATE_INDEX)),
-					   AccessShareLock);
-		stream->sort_attno =
-			DatumGetInt32(stream_datum(private, i, STREAM_PRIVATE_SORTPOS)) + 1;
-		state->merge_order[DatumGetInt32(stream_datum(private, i,
-													  STREAM_PRIVATE_RANK))] = stream;
-		stream->dir =
-			DatumGetBool(stream_datum(private, i, STREAM_PRIVATE_BACKWARD)) ?
+		stream->index = index_open(sinfo->indexoid, AccessShareLock);
+		stream->sort_attno = sinfo->sortpos + 1;
+		state->merge_order[sinfo->rank] = stream;
+		stream->dir = sinfo->backward ?
 			BackwardScanDirection : ForwardScanDirection;
-		stream->estimate =
-			DatumGetFloat8(stream_datum(private, i, STREAM_PRIVATE_ESTIMATE));
-		init_equality_keys(&stream->keys, keys,
-						   stream_oids(private, i, STREAM_PRIVATE_OPERATORS),
-						   stream_oids(private, i, STREAM_PRIVATE_COLLATIONS),
-						   stream->index, sort_type, sort_opfamily,
-						   sort_collation, state->descending, &node->ss.ps);
-		stream->pred = ExecInitQual(pred, &node->ss.ps);
+		stream->estimate = sinfo->reads;
+		init_equality_keys(&stream->keys, sinfo->keys, sinfo->operators,
+						   sinfo->collations, stream->index, sort_type,
+						   sort_opfamily, sort_collation, state->descending,
+						   &node->ss.ps);
+		stream->pred = ExecInitQual(sinfo->pred, &node->ss.ps);
 	}
 	state->values_cxt = AllocSetContextCreate(CurrentMemoryContext,
 											  "leapfrog equality values",
@@ -310,10 +273,8 @@ intersect_begin(CustomScanState *node, EState *estate, int eflags)
 
 	state->ssup.ssup_cxt = CurrentMemoryContext;
 	state->ssup.ssup_collation = sort_collation;
-	state->ssup.ssup_nulls_first = DatumGetBool(private_datum(private,
-															  PRIVATE_SORT_NULLS_FIRST));
-	state->sort_notnull = DatumGetBool(private_datum(private,
-													 PRIVATE_SORT_NOTNULL));
+	state->ssup.ssup_nulls_first = info->nulls_first;
+	state->sort_notnull = info->notnull;
 	state->nulls_ahead = !state->sort_notnull && !state->ssup.ssup_nulls_first;
 	PrepareSortSupportFromOrderingOp(get_opfamily_member(sort_opfamily, sort_type,
 														 sort_type,
@@ -1227,8 +1188,7 @@ stream_conditions(IntersectScanState *state, int i, List *context,
 {
 	CustomScan *cscan = (CustomScan *) state->css.ss.ps.plan;
 	IndexStream *stream = &state->streams[i];
-	List	   *exprs = list_nth_node(List, cscan->custom_exprs,
-									  i * STREAM_EXPRS_COUNT + STREAM_EXPRS_KEYS);
+	List	   *exprs = state->info->streams[i].keys;
 	TupleDesc	indexdesc = RelationGetDescr(stream->index);
 	List	   *clauses = NIL;
 	int			k = 0;

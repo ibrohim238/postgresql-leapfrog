@@ -35,6 +35,12 @@ versions: [SemVer](https://semver.org/).
 
 ### Changed
 
+- Planner: the plan's `custom_private` is written and read in one place each,
+  `form_plan_info` and `lf_deform_plan_info`, from and into a typed
+  `IntersectPlanInfo`; the path keeps the struct (`IntersectPath`) instead of
+  the lists, and the positional `PRIVATE_*` / `STREAM_*` offsets are gone. No
+  change in plans or results.
+
 - README shows two measurements only: the list query with rare, scattered matches
   at 100M rows, with the plans, and the write comparison; the rest is in
   BENCHMARKS.md.

@@ -84,7 +84,7 @@ without ICU collations. A change to such a test changes both files.
 
 | File | Contents |
 |---|---|
-| `src/leapfrog.h` | structures shared between the files, `custom_private` layout, settings, prototypes |
+| `src/leapfrog.h` | structures shared between the files, the plan info (`IntersectPlanInfo`), settings, prototypes |
 | `src/compat.h` | every PostgreSQL version conditional: shims for the differences between major versions; the `.c` files test no `PG_VERSION_NUM` |
 | `src/leapfrog.c` | `_PG_init`, settings, SQL-callable functions |
 | `src/planner.c` | planner hook: index candidates and pairs, the path, the plan and its `Filter` |
@@ -114,7 +114,14 @@ visibility).
   README;
 - `planner.c`: `intersect_plan_path` — plan dependencies (`relationOids`) and
   `custom_exprs` (outer `Var`s become nestloop parameters in
-  `create_customscan_plan`).
+  `create_customscan_plan`);
+- `planner.c`: what the plan carries to the executor is `IntersectPlanInfo`
+  (`leapfrog.h`), kept as a struct in the path (`IntersectPath`).
+  `form_plan_info` writes it into `custom_private` and `custom_exprs`,
+  `lf_deform_plan_info` reads it back in `intersect_create_scan_state`; no
+  other code knows the list layout. A new field goes into the struct and into
+  both functions; an assert-enabled build checks that `custom_private`
+  survives `nodeToString`, `stringToNode` and `copyObject`.
 
 ## What to check when changing the executor part
 

@@ -4,8 +4,11 @@ GroupProbe
 IndexCandidate
 IndexEquality
 IndexStream
+IntersectPath
+IntersectPlanInfo
 IntersectScanState
 IntersectSearch
+IntersectStreamInfo
 McvOrderArg
 PlannerTrace
 SkipAhead

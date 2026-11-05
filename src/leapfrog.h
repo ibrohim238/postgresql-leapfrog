@@ -35,34 +35,43 @@
 #define INTERSECT_MAX_STREAMS 16
 
 /*
- * Layout of CustomPath.custom_private: the PRIVATE_* items, the
- * STREAM_PRIVATE_* items per stream, then the STREAM_EXPRS_* lists per stream
- * (the value expressions of its equalities and, for a partial index, its
- * predicate).  The plan keeps the expression lists in custom_exprs instead.
+ * What the plan of one set of streams carries from the planner to the
+ * executor.  The path keeps it as a struct (IntersectPath in planner.c);
+ * form_plan_info turns it into the plan's custom_private and custom_exprs
+ * and lf_deform_plan_info back, and no other code knows the list layout.
+ * The expression lists go into custom_exprs, where createplan.c turns
+ * outer-relation Vars into nestloop params and setrefs.c fixes up the rest.
  * Stream 0 is the outer index, whose entries are fetched from the heap.
  */
-#define PRIVATE_DESCENDING		0
-#define PRIVATE_NSTREAMS		1
-#define PRIVATE_SORT_TYPE		2	/* input type of the index opclass */
-#define PRIVATE_SORT_OPFAMILY	3
-#define PRIVATE_SORT_COLLATION	4
-#define PRIVATE_SORT_NULLS_FIRST 5
-#define PRIVATE_SORT_NOTNULL	6
-#define PRIVATE_COUNT			7
-#define STREAM_PRIVATE_INDEX	0	/* index OID */
-#define STREAM_PRIVATE_SORTPOS	1	/* position of sortcol among the key
-									 * columns */
-#define STREAM_PRIVATE_ESTIMATE 2	/* entries the cost model expects to read;
-									 * EXPLAIN VERBOSE */
-#define STREAM_PRIVATE_OPERATORS 3	/* OID list: equality operator per key */
-#define STREAM_PRIVATE_COLLATIONS 4 /* OID list: its collation per key */
-#define STREAM_PRIVATE_BACKWARD 5	/* the index reads the query's order
-									 * backward */
-#define STREAM_PRIVATE_RANK		6	/* its turn in the merge, sparsest first */
-#define STREAM_PRIVATE_COUNT	7
-#define STREAM_EXPRS_KEYS		0
-#define STREAM_EXPRS_PRED		1
-#define STREAM_EXPRS_COUNT		2
+typedef struct IntersectStreamInfo
+{
+	Oid			indexoid;
+	int			sortpos;		/* position of sortcol among the key columns */
+	double		reads;			/* entries the cost model expects to read;
+								 * EXPLAIN VERBOSE */
+	List	   *operators;		/* OIDs: equality operator per key */
+	List	   *collations;		/* OIDs: its collation per key */
+	bool		backward;		/* the index reads the query's order backward */
+	int			rank;			/* its turn in the merge, sparsest first */
+	List	   *keys;			/* value expressions of the equalities */
+	List	   *pred;			/* predicate of a partial inner index */
+} IntersectStreamInfo;
+
+typedef struct IntersectPlanInfo
+{
+	bool		descending;
+	Oid			sort_type;		/* input type of the index opclass */
+	Oid			sort_opfamily;
+	Oid			sort_collation;
+	bool		nulls_first;
+	bool		notnull;
+	int			nstreams;
+	IntersectStreamInfo streams[FLEXIBLE_ARRAY_MEMBER];
+} IntersectPlanInfo;
+
+#define IntersectPlanInfoSize(nstreams) \
+	(offsetof(IntersectPlanInfo, streams) + \
+	 (nstreams) * sizeof(IntersectStreamInfo))
 
 /*
  * The equality conditions on the leading columns of one index.  attnos are
@@ -245,6 +254,7 @@ extern void lf_planner_init(void);
 extern List *lf_node_quals(PlannerInfo *root, RelOptInfo *rel,
 						   IndexOptInfo **indexes, List **exprs, int nstreams,
 						   List *clauses);
+extern IntersectPlanInfo *lf_deform_plan_info(CustomScan *cscan);
 
 /* costsize.c */
 extern double lf_index_entries(PlannerInfo *root, Index rti,

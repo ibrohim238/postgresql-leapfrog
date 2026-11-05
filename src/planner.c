@@ -84,6 +84,19 @@ typedef struct IntersectSearch
 	bool		statistics_apply;	/* extended statistics on the conditions */
 } IntersectSearch;
 
+/*
+ * The path of one set of streams: a CustomPath with the plan info as a
+ * struct, turned into lists only for the plan.  The core never copies a
+ * path node between add_path and PlanCustomPath (reparameterize_path_by_child
+ * adjusts a CustomPath in place, reparameterize_path gives up on it), so the
+ * fields after cpath survive until intersect_plan_path.
+ */
+typedef struct IntersectPath
+{
+	CustomPath	cpath;
+	IntersectPlanInfo *info;
+} IntersectPath;
+
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
 
 static void intersect_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
@@ -590,7 +603,9 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 {
 	PlannerInfo *root = search->root;
 	RelOptInfo *rel = search->rel;
+	IntersectPath *ipath;
 	CustomPath *cpath;
+	IntersectPlanInfo *info;
 	ParamPathInfo *param_info = NULL;
 	Relids		required_outer = NULL;
 	double		group_bytes = 0;
@@ -627,7 +642,8 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 	if (!bms_is_empty(required_outer))
 		param_info = get_baserel_parampathinfo(root, rel, required_outer);
 
-	cpath = makeNode(CustomPath);
+	ipath = (IntersectPath *) newNode(sizeof(IntersectPath), T_CustomPath);
+	cpath = &ipath->cpath;
 
 	cpath->path.pathtype = T_CustomScan;
 	cpath->path.parent = rel;
@@ -646,47 +662,29 @@ build_intersect_path(IntersectSearch *search, IndexCandidate **streams,
 						   reads, ranks, fetch_cost);
 	lf_trace.sets++;
 
-	/*
-	 * A CustomPath has no custom_exprs; the value expressions and the index
-	 * predicates travel in custom_private and become the plan's custom_exprs
-	 * in intersect_plan_path, where createplan.c turns outer-relation Vars
-	 * into nestloop params and setrefs.c fixes up the rest.  The layout is
-	 * the PRIVATE_* and STREAM_* positions.
-	 */
-	cpath->custom_private =
-		list_make5(makeBoolConst(search->sort.descending, false),
-				   make_int4_const(nstreams),
-				   make_oid_const(search->sort.type),
-				   make_oid_const(search->sort.opfamily),
-				   make_oid_const(search->sort.collation));
-	cpath->custom_private = lappend(cpath->custom_private,
-									makeBoolConst(search->sort.nulls_first, false));
-	cpath->custom_private = lappend(cpath->custom_private,
-									makeBoolConst(search->sort.notnull, false));
+	info = palloc0(IntersectPlanInfoSize(nstreams));
+	info->descending = search->sort.descending;
+	info->sort_type = search->sort.type;
+	info->sort_opfamily = search->sort.opfamily;
+	info->sort_collation = search->sort.collation;
+	info->nulls_first = search->sort.nulls_first;
+	info->notnull = search->sort.notnull;
+	info->nstreams = nstreams;
 	for (int i = 0; i < nstreams; i++)
 	{
-		cpath->custom_private = lappend(cpath->custom_private,
-										make_oid_const(streams[i]->index->indexoid));
-		cpath->custom_private = lappend(cpath->custom_private,
-										make_int4_const(streams[i]->sortpos));
-		cpath->custom_private = lappend(cpath->custom_private,
-										make_float8_const(reads[i]));
-		cpath->custom_private = lappend(cpath->custom_private,
-										list_copy(streams[i]->operators));
-		cpath->custom_private = lappend(cpath->custom_private,
-										list_copy(streams[i]->collations));
-		cpath->custom_private = lappend(cpath->custom_private,
-										makeBoolConst(streams[i]->backward, false));
-		cpath->custom_private = lappend(cpath->custom_private,
-										make_int4_const(ranks[i]));
+		IntersectStreamInfo *stream = &info->streams[i];
+
+		stream->indexoid = streams[i]->index->indexoid;
+		stream->sortpos = streams[i]->sortpos;
+		stream->reads = reads[i];
+		stream->operators = list_copy(streams[i]->operators);
+		stream->collations = list_copy(streams[i]->collations);
+		stream->backward = streams[i]->backward;
+		stream->rank = ranks[i];
+		stream->keys = copyObject(streams[i]->exprs);
+		stream->pred = i > 0 ? copyObject(streams[i]->index->indpred) : NIL;
 	}
-	for (int i = 0; i < nstreams; i++)
-	{
-		cpath->custom_private = lappend(cpath->custom_private,
-										copyObject(streams[i]->exprs));
-		cpath->custom_private = lappend(cpath->custom_private,
-										i > 0 ? copyObject(streams[i]->index->indpred) : NIL);
-	}
+	ipath->info = info;
 
 	return cpath;
 }
@@ -1083,30 +1081,129 @@ find_index_info(RelOptInfo *rel, Oid indexoid)
 	return NULL;				/* keep compiler quiet */
 }
 
-static int
-path_nstreams(CustomPath *best_path)
+/*
+ * form_plan_info
+ *		Write the plan info into the lists of a CustomScan: the scalars and
+ *		OID lists into custom_private, the expression lists of each stream
+ *		into custom_exprs.  lf_deform_plan_info reads them in the same order;
+ *		the two are the only code that knows the layout.
+ */
+static void
+form_plan_info(IntersectPlanInfo *info, CustomScan *cscan)
 {
-	return DatumGetInt32(list_nth_node(Const, best_path->custom_private,
-									   PRIVATE_NSTREAMS)->constvalue);
+	List	   *private = NIL;
+	List	   *exprs = NIL;
+
+	private = lappend(private, makeBoolConst(info->descending, false));
+	private = lappend(private, make_oid_const(info->sort_type));
+	private = lappend(private, make_oid_const(info->sort_opfamily));
+	private = lappend(private, make_oid_const(info->sort_collation));
+	private = lappend(private, makeBoolConst(info->nulls_first, false));
+	private = lappend(private, makeBoolConst(info->notnull, false));
+	private = lappend(private, make_int4_const(info->nstreams));
+	for (int i = 0; i < info->nstreams; i++)
+	{
+		IntersectStreamInfo *stream = &info->streams[i];
+
+		private = lappend(private, make_oid_const(stream->indexoid));
+		private = lappend(private, make_int4_const(stream->sortpos));
+		private = lappend(private, make_float8_const(stream->reads));
+		private = lappend(private, list_copy(stream->operators));
+		private = lappend(private, list_copy(stream->collations));
+		private = lappend(private, makeBoolConst(stream->backward, false));
+		private = lappend(private, make_int4_const(stream->rank));
+		exprs = lappend(exprs, copyObject(stream->keys));
+		exprs = lappend(exprs, copyObject(stream->pred));
+	}
+
+	cscan->custom_private = private;
+	cscan->custom_exprs = exprs;
+
+#ifdef USE_ASSERT_CHECKING
+
+	/*
+	 * A plan is copied and, for a parallel worker or a cached plan, written
+	 * out and read back: custom_private must survive all of it.
+	 */
+	{
+		List	   *read = (List *) stringToNode(nodeToString(private));
+		List	   *copy = copyObject(read);
+
+		Assert(equal(copy, private));
+	}
+#endif
 }
 
-static Oid
-path_stream_oid(CustomPath *best_path, int stream)
+static Datum
+next_datum(List *list, int *pos)
 {
-	return DatumGetObjectId(list_nth_node(Const, best_path->custom_private,
-										  PRIVATE_COUNT +
-										  stream * STREAM_PRIVATE_COUNT +
-										  STREAM_PRIVATE_INDEX)->constvalue);
+	return list_nth_node(Const, list, (*pos)++)->constvalue;
 }
 
 static List *
-path_stream_exprs(CustomPath *best_path, int stream, int which)
+next_oids(List *list, int *pos)
 {
-	int			nstreams = path_nstreams(best_path);
+	List	   *oids = list_nth(list, (*pos)++);
 
-	return list_nth(best_path->custom_private,
-					PRIVATE_COUNT + nstreams * STREAM_PRIVATE_COUNT +
-					stream * STREAM_EXPRS_COUNT + which);
+	Assert(oids == NIL || IsA(oids, OidList));
+	return oids;
+}
+
+/*
+ * lf_deform_plan_info
+ *		Read back what form_plan_info wrote into the plan.  The expression
+ *		lists are those of the plan, fixed up by setrefs.c.
+ */
+IntersectPlanInfo *
+lf_deform_plan_info(CustomScan *cscan)
+{
+	List	   *private = cscan->custom_private;
+	List	   *exprs = cscan->custom_exprs;
+	IntersectPlanInfo *info;
+	bool		descending;
+	Oid			sort_type;
+	Oid			sort_opfamily;
+	Oid			sort_collation;
+	bool		nulls_first;
+	bool		notnull;
+	int			nstreams;
+	int			pos = 0;
+	int			epos = 0;
+
+	descending = DatumGetBool(next_datum(private, &pos));
+	sort_type = DatumGetObjectId(next_datum(private, &pos));
+	sort_opfamily = DatumGetObjectId(next_datum(private, &pos));
+	sort_collation = DatumGetObjectId(next_datum(private, &pos));
+	nulls_first = DatumGetBool(next_datum(private, &pos));
+	notnull = DatumGetBool(next_datum(private, &pos));
+	nstreams = DatumGetInt32(next_datum(private, &pos));
+
+	info = palloc0(IntersectPlanInfoSize(nstreams));
+	info->descending = descending;
+	info->sort_type = sort_type;
+	info->sort_opfamily = sort_opfamily;
+	info->sort_collation = sort_collation;
+	info->nulls_first = nulls_first;
+	info->notnull = notnull;
+	info->nstreams = nstreams;
+	for (int i = 0; i < nstreams; i++)
+	{
+		IntersectStreamInfo *stream = &info->streams[i];
+
+		stream->indexoid = DatumGetObjectId(next_datum(private, &pos));
+		stream->sortpos = DatumGetInt32(next_datum(private, &pos));
+		stream->reads = DatumGetFloat8(next_datum(private, &pos));
+		stream->operators = next_oids(private, &pos);
+		stream->collations = next_oids(private, &pos);
+		stream->backward = DatumGetBool(next_datum(private, &pos));
+		stream->rank = DatumGetInt32(next_datum(private, &pos));
+		stream->keys = list_nth(exprs, epos++);
+		stream->pred = list_nth(exprs, epos++);
+	}
+	Assert(pos == list_length(private));
+	Assert(epos == list_length(exprs));
+
+	return info;
 }
 
 /*
@@ -1162,21 +1259,20 @@ lf_node_quals(PlannerInfo *root, RelOptInfo *rel, IndexOptInfo **indexes,
 }
 
 static List *
-intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
+intersect_scan_qual(PlannerInfo *root, RelOptInfo *rel, IntersectPlanInfo *info,
 					List *clauses)
 {
-	int			nstreams = path_nstreams(best_path);
 	IndexOptInfo *indexes[INTERSECT_MAX_STREAMS];
 	List	   *exprs[INTERSECT_MAX_STREAMS];
 
-	for (int i = 0; i < nstreams; i++)
+	for (int i = 0; i < info->nstreams; i++)
 	{
-		indexes[i] = find_index_info(rel, path_stream_oid(best_path, i));
-		exprs[i] = path_stream_exprs(best_path, i, STREAM_EXPRS_KEYS);
+		indexes[i] = find_index_info(rel, info->streams[i].indexoid);
+		exprs[i] = info->streams[i].keys;
 	}
 
 	return extract_actual_clauses(lf_node_quals(root, rel, indexes, exprs,
-												nstreams, clauses),
+												info->nstreams, clauses),
 								  false);
 }
 
@@ -1193,16 +1289,13 @@ intersect_plan_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 					List *tlist, List *clauses, List *custom_plans)
 {
 	CustomScan *cscan = makeNode(CustomScan);
-	List	   *private = best_path->custom_private;
-	int			nconsts = PRIVATE_COUNT +
-		path_nstreams(best_path) * STREAM_PRIVATE_COUNT;
+	IntersectPlanInfo *info = ((IntersectPath *) best_path)->info;
 
 	cscan->scan.plan.targetlist = tlist;
-	cscan->scan.plan.qual = intersect_scan_qual(root, rel, best_path, clauses);
+	cscan->scan.plan.qual = intersect_scan_qual(root, rel, info, clauses);
 	cscan->scan.scanrelid = rel->relid;
 	cscan->flags = best_path->flags;
-	cscan->custom_private = list_truncate(list_copy(private), nconsts);
-	cscan->custom_exprs = list_copy_tail(private, nconsts);
+	form_plan_info(info, cscan);
 	cscan->custom_scan_tlist = NIL;
 	cscan->methods = &lf_scan_methods;
 
