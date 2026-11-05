@@ -102,4 +102,6 @@ the install script to `leapfrog--X.sql`, adds `leapfrog--PREV--X.sql`
 (empty when the SQL objects did not change), updates
 `tests/regress/expected/leapfrog_setup.out` and turns `Unreleased` into the version in
 CHANGELOG.md. Tag `vX` (annotated, message `leapfrog X`) only after CI is
-green on that commit, and only when asked.
+green on that commit, and only when asked. `make check-version` must pass on
+the release commit, and `make check-version RELEASE=1` after creating the tag
+locally and before pushing it.

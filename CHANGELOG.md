@@ -59,6 +59,15 @@ versions: [SemVer](https://semver.org/).
   <name>_N.out: <why>; remove when <condition>` in the test's header comment (Citus's
   rule). The five alternatives have that line now; in `.sql` tests it is echoed into
   their expected files. No server needed.
+- `make check-version` (`tests/scripts/check-version.sh`, after TimescaleDB's
+  `release_sanity.yml` and Citus's `check_migration_files.sh`, with the control file as the
+  source of truth as in pgaudit): `EXTVERSION` equals `default_version`, the install
+  script and the update script from the newest release tag exist and are in `DATA`,
+  `leapfrog_setup.out` shows the version, and `CHANGELOG.md` has `Unreleased`, the
+  version's section once it is newer than the newest tag, and a link per release.
+  `RELEASE=1` checks a release: `Unreleased` empty, `## [X] — date`, and the annotated tag
+  `vX` on `HEAD` with the message `leapfrog X`. It found the links of 0.0.5 missing at the
+  bottom of this file, now added.
 
 ### Fixed
 
@@ -646,7 +655,8 @@ output may still change.
   end of the `ExecScan` call. Replaced with `ExecQualAndReset`.
 - A shadowed variable declaration (`-Wshadow=compatible-local`).
 
-[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/ibrohim238/postgresql-leapfrog/compare/v0.0.1...v0.0.2

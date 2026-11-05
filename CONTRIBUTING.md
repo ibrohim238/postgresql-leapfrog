@@ -72,6 +72,17 @@ Every behaviour change comes with a test.
   from the newest tag and every older one that still has an update script;
   `UPGRADE_FROM="0.0.3 0.0.4"` picks the versions. A new SQL object goes into
   both `leapfrog--X.sql` and the update script, or this test fails.
+- Version numbers — `make check-version` (no server needed): `EXTVERSION`
+  equals `default_version` in `leapfrog.control`; `leapfrog--EXTVERSION.sql`
+  and the update script from the newest release tag below it exist and are in
+  `DATA`, as is every `leapfrog--*.sql`; `leapfrog_setup.out` shows
+  `EXTVERSION`; `CHANGELOG.md` has `## [Unreleased]`, entries there or a
+  `## [EXTVERSION]` section once `EXTVERSION` is newer than the newest tag,
+  and a link for every released section. Without tags (a shallow clone) the
+  tag checks are skipped with a notice. `make check-version RELEASE=1` checks
+  a release before its tag is pushed: `Unreleased` is empty,
+  `## [EXTVERSION] — YYYY-MM-DD` exists, and `vEXTVERSION` is an annotated tag
+  on `HEAD` with the message `leapfrog EXTVERSION`.
 - Concurrent scenarios — `tests/isolation/specs/<name>.spec` +
   `tests/isolation/expected/<name>.out`, and the name goes into `ISOLATION`.
   Every permutation must check the **result**, not just the absence of a

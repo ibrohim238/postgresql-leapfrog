@@ -17,6 +17,8 @@
 #   make installcheck-rerun   rerun the tests the last installcheck failed
 #   make check-tests    the test lists, the expected files and the
 #                       alternative outputs agree (no server needed)
+#   make check-version  the version numbers, scripts and CHANGELOG.md agree;
+#                       RELEASE=1 checks a release and its tag
 
 MODULE_big = leapfrog
 OBJS = \
@@ -114,8 +116,7 @@ endif
 
 # Convenience targets --------------------------------------------------------
 
-.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix
-.PHONY: test test-regress test-isolation check-tests installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix
+.PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix check-tests check-version
 
 test: installcheck
 
@@ -145,6 +146,12 @@ installcheck-rerun:
 # tests/scripts/check-tests.sh.
 check-tests:
 	bash tests/scripts/check-tests.sh
+
+# EXTVERSION, the control file, the install and update scripts, DATA,
+# leapfrog_setup's output and CHANGELOG.md agree; RELEASE=1 also checks the
+# state of a release and its tag.  See tests/scripts/check-version.sh.
+check-version:
+	bash tests/scripts/check-version.sh $(if $(RELEASE),--release)
 
 # A release renames the install script, so the earlier ones exist only at
 # their tags; see tests/scripts/upgrade-check.sh.

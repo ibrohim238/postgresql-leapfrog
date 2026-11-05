@@ -733,6 +733,7 @@ make test-regress          # tests/regress/sql/*.sql against tests/regress/expec
 make test-isolation        # tests/isolation/specs/*.spec only
 make pgindent              # core code style
 make check-tests           # test lists, expected files, alternative outputs (no server)
+make check-version         # EXTVERSION, control file, scripts, CHANGELOG.md agree
 make bench-smoke           # tiny run of the benchmark harness
 ```
 
