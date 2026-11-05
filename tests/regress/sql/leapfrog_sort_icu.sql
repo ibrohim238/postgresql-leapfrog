@@ -3,7 +3,8 @@
 --
 -- A sort column in an ICU collation, where the order differs from "C".  The
 -- test needs a UTF8 database and a server built with ICU, and stops without
--- them; leapfrog_sort_icu_1.out is that outcome.
+-- them.
+-- alternative output leapfrog_sort_icu_1.out: a database that is not UTF8 or a server without ICU, where the test stops; remove when the extension requires ICU
 --
 SELECT getdatabaseencoding() <> 'UTF8' OR NOT EXISTS (
 	SELECT FROM pg_collation WHERE collname = 'und-x-icu'

@@ -4,6 +4,8 @@
 # applies to the new row version under EvalPlanQual.  A row soft-deleted
 # while SELECT ... FOR UPDATE waits for it must be dropped, as by the stock
 # plan under the same interleaving.
+#
+# alternative output leapfrog_outer_partial_1.out: PostgreSQL 19 costs the two streams the other way round and makes lf_iso_op_product_id_kind the outer one; remove when PostgreSQL 19 is the oldest supported version or s2_plan no longer prints the stream order
 
 setup
 {

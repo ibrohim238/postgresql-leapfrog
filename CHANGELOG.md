@@ -51,6 +51,14 @@ versions: [SemVer](https://semver.org/).
   UPDATE`; the result must be the current version, with the objects of a fresh
   `CREATE EXTENSION`, and pass `leapfrog_setup`. Run in CI on PostgreSQL 18; see
   CONTRIBUTING.md.
+- `make check-tests` (`tests/scripts/check-tests.sh`, after Citus's
+  `check_all_tests_are_run.sh` and TimescaleDB's `check_orphaned_test_output_files.sh`):
+  fails when a `.sql` or `.spec` is not in `REGRESS`/`ISOLATION`, a listed name has no
+  file, an expected file belongs to no test, or an alternative output `<name>_N.out` is
+  identical to `<name>.out` or not explained by a line `-- alternative output
+  <name>_N.out: <why>; remove when <condition>` in the test's header comment (Citus's
+  rule). The five alternatives have that line now; in `.sql` tests it is echoed into
+  their expected files. No server needed.
 
 ### Fixed
 

@@ -732,6 +732,7 @@ make installcheck          # everything
 make test-regress          # tests/regress/sql/*.sql against tests/regress/expected/*.out only
 make test-isolation        # tests/isolation/specs/*.spec only
 make pgindent              # core code style
+make check-tests           # test lists, expected files, alternative outputs (no server)
 make bench-smoke           # tiny run of the benchmark harness
 ```
 

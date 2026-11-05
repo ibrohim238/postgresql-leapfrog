@@ -4,6 +4,7 @@
 -- Equality values that are not constants: query parameters of prepared
 -- statements, nestloop parameters from LATERAL and from join clauses, and
 -- repeated rescans of the node.
+-- alternative output leapfrog_parameters_1.out: PostgreSQL 19 names InitPlans (expr_1, minmax_1) and prints "Replaces:"; remove when PostgreSQL 19 is the oldest supported version
 --
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;

@@ -77,6 +77,10 @@ Every behaviour change comes with a test.
   Every permutation must check the **result**, not just the absence of a
   crash; for EvalPlanQual scenarios add a permutation with the stock plan
   under the same interleaving.
+- Test lists and expected files — `make check-tests` (no server needed): every `.sql` is in `REGRESS` and every `.spec` in `ISOLATION`, every
+  listed name has its file and `<name>.out`, every expected file belongs to a
+  test, and every alternative output is explained (below) and differs from
+  `<name>.out`.
 
 Updating expected output after an intended change:
 
@@ -87,10 +91,25 @@ make test-isolation; cp tests/isolation/results/<name>.out tests/isolation/expec
 
 Read the diffs in full: `tests/regress/regression.diffs`, `tests/isolation/regression.diffs`.
 
-`tests/regress/expected/<name>_1.out`, where it exists, is the same output under another
-server: `leapfrog_basic`, `leapfrog_parameters` and `leapfrog_mvcc` have one for
-the core `EXPLAIN` format of PostgreSQL 19, `leapfrog_sort_icu` for a database
-without ICU collations. A change to such a test changes both files.
+An alternative output `expected/<name>_N.out` (regression or isolation) is the
+same test under another server; `pg_regress` accepts whichever file matches.
+`leapfrog_basic`, `leapfrog_parameters` and `leapfrog_mvcc` have one for the
+`EXPLAIN` output and plans of PostgreSQL 19, `leapfrog_sort_icu` for a database
+without ICU, and the isolation test `leapfrog_outer_partial` for PostgreSQL 19,
+which makes the other index the outer stream. A change to such a test changes
+every file. Add an alternative only when the output cannot be made the same on
+both servers, and say in the header comment of the test (the comment and blank
+lines at the top of the `.sql` or `.spec`), on one line, why it exists and when
+it can be removed, after the rule of Citus:
+
+```
+-- alternative output <name>_N.out: <why>; remove when <condition>
+```
+
+with `#` in place of `--` in a `.spec`. `make check-tests` fails without that
+line, for a line naming a file that does not exist, and for an alternative
+identical to `<name>.out`. In a `.sql` the line is echoed into every expected
+file of the test.
 
 ### One test, repeated
 

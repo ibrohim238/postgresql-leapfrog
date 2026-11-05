@@ -15,6 +15,8 @@
 #                   run one test N times against a running server, stop at
 #                   the first failure (tests/scripts/run-one.sh)
 #   make installcheck-rerun   rerun the tests the last installcheck failed
+#   make check-tests    the test lists, the expected files and the
+#                       alternative outputs agree (no server needed)
 
 MODULE_big = leapfrog
 OBJS = \
@@ -113,6 +115,7 @@ endif
 # Convenience targets --------------------------------------------------------
 
 .PHONY: test test-regress test-isolation test-one installcheck-rerun installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix
+.PHONY: test test-regress test-isolation check-tests installcheck-upgrade bench bench-smoke docker-test pgindent pgindent-fix
 
 test: installcheck
 
@@ -137,6 +140,11 @@ test-one:
 # for more); see tests/scripts/rerun-failed.sh.
 installcheck-rerun:
 	$(RUN_ONE_ENV) bash tests/scripts/rerun-failed.sh -r '$(or $(REPEATS),1)'
+# Every test file is listed and has an expected file, every expected file has
+# a test, and every alternative output is explained; see
+# tests/scripts/check-tests.sh.
+check-tests:
+	bash tests/scripts/check-tests.sh
 
 # A release renames the install script, so the earlier ones exist only at
 # their tags; see tests/scripts/upgrade-check.sh.

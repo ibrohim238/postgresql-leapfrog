@@ -5,6 +5,7 @@
 -- (id) WHERE deleted_at IS NULL, and the mirror partial index for the
 -- deleted rows.  Results are compared with the standard plans through
 -- lf_check (EXCEPT ALL in both directions, plus the output order).
+-- alternative output leapfrog_basic_1.out: PostgreSQL 19 prints "Replaces:" under a dummy Result; remove when PostgreSQL 19 is the oldest supported version
 --
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;

@@ -6,6 +6,7 @@
 -- the row marks of SELECT FOR UPDATE and the EvalPlanQual recheck path on
 -- the node's own tuple.  Concurrent sessions are covered by the isolation
 -- tests in tests/isolation.
+-- alternative output leapfrog_mvcc_1.out: PostgreSQL 19 plans "= ANY (subquery)" with Unique and names it unnamed_subquery; remove when PostgreSQL 19 is the oldest supported version
 --
 LOAD 'leapfrog';
 SET max_parallel_workers_per_gather = 0;
